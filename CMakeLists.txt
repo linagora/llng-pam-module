@@ -31,6 +31,12 @@ set(PAM_MODULE_SOURCES
     src/pam_llng.c
     src/llng_client.c
     src/config.c
+    src/audit_log.c
+    src/rate_limiter.c
+    src/client_context.c
+    src/token_manager.c
+    src/notify.c
+    src/secret_store.c
 )
 
 if(ENABLE_CACHE)
@@ -117,11 +123,13 @@ set(CPACK_PACKAGE_CONTACT "LemonLDAP::NG team <lemonldap-ng@ow2.org>")
 
 # Debian package
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libpam0g, libcurl4, libjson-c5, libssl3, curl, jq")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "libkeyutils1")
 set(CPACK_DEBIAN_PACKAGE_SECTION "admin")
 
 # RPM package
-set(CPACK_RPM_PACKAGE_LICENSE "GPL-2.0")
+set(CPACK_RPM_PACKAGE_LICENSE "AGPL-3.0")
 set(CPACK_RPM_PACKAGE_GROUP "System Environment/Base")
 set(CPACK_RPM_PACKAGE_REQUIRES "pam, libcurl, json-c, openssl-libs, curl, jq")
+set(CPACK_RPM_PACKAGE_SUGGESTS "keyutils-libs")
 
 include(CPack)

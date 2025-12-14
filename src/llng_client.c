@@ -2,7 +2,7 @@
  * llng_client.c - HTTP client for LemonLDAP::NG PAM module
  *
  * Copyright (C) 2024 Linagora
- * License: GPL-2.0
+ * License: AGPL-3.0
  */
 
 #include <stdio.h>
