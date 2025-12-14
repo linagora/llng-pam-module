@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          libcurl4-openssl-dev \
+          libjson-c-dev \
+          libpam0g-dev \
+          curl \
+          jq
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --parallel
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure
+
+    - name: Check PAM module symbols
+      run: |
+        echo "Checking exported PAM symbols..."
+        nm -D build/pam_llng.so.* | grep -E "pam_sm_(authenticate|setcred|acct_mgmt)" || exit 1
+        echo "All required PAM symbols found"
+
+    - name: Verify enrollment script syntax
+      run: bash -n scripts/llng-pam-enroll
+
+  build-debug:
+    name: Build Debug with Sanitizers
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          libcurl4-openssl-dev \
+          libjson-c-dev \
+          libpam0g-dev
+
+    - name: Configure CMake with Debug and Sanitizers
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+
+    - name: Build
+      run: cmake --build build --parallel
+
+    - name: Run tests with sanitizers
+      run: |
+        cd build
+        ASAN_OPTIONS=detect_leaks=1 ctest --output-on-failure
+
+  package-deb:
+    name: Build Debian Package
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          libcurl4-openssl-dev \
+          libjson-c-dev \
+          libpam0g-dev
+
+    - name: Configure and build
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --parallel
+
+    - name: Create Debian package
+      run: |
+        cd build
+        cpack -G DEB
+
+    - name: Upload Debian package
+      uses: actions/upload-artifact@v4
+      with:
+        name: debian-package
+        path: build/*.deb
+        retention-days: 7
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run ShellCheck
+      uses: ludeeus/action-shellcheck@master
+      with:
+        scandir: './scripts'
+        severity: warning
