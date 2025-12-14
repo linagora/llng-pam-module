@@ -1,0 +1,92 @@
+.TH LLNG-PAM-ENROLL 8 "December 2024" "pam-llng 1.0.0" "System Administration"
+.SH NAME
+llng-pam-enroll \- Enroll a server with LemonLDAP::NG for PAM authentication
+.SH SYNOPSIS
+.B llng-pam-enroll
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B llng-pam-enroll
+uses the Device Authorization Grant (RFC 8628) to obtain a server token
+that allows the PAM module to check user authorizations against a
+LemonLDAP::NG server.
+.PP
+The enrollment process requires an administrator to authenticate on the
+LemonLDAP::NG portal and approve the server registration using a displayed
+verification code.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-portal " " \fIURL\fR
+LemonLDAP::NG portal URL (required if not in config file).
+.TP
+.BR \-c ", " \-\-client\-id " " \fIID\fR
+OIDC client ID. Default: pam-access
+.TP
+.BR \-s ", " \-\-client\-secret " " \fISECRET\fR
+OIDC client secret (required if not in config file).
+.TP
+.BR \-g ", " \-\-server\-group " " \fIGROUP\fR
+Server group name for authorization rules. Default: default
+.TP
+.BR \-t ", " \-\-token\-file " " \fIFILE\fR
+Where to save the server token. Default: /etc/security/pam_llng.token
+.TP
+.BR \-C ", " \-\-config " " \fIFILE\fR
+Read settings from config file. Default: /etc/security/pam_llng.conf
+.TP
+.BR \-k ", " \-\-insecure
+Skip SSL certificate verification.
+.TP
+.BR \-q ", " \-\-quiet
+Quiet mode (less output).
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.TP
+.BR \-V ", " \-\-version
+Show version and exit.
+.SH EXAMPLES
+.PP
+Enroll using settings from config file:
+.RS
+.nf
+sudo llng-pam-enroll
+.fi
+.RE
+.PP
+Enroll with explicit parameters:
+.RS
+.nf
+sudo llng-pam-enroll \-p https://auth.example.com \-s mysecret
+.fi
+.RE
+.PP
+Enroll to a specific server group:
+.RS
+.nf
+sudo llng-pam-enroll \-g production
+.fi
+.RE
+.SH FILES
+.TP
+.I /etc/security/pam_llng.conf
+Main configuration file for the PAM module.
+.TP
+.I /etc/security/pam_llng.token
+Server token file created by this script.
+.SH EXIT STATUS
+.TP
+.B 0
+Enrollment completed successfully.
+.TP
+.B 1
+Enrollment failed (missing parameters, network error, authorization denied, etc.)
+.SH SEE ALSO
+.BR pam_llng (8),
+.BR pam.d (5)
+.PP
+LemonLDAP::NG documentation: https://lemonldap-ng.org/
+.SH AUTHOR
+Xavier Guimard <xguimard@linagora.com>
+.SH COPYRIGHT
+Copyright (C) 2024 Linagora.
+License: AGPL-3.0+

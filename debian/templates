@@ -1,7 +1,6 @@
 Template: libpam-llng/pam-mode
 Type: select
 Choices: none, mode-a, mode-b, mode-c, mode-d
-Choices-fr.UTF-8: aucun, mode-a, mode-b, mode-c, mode-d
 Default: none
 _Description: PAM authentication mode for LemonLDAP::NG:
  Choose how to configure PAM authentication:
@@ -13,39 +12,23 @@ _Description: PAM authentication mode for LemonLDAP::NG:
   * mode-d: All methods (SSH keys, LLNG tokens, Unix passwords)
  .
  All modes require LLNG authorization to access this server.
-_Description-fr.UTF-8: Mode d'authentification PAM pour LemonLDAP::NG :
- Choisissez comment configurer l'authentification PAM :
- .
-  * aucun : Ne pas configurer PAM automatiquement
-  * mode-a : Token LLNG uniquement (le plus strict)
-  * mode-b : Token LLNG OU mot de passe Unix (fallback)
-  * mode-c : Clé SSH avec autorisation LLNG uniquement
-  * mode-d : Toutes les méthodes (clés SSH, tokens LLNG, mots de passe Unix)
- .
- Tous les modes requièrent une autorisation LLNG pour accéder à ce serveur.
 
 Template: libpam-llng/portal-url
 Type: string
 Default:
 _Description: LemonLDAP::NG portal URL:
  Enter the URL of your LemonLDAP::NG portal (e.g., https://auth.example.com).
-_Description-fr.UTF-8: URL du portail LemonLDAP::NG :
- Entrez l'URL de votre portail LemonLDAP::NG (ex: https://auth.example.com).
 
 Template: libpam-llng/client-id
 Type: string
 Default: pam-access
 _Description: OIDC client ID:
  Enter the OIDC client ID configured in LemonLDAP::NG for PAM access.
-_Description-fr.UTF-8: Identifiant client OIDC :
- Entrez l'identifiant client OIDC configuré dans LemonLDAP::NG pour l'accès PAM.
 
 Template: libpam-llng/client-secret
 Type: password
 _Description: OIDC client secret:
  Enter the client secret for the OIDC client.
-_Description-fr.UTF-8: Secret client OIDC :
- Entrez le secret du client OIDC.
 
 Template: libpam-llng/server-group
 Type: string
@@ -53,21 +36,13 @@ Default: default
 _Description: Server group name:
  Enter the server group name for authorization rules.
  This must match a group defined in LLNG's pamAccessServerGroups.
-_Description-fr.UTF-8: Nom du groupe de serveurs :
- Entrez le nom du groupe de serveurs pour les règles d'autorisation.
- Ce nom doit correspondre à un groupe défini dans pamAccessServerGroups de LLNG.
 
 Template: libpam-llng/configure-sudo
 Type: boolean
 Default: false
-_Description: Also configure PAM for sudo?
- Do you want to configure /etc/pam.d/sudo with LLNG authentication?
- .
- If unsure, select No. You can configure sudo manually later.
-_Description-fr.UTF-8: Configurer aussi PAM pour sudo ?
- Voulez-vous configurer /etc/pam.d/sudo avec l'authentification LLNG ?
- .
- En cas de doute, sélectionnez Non. Vous pourrez configurer sudo manuellement plus tard.
+_Description: Configure PAM for sudo?
+ Set this to true if you want to configure /etc/pam.d/sudo with LLNG
+ authentication. This allows using LLNG tokens for sudo commands.
 
 Template: libpam-llng/sudo-server-group
 Type: string
@@ -77,8 +52,3 @@ _Description: Server group name for sudo:
  .
  This allows different authorization rules for SSH access and sudo usage.
  Leave empty to use the same group as SSH.
-_Description-fr.UTF-8: Nom du groupe de serveurs pour sudo :
- Entrez le nom du groupe de serveurs pour les règles d'autorisation sudo.
- .
- Cela permet d'avoir des règles d'autorisation différentes pour l'accès SSH et l'utilisation de sudo.
- Laissez vide pour utiliser le même groupe que SSH.

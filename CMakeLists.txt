@@ -94,6 +94,11 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-enroll
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+# Install man page
+install(FILES ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8
+    DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
+)
+
 # Tests
 if(BUILD_TESTING)
     enable_testing()

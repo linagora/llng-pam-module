@@ -1,0 +1,143 @@
+# French translation of pam-llng debconf templates.
+# Copyright (C) 2024 Linagora
+# This file is distributed under the same license as the pam-llng package.
+# Xavier Guimard <xguimard@linagora.com>, 2024.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: pam-llng\n"
+"Report-Msgid-Bugs-To: pam-llng@packages.debian.org\n"
+"POT-Creation-Date: 2025-12-14 15:10+0100\n"
+"PO-Revision-Date: 2024-12-14 15:10+0100\n"
+"Last-Translator: Xavier Guimard <xguimard@linagora.com>\n"
+"Language-Team: French <debian-l10n-french@lists.debian.org>\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. Type: select
+#. Description
+#: ../templates:1001
+msgid "PAM authentication mode for LemonLDAP::NG:"
+msgstr "Mode d'authentification PAM pour LemonLDAP::NG :"
+
+#. Type: select
+#. Description
+#: ../templates:1001
+msgid "Choose how to configure PAM authentication:"
+msgstr "Choisissez comment configurer l'authentification PAM :"
+
+#. Type: select
+#. Description
+#: ../templates:1001
+msgid ""
+" * none: Do not configure PAM automatically\n"
+" * mode-a: LLNG token only (strictest)\n"
+" * mode-b: LLNG token OR Unix password (fallback)\n"
+" * mode-c: SSH key with LLNG authorization only\n"
+" * mode-d: All methods (SSH keys, LLNG tokens, Unix passwords)"
+msgstr ""
+" * none : Ne pas configurer PAM automatiquement\n"
+" * mode-a : Token LLNG uniquement (le plus strict)\n"
+" * mode-b : Token LLNG OU mot de passe Unix (fallback)\n"
+" * mode-c : Clé SSH avec autorisation LLNG uniquement\n"
+" * mode-d : Toutes les méthodes (clés SSH, tokens LLNG, mots de passe Unix)"
+
+#. Type: select
+#. Description
+#: ../templates:1001
+msgid "All modes require LLNG authorization to access this server."
+msgstr "Tous les modes requièrent une autorisation LLNG pour accéder à ce serveur."
+
+#. Type: string
+#. Description
+#: ../templates:2001
+msgid "LemonLDAP::NG portal URL:"
+msgstr "URL du portail LemonLDAP::NG :"
+
+#. Type: string
+#. Description
+#: ../templates:2001
+msgid ""
+"Enter the URL of your LemonLDAP::NG portal (e.g., https://auth.example.com)."
+msgstr ""
+"Entrez l'URL de votre portail LemonLDAP::NG (ex : https://auth.example.com)."
+
+#. Type: string
+#. Description
+#: ../templates:3001
+msgid "OIDC client ID:"
+msgstr "Identifiant client OIDC :"
+
+#. Type: string
+#. Description
+#: ../templates:3001
+msgid "Enter the OIDC client ID configured in LemonLDAP::NG for PAM access."
+msgstr "Entrez l'identifiant client OIDC configuré dans LemonLDAP::NG pour l'accès PAM."
+
+#. Type: password
+#. Description
+#: ../templates:4001
+msgid "OIDC client secret:"
+msgstr "Secret client OIDC :"
+
+#. Type: password
+#. Description
+#: ../templates:4001
+msgid "Enter the client secret for the OIDC client."
+msgstr "Entrez le secret du client OIDC."
+
+#. Type: string
+#. Description
+#: ../templates:5001
+msgid "Server group name:"
+msgstr "Nom du groupe de serveurs :"
+
+#. Type: string
+#. Description
+#: ../templates:5001
+msgid ""
+"Enter the server group name for authorization rules. This must match a group "
+"defined in LLNG's pamAccessServerGroups."
+msgstr ""
+"Entrez le nom du groupe de serveurs pour les règles d'autorisation. Ce nom "
+"doit correspondre à un groupe défini dans pamAccessServerGroups de LLNG."
+
+#. Type: boolean
+#. Description
+#: ../templates:6001
+msgid "Configure PAM for sudo?"
+msgstr "Configurer PAM pour sudo ?"
+
+#. Type: boolean
+#. Description
+#: ../templates:6001
+msgid ""
+"Set this to true if you want to configure /etc/pam.d/sudo with LLNG "
+"authentication. This allows using LLNG tokens for sudo commands."
+msgstr ""
+"Activez cette option si vous souhaitez configurer /etc/pam.d/sudo avec "
+"l'authentification LLNG. Cela permet d'utiliser les tokens LLNG pour les commandes sudo."
+
+#. Type: string
+#. Description
+#: ../templates:7001
+msgid "Server group name for sudo:"
+msgstr "Nom du groupe de serveurs pour sudo :"
+
+#. Type: string
+#. Description
+#: ../templates:7001
+msgid "Enter the server group name for sudo authorization rules."
+msgstr "Entrez le nom du groupe de serveurs pour les règles d'autorisation sudo."
+
+#. Type: string
+#. Description
+#: ../templates:7001
+msgid ""
+"This allows different authorization rules for SSH access and sudo usage. "
+"Leave empty to use the same group as SSH."
+msgstr ""
+"Cela permet d'avoir des règles d'autorisation différentes pour l'accès SSH "
+"et l'utilisation de sudo. Laissez vide pour utiliser le même groupe que SSH."
