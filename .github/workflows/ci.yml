@@ -121,6 +121,47 @@ jobs:
         path: build/*.deb
         retention-days: 7
 
+  build-rpm:
+    name: Build RPM (Rocky Linux ${{ matrix.version }})
+    runs-on: ubuntu-latest
+    needs: build
+    container: rockylinux:${{ matrix.version }}
+
+    strategy:
+      matrix:
+        version: [9]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        dnf install -y epel-release
+        dnf install -y \
+          cmake \
+          gcc \
+          make \
+          pam-devel \
+          libcurl-devel \
+          json-c-devel \
+          rpm-build
+
+    - name: Build RPM
+      run: |
+        mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+        tar czf ~/rpmbuild/SOURCES/pam-llng-1.0.0.tar.gz \
+          --transform 's,^,pam-llng-1.0.0/,' \
+          --exclude='.git' .
+        rpmbuild -ba rpm/pam-llng.spec
+
+    - name: Upload RPM package
+      uses: actions/upload-artifact@v4
+      with:
+        name: rpm-package-el${{ matrix.version }}
+        path: ~/rpmbuild/RPMS/*/*.rpm
+        retention-days: 7
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest

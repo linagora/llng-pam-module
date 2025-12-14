@@ -1,0 +1,25 @@
+Source: pam-llng
+Maintainer: Xavier Guimard <xguimard@linagora.com>
+Section: admin
+Priority: optional
+Standards-Version: 4.7.0
+Homepage: https://lemonldap-ng.org/
+Build-Depends: debhelper-compat (= 13)
+ , cmake
+ , libcurl4-openssl-dev
+ , libjson-c-dev
+ , libpam0g-dev
+ , pkgconf
+
+Package: libpam-llng
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${misc:Depends}
+ , ${shlibs:Depends}
+ , curl
+ , jq
+Description: PAM module for LemonLDAP::NG authentication
+ This PAM module enables Linux servers to authenticate users via
+ LemonLDAP::NG, supporting both token-based authentication and
+ key-based authorization with server groups support.
