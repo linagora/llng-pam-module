@@ -84,14 +84,25 @@ The script will:
 
 ### Step 3: Configure PAM for SSH
 
-Edit `/etc/pam.d/sshd`. The configuration depends on your authentication mode:
+Edit `/etc/pam.d/sshd`. The configuration depends on your authentication mode.
 
-#### Mode A: Token Authentication Only (Password)
+> **Important**: The configurations below have different security implications regarding
+> which authentication methods are accepted. Read the descriptions carefully.
 
-Users authenticate with LLNG tokens as passwords:
+#### Mode A: LLNG Token Only (Strictest)
+
+**Only LLNG tokens are accepted as passwords. Unix passwords are rejected.**
+
+This is the most secure mode: users must authenticate via LemonLDAP::NG.
 
 ```
 # /etc/pam.d/sshd
+#
+# AUTHENTICATION: Only LLNG tokens accepted
+# - Unix passwords: REJECTED
+# - LLNG tokens: ACCEPTED
+# - SSH keys: depends on sshd_config (PubkeyAuthentication)
+
 auth       sufficient   pam_llng.so
 auth       required     pam_deny.so
 
@@ -101,56 +112,130 @@ account    required     pam_unix.so
 session    required     pam_unix.so
 ```
 
-#### Mode B: SSH Key with LLNG Authorization
+#### Mode B: LLNG Token or Unix Password (Fallback)
 
-Users authenticate with SSH keys, LLNG checks authorization:
+**Both LLNG tokens AND traditional Unix passwords are accepted.**
 
-```
-# /etc/pam.d/sshd
-auth       required     pam_unix.so
-
-account    required     pam_llng.so
-account    required     pam_unix.so
-
-session    required     pam_unix.so
-```
-
-#### Mode C: Both Token and SSH Key (Recommended)
-
-Support both authentication methods:
+Useful for transition periods or when some users don't have LLNG accounts.
 
 ```
 # /etc/pam.d/sshd
+#
+# AUTHENTICATION: LLNG token OR unix password
+# - Unix passwords: ACCEPTED (fallback)
+# - LLNG tokens: ACCEPTED (tried first)
+# - SSH keys: depends on sshd_config
 
-# Authentication: try LLNG token first, fallback to unix password
 auth       sufficient   pam_llng.so
-auth       sufficient   pam_unix.so nullok
+auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 
-# Account: check LLNG authorization for all users
 account    required     pam_llng.so
 account    required     pam_unix.so
 
-# Session
 session    required     pam_unix.so
 ```
+
+#### Mode C: SSH Key with LLNG Authorization
+
+**SSH key authentication only, but LLNG checks if user is authorized.**
+
+Users authenticate with SSH keys. PAM doesn't handle password authentication,
+but LLNG verifies the user has permission to access this server.
+
+```
+# /etc/pam.d/sshd
+#
+# AUTHENTICATION: Handled by SSH keys (not PAM)
+# - Unix passwords: NOT USED (disable PasswordAuthentication in sshd_config)
+# - LLNG tokens: NOT USED
+# - SSH keys: REQUIRED
+#
+# AUTHORIZATION: LLNG checks if user can access this server
+
+auth       required     pam_permit.so
+
+account    required     pam_llng.so
+account    required     pam_unix.so
+
+session    required     pam_unix.so
+```
+
+For this mode, configure `/etc/ssh/sshd_config`:
+```
+PasswordAuthentication no
+PubkeyAuthentication yes
+```
+
+#### Mode D: All Methods with LLNG Authorization (Most Flexible)
+
+**SSH keys, LLNG tokens, AND Unix passwords all accepted. LLNG authorization required.**
+
+Maximum flexibility: any authentication method works, but users must be authorized
+in LLNG to access this server.
+
+```
+# /etc/pam.d/sshd
+#
+# AUTHENTICATION: Any method accepted
+# - Unix passwords: ACCEPTED
+# - LLNG tokens: ACCEPTED
+# - SSH keys: ACCEPTED (if enabled in sshd_config)
+#
+# AUTHORIZATION: LLNG checks if user can access this server
+
+auth       sufficient   pam_llng.so
+auth       sufficient   pam_unix.so nullok try_first_pass
+auth       required     pam_deny.so
+
+account    required     pam_llng.so
+account    required     pam_unix.so
+
+session    required     pam_unix.so
+```
+
+#### Summary Table
+
+| Mode | Unix Password | LLNG Token | SSH Key | LLNG Authorization |
+|------|---------------|------------|---------|-------------------|
+| A - LLNG Only | ❌ Rejected | ✅ Required | Optional* | ✅ Required |
+| B - LLNG + Unix | ✅ Fallback | ✅ Preferred | Optional* | ✅ Required |
+| C - SSH Key Only | ❌ Disabled | ❌ Not used | ✅ Required | ✅ Required |
+| D - All Methods | ✅ Accepted | ✅ Accepted | Optional* | ✅ Required |
+
+\* SSH key authentication depends on `PubkeyAuthentication` in sshd_config
 
 ### Step 4: Configure SSH Server
 
-Edit `/etc/ssh/sshd_config`:
+Edit `/etc/ssh/sshd_config` according to your chosen mode:
+
+#### For Mode A or B (Password/Token authentication)
 
 ```
-# Enable PAM
 UsePAM yes
-
-# For token authentication (Mode A or C)
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
+PubkeyAuthentication yes          # Optional: also allow SSH keys
+PermitEmptyPasswords no
+```
 
-# For SSH key authentication (Mode B or C)
+#### For Mode C (SSH Key only)
+
+```
+UsePAM yes
+PasswordAuthentication no         # Disable password authentication
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes          # SSH keys required
+PermitEmptyPasswords no
+```
+
+#### For Mode D (All methods)
+
+```
+UsePAM yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
 PubkeyAuthentication yes
-
-# Recommended: disable empty passwords
 PermitEmptyPasswords no
 ```
 
@@ -162,14 +247,18 @@ sudo systemctl restart sshd
 
 ### Step 5: Test
 
-Open a **new terminal** (keep current session open as backup) and test:
+**Important**: Open a **new terminal** and keep your current session open as backup!
 
 ```bash
-# Test with token
+# Test with LLNG token (Modes A, B, D)
 ssh user@server
 Password: <paste LLNG token from portal>
 
-# Test with SSH key
+# Test with Unix password (Modes B, D only)
+ssh user@server
+Password: <unix password>
+
+# Test with SSH key (Modes C, D, or any mode with PubkeyAuthentication yes)
 ssh -i ~/.ssh/id_rsa user@server
 ```
 
