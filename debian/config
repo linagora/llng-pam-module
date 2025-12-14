@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+. /usr/share/debconf/confmodule
+
+# Ask for PAM mode (medium priority)
+db_input medium libpam-llng/pam-mode || true
+db_go || true
+
+db_get libpam-llng/pam-mode
+MODE="$RET"
+
+# If a mode is selected, ask for LLNG parameters
+if [ "$MODE" != "none" ]; then
+    db_input high libpam-llng/portal-url || true
+    db_input medium libpam-llng/client-id || true
+    db_input high libpam-llng/client-secret || true
+    db_input low libpam-llng/server-group || true
+    db_input medium libpam-llng/configure-sudo || true
+    db_go || true
+
+    # If sudo is enabled, ask for sudo server group
+    db_get libpam-llng/configure-sudo
+    if [ "$RET" = "true" ]; then
+        db_input low libpam-llng/sudo-server-group || true
+        db_go || true
+    fi
+fi
+
+exit 0

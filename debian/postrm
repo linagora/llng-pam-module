@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e
+
+CONF_FILE="/etc/security/pam_llng.conf"
+BACKUP_DIR="/var/backups/libpam-llng"
+PAM_SSHD="/etc/pam.d/sshd"
+PAM_SUDO="/etc/pam.d/sudo"
+TOKEN_FILE="/etc/security/pam_llng.token"
+CACHE_DIR="/var/cache/pam_llng"
+
+case "$1" in
+    purge)
+        # Restore original PAM files from backups
+        if [ -f "$BACKUP_DIR/sshd.orig" ]; then
+            cp -a "$BACKUP_DIR/sshd.orig" "$PAM_SSHD"
+        fi
+        if [ -f "$BACKUP_DIR/sudo.orig" ]; then
+            cp -a "$BACKUP_DIR/sudo.orig" "$PAM_SUDO"
+        fi
+
+        # Remove backup directory
+        rm -rf "$BACKUP_DIR"
+
+        # Remove configuration files
+        rm -f "$CONF_FILE"
+        rm -f "$TOKEN_FILE"
+
+        # Remove cache directory
+        rm -rf "$CACHE_DIR"
+
+        # Purge debconf data
+        if [ -e /usr/share/debconf/confmodule ]; then
+            . /usr/share/debconf/confmodule
+            db_purge
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
