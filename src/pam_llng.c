@@ -103,7 +103,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         goto error;
     }
     if (config_result == -3) {
-        LLNG_LOG_ERR(pamh, "Security error: config file %s has insecure permissions (must be 0600)", config_file);
+        LLNG_LOG_ERR(pamh, "Security error: config file %s has insecure permissions (must be 0600 or 0700)", config_file);
         goto error;
     }
     if (config_result != 0) {
@@ -143,17 +143,20 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
     if (data->config.server_token_file) {
         /* Security check: verify token file permissions */
         struct stat st;
-        if (stat(data->config.server_token_file, &st) == 0) {
-            if (st.st_uid != 0) {
-                LLNG_LOG_ERR(pamh, "Security error: token file %s is not owned by root",
-                        data->config.server_token_file);
-                goto error;
-            }
-            if (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
-                LLNG_LOG_ERR(pamh, "Security error: token file %s has insecure permissions",
-                        data->config.server_token_file);
-                goto error;
-            }
+        if (stat(data->config.server_token_file, &st) != 0) {
+            LLNG_LOG_ERR(pamh, "Security error: cannot stat token file %s",
+                    data->config.server_token_file);
+            goto error;
+        }
+        if (st.st_uid != 0) {
+            LLNG_LOG_ERR(pamh, "Security error: token file %s is not owned by root",
+                    data->config.server_token_file);
+            goto error;
+        }
+        if (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
+            LLNG_LOG_ERR(pamh, "Security error: token file %s has insecure permissions",
+                    data->config.server_token_file);
+            goto error;
         }
 
         FILE *f = fopen(data->config.server_token_file, "r");

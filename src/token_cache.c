@@ -24,7 +24,7 @@
 /* Maximum number of cache entries to prevent DoS */
 #define MAX_CACHE_ENTRIES 10000
 
-/* SHA256 hash for cache keys - cryptographically secure (OpenSSL 3.0+ API) */
+/* SHA256 hash for cache keys - cryptographically secure (uses OpenSSL EVP API) */
 static void hash_token(const char *token, const char *user, char *out, size_t out_size)
 {
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
@@ -126,7 +126,7 @@ static void build_cache_path(token_cache_t *cache,
                              char *path,
                              size_t path_size)
 {
-    char hash[64];  /* SHA256 hex = 32 chars + null */
+    char hash[64];  /* SHA256 truncated to first 16 bytes = 32 hex chars + null */
     hash_token(token, user, hash, sizeof(hash));
     snprintf(path, path_size, "%s/%s.cache", cache->cache_dir, hash);
 }
