@@ -259,7 +259,9 @@ initiate_device_auth() {
     local response
     local http_code
 
-    response=$(curl $(curl_opts) -w "\n%{http_code}" \
+    local curl_options
+    curl_options=$(curl_opts)
+    response=$(curl $curl_options -w "\n%{http_code}" \
         -X POST "${PORTAL_URL}/oauth2/device" \
         -d "client_id=${CLIENT_ID}" \
         -d "scope=${SCOPE}" 2>&1) || {
@@ -322,13 +324,16 @@ display_instructions() {
 poll_for_token() {
     log_step "Waiting for administrator approval"
 
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     local end_time=$((start_time + TIMEOUT))
     local response
     local error
     local access_token
+    local now
 
-    while [ $(date +%s) -lt $end_time ]; do
+    now=$(date +%s)
+    while [ "$now" -lt $end_time ]; do
         # Show progress
         local elapsed=$(($(date +%s) - start_time))
         local remaining=$((TIMEOUT - elapsed))
@@ -339,7 +344,9 @@ poll_for_token() {
 
         sleep "$POLL_INTERVAL"
 
-        response=$(curl $(curl_opts) \
+        local curl_options
+        curl_options=$(curl_opts)
+        response=$(curl $curl_options \
             -X POST "${PORTAL_URL}/oauth2/token" \
             -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
             -d "device_code=${DEVICE_CODE}" \
@@ -384,6 +391,7 @@ poll_for_token() {
                 fi
                 ;;
         esac
+        now=$(date +%s)
     done
 
     echo ""
@@ -396,7 +404,8 @@ poll_for_token() {
 save_token() {
     log_step "Saving server token"
 
-    local token_dir=$(dirname "$TOKEN_FILE")
+    local token_dir
+    token_dir=$(dirname "$TOKEN_FILE")
 
     # Create directory if needed
     if [ ! -d "$token_dir" ]; then
@@ -429,7 +438,8 @@ save_token() {
 update_config() {
     if [ -f "$CONFIG_FILE" ] && [ "$(id -u)" = "0" ]; then
         # Check if server_group is already set
-        local current_group=$(read_config "server_group" "$CONFIG_FILE")
+        local current_group
+        current_group=$(read_config "server_group" "$CONFIG_FILE")
 
         if [ -z "$current_group" ] && [ "$SERVER_GROUP" != "default" ]; then
             log_info "Adding server_group to $CONFIG_FILE"
@@ -439,7 +449,8 @@ update_config() {
         fi
 
         # Ensure token_file is set
-        local current_token_file=$(read_config "server_token_file" "$CONFIG_FILE")
+        local current_token_file
+        current_token_file=$(read_config "server_token_file" "$CONFIG_FILE")
         if [ -z "$current_token_file" ]; then
             current_token_file=$(read_config "token_file" "$CONFIG_FILE")
         fi
@@ -456,27 +467,32 @@ verify_enrollment() {
     log_step "Verifying enrollment"
 
     local response
-    local hostname=$(hostname -f 2>/dev/null || hostname)
+    local the_hostname
+    the_hostname=$(hostname -f 2>/dev/null || hostname)
 
     # Try to call /pam/authorize to verify the token works
-    response=$(curl $(curl_opts) \
+    local curl_options
+    curl_options=$(curl_opts)
+    response=$(curl $curl_options \
         -X POST "${PORTAL_URL}/pam/authorize" \
         -H "Authorization: Bearer ${ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "{\"user\": \"__test__\", \"host\": \"${hostname}\", \"server_group\": \"${SERVER_GROUP}\"}" 2>&1) || {
+        -d "{\"user\": \"__test__\", \"host\": \"${the_hostname}\", \"server_group\": \"${SERVER_GROUP}\"}" 2>&1) || {
         log_warn "Could not verify enrollment (this may be normal)"
         return 0
     }
 
     # Check if we got a valid response (even if user not found)
-    local authorized=$(echo "$response" | jq -r '.authorized // empty' 2>/dev/null)
+    local authorized
+    authorized=$(echo "$response" | jq -r '.authorized // empty' 2>/dev/null)
 
     if [ "$authorized" = "true" ] || [ "$authorized" = "false" ]; then
         log_success "Server successfully enrolled and verified"
     else
-        local error=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
-        if [ -n "$error" ]; then
-            log_warn "Verification returned error: $error"
+        local err
+        err=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
+        if [ -n "$err" ]; then
+            log_warn "Verification returned error: $err"
         fi
     fi
 }
