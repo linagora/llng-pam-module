@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -379,7 +380,7 @@ static int count_and_cleanup_entries(token_cache_t *cache, int *removed)
             continue;
         }
 
-        char path[512];
+        char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", cache->cache_dir, entry->d_name);
 
         /* Quick expiration check: read only the first line (plaintext timestamp) */
@@ -390,7 +391,7 @@ static int count_and_cleanup_entries(token_cache_t *cache, int *removed)
             continue;
         }
 
-        char line[32];
+        char line[64];
         if (!fgets(line, sizeof(line), f)) {
             fclose(f);
             unlink(path);
@@ -398,6 +399,14 @@ static int count_and_cleanup_entries(token_cache_t *cache, int *removed)
             continue;
         }
         fclose(f);
+
+        /* Validate that we got a complete line with newline */
+        if (!strchr(line, '\n') && strlen(line) >= sizeof(line) - 1) {
+            /* Line too long - corrupted file */
+            unlink(path);
+            cleanup_count++;
+            continue;
+        }
 
         time_t expires_at;
         if (sscanf(line, "%ld", &expires_at) != 1) {
@@ -445,7 +454,7 @@ bool cache_lookup(token_cache_t *cache,
 
     memset(entry, 0, sizeof(*entry));
 
-    char path[512];
+    char path[PATH_MAX];
     build_cache_path(cache, token, user, path, sizeof(path));
 
     int fd = open(path, O_RDONLY);
@@ -463,8 +472,9 @@ bool cache_lookup(token_cache_t *cache,
     /*
      * New cache format: "expires_at\n" followed by payload.
      * Read expiration first to avoid decryption if expired.
+     * Buffer size 64 is sufficient for any time_t value plus newline.
      */
-    char expires_line[32];
+    char expires_line[64];
     ssize_t n = read(fd, expires_line, sizeof(expires_line) - 1);
     if (n <= 0) {
         close(fd);
@@ -476,7 +486,13 @@ bool cache_lookup(token_cache_t *cache,
     /* Parse expiration timestamp from first line */
     time_t expires_at;
     char *newline = strchr(expires_line, '\n');
-    if (!newline || sscanf(expires_line, "%ld", &expires_at) != 1) {
+    if (!newline) {
+        /* No newline found in buffer - malformed or corrupted file */
+        close(fd);
+        unlink(path);
+        return false;
+    }
+    if (sscanf(expires_line, "%ld", &expires_at) != 1) {
         close(fd);
         unlink(path);
         return false;
@@ -606,7 +622,7 @@ int cache_store(token_cache_t *cache,
         return -1;
     }
 
-    char path[512];
+    char path[PATH_MAX];
     build_cache_path(cache, token, user, path, sizeof(path));
 
     /* Build cache entry data */
@@ -637,7 +653,7 @@ int cache_store(token_cache_t *cache,
     }
 
     /* Use atomic write: write to temp file then rename */
-    char temp_path[520];
+    char temp_path[PATH_MAX + 8];  /* PATH_MAX + ".tmp" + margin */
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
 
     int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -795,7 +811,7 @@ void cache_invalidate_user(token_cache_t *cache, const char *user)
             continue;
         }
 
-        char path[512];
+        char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", cache->cache_dir, entry->d_name);
 
         char *data = NULL;
@@ -840,7 +856,7 @@ int cache_cleanup(token_cache_t *cache)
             continue;
         }
 
-        char path[512];
+        char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", cache->cache_dir, entry->d_name);
 
         char *data = NULL;

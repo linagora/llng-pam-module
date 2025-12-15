@@ -64,6 +64,9 @@ static void hash_key(const char *key, char *out, size_t out_size)
     if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
         EVP_DigestUpdate(ctx, key, strlen(key)) != 1 ||
         EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        /* Reset context after error to ensure it's usable for future operations */
+        EVP_MD_CTX_free(ctx);
+        ctx = NULL;
         out[0] = '\0';
         return;
     }

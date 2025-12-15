@@ -21,6 +21,9 @@
 #define TLS_VERSION_1_2 12
 #define TLS_VERSION_1_3 13
 
+/* Stack buffer size for HMAC signature message building */
+#define SIGNATURE_STACK_BUFFER_SIZE 512
+
 /* Thread-safe curl initialization */
 static pthread_once_t curl_init_once = PTHREAD_ONCE_INIT;
 static void curl_global_init_once(void)
@@ -129,7 +132,7 @@ static void generate_request_signature(const char *secret,
 
     /* Build message: timestamp.method.path.body
      * Use stack allocation for typical message sizes to avoid malloc overhead.
-     * Typical: timestamp(~10) + method(~4) + path(~50) + body(~200) < 512 bytes
+     * Typical: timestamp(~10) + method(~4) + path(~50) + body(~200) < SIGNATURE_STACK_BUFFER_SIZE
      */
     char ts_str[32];
     snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
@@ -138,7 +141,7 @@ static void generate_request_signature(const char *secret,
                      strlen(path) + 1 + (body ? strlen(body) : 0);
 
     /* Use stack buffer for small messages, heap for large ones */
-    char stack_message[512];
+    char stack_message[SIGNATURE_STACK_BUFFER_SIZE];
     char *message;
     bool heap_allocated = false;
 
