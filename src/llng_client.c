@@ -17,6 +17,10 @@
 
 #include "llng_client.h"
 
+/* TLS version constants for min_tls_version configuration */
+#define TLS_VERSION_1_2 12
+#define TLS_VERSION_1_3 13
+
 /* Thread-safe curl initialization */
 static pthread_once_t curl_init_once = PTHREAD_ONCE_INIT;
 static void curl_global_init_once(void)
@@ -312,7 +316,7 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
     client->verify_ssl = config->verify_ssl;
     client->ca_cert = strdup_or_null(config->ca_cert);
     client->signing_secret = strdup_or_null(config->signing_secret);
-    client->min_tls_version = config->min_tls_version > 0 ? config->min_tls_version : 13;
+    client->min_tls_version = config->min_tls_version > 0 ? config->min_tls_version : TLS_VERSION_1_3;
     client->cert_pin = strdup_or_null(config->cert_pin);
 
     return client;
@@ -371,10 +375,10 @@ static void setup_curl(llng_client_t *client)
     /* Set minimum TLS version (default: TLS 1.3) */
     long ssl_version;
     switch (client->min_tls_version) {
-        case 12:
+        case TLS_VERSION_1_2:
             ssl_version = CURL_SSLVERSION_TLSv1_2;
             break;
-        case 13:
+        case TLS_VERSION_1_3:
         default:
             ssl_version = CURL_SSLVERSION_TLSv1_3;
             break;

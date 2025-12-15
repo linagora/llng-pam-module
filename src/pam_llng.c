@@ -43,6 +43,9 @@
 /* Module data key for storing client between calls */
 #define PAM_LLNG_DATA "pam_llng_data"
 
+/* Time constants */
+#define SECONDS_PER_DAY 86400
+
 /* Internal data structure */
 typedef struct {
     pam_llng_config_t config;
@@ -925,7 +928,7 @@ static int create_unix_user(pam_handle_t *pamh,
 
     /* Write to /etc/shadow (locked password - login via PAM only) */
     /* Format: username:!:days_since_epoch:0:99999:7::: */
-    long days = time(NULL) / 86400;
+    long days = time(NULL) / SECONDS_PER_DAY;
     if (fprintf(shadow_file, "%s:!:%ld:0:99999:7:::\n", user, days) < 0) {
         LLNG_LOG_ERR(pamh, "Cannot write to /etc/shadow: %s", strerror(errno));
         /* passwd was written but shadow failed - attempt rollback via userdel */

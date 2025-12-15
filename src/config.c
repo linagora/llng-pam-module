@@ -49,6 +49,10 @@ static int check_file_permissions(const char *filename)
 #define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/pam_llng/ratelimit"
 #define DEFAULT_KEYRING_NAME            "pam_llng"
 
+/* TLS version constants for min_tls_version configuration */
+#define TLS_VERSION_1_2 12
+#define TLS_VERSION_1_3 13
+
 void config_init(pam_llng_config_t *config)
 {
     memset(config, 0, sizeof(*config));
@@ -57,7 +61,7 @@ void config_init(pam_llng_config_t *config)
     config->timeout = DEFAULT_TIMEOUT;
     config->verify_ssl = true;
     config->log_level = 1;  /* warn */
-    config->min_tls_version = 13;  /* TLS 1.3 by default */
+    config->min_tls_version = TLS_VERSION_1_3;  /* TLS 1.3 by default */
 
     /* Cache settings */
     config->cache_enabled = true;
@@ -239,8 +243,8 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     else if (strcmp(key, "min_tls_version") == 0) {
         config->min_tls_version = atoi(value);
         /* Normalize: accept 1.2, 1.3, 12, 13 */
-        if (config->min_tls_version == 1) config->min_tls_version = 12;  /* "1" -> 1.2 legacy */
-        else if (config->min_tls_version < 12) config->min_tls_version = 13;  /* Invalid -> default */
+        if (config->min_tls_version == 1) config->min_tls_version = TLS_VERSION_1_2;  /* "1" -> 1.2 legacy */
+        else if (config->min_tls_version < TLS_VERSION_1_2) config->min_tls_version = TLS_VERSION_1_3;  /* Invalid -> default */
     }
     else if (strcmp(key, "cert_pin") == 0) {
         free(config->cert_pin);
