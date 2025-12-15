@@ -459,7 +459,8 @@ int secret_store_delete(secret_store_t *store, const char *key)
         if (fstat(fd, &st) == 0 && st.st_size > 0) {
             char *zeros = calloc(1, st.st_size);
             if (zeros) {
-                write(fd, zeros, st.st_size);
+                ssize_t ret = write(fd, zeros, st.st_size);
+                (void)ret;  /* Best effort secure deletion */
                 free(zeros);
             }
         }

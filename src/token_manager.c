@@ -208,23 +208,65 @@ int token_manager_refresh(token_manager_t *tm,
 
     /* Build token endpoint URL */
     char url[512];
-    snprintf(url, sizeof(url), "%s/oauth2/token", tm->config.portal_url);
+    int url_len = snprintf(url, sizeof(url), "%s/oauth2/token", tm->config.portal_url);
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token refresh failed: URL too long");
+        return -1;
+    }
+
+    /* URL-encode parameters */
+    char *encoded_refresh = curl_easy_escape(tm->curl, refresh_token, 0);
+    char *encoded_client_id = curl_easy_escape(tm->curl, tm->config.client_id, 0);
+    char *encoded_secret = NULL;
+
+    if (!encoded_refresh || !encoded_client_id) {
+        curl_free(encoded_refresh);
+        curl_free(encoded_client_id);
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token refresh failed: URL encoding failed");
+        return -1;
+    }
 
     /* Build POST data */
-    char post_data[2048];
+    char post_data[4096];
     int len = snprintf(post_data, sizeof(post_data),
                        "grant_type=refresh_token&refresh_token=%s&client_id=%s",
-                       refresh_token, tm->config.client_id);
+                       encoded_refresh, encoded_client_id);
+
+    curl_free(encoded_refresh);
+    curl_free(encoded_client_id);
+
+    if (len < 0 || (size_t)len >= sizeof(post_data)) {
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token refresh failed: POST data too long");
+        return -1;
+    }
 
     if (tm->config.client_secret) {
-        len += snprintf(post_data + len, sizeof(post_data) - len,
-                        "&client_secret=%s", tm->config.client_secret);
+        encoded_secret = curl_easy_escape(tm->curl, tm->config.client_secret, 0);
+        if (!encoded_secret) {
+            snprintf(tm->error_buf, sizeof(tm->error_buf),
+                     "Token refresh failed: URL encoding failed");
+            return -1;
+        }
+        int add_len = snprintf(post_data + len, sizeof(post_data) - len,
+                               "&client_secret=%s", encoded_secret);
+        curl_free(encoded_secret);
+        if (add_len < 0 || (size_t)add_len >= sizeof(post_data) - len) {
+            explicit_bzero(post_data, sizeof(post_data));
+            snprintf(tm->error_buf, sizeof(tm->error_buf),
+                     "Token refresh failed: POST data too long");
+            return -1;
+        }
+        len += add_len;
     }
 
     /* Request rotation if configured */
     if (tm->config.rotate_refresh) {
-        snprintf(post_data + len, sizeof(post_data) - len,
-                 "&rotate_refresh_token=1");
+        int add_len = snprintf(post_data + len, sizeof(post_data) - len,
+                               "&rotate_refresh_token=1");
+        if (add_len > 0) len += add_len;
     }
 
     /* Setup curl */
@@ -292,17 +334,56 @@ int token_manager_introspect(token_manager_t *tm,
 
     /* Build introspection endpoint URL */
     char url[512];
-    snprintf(url, sizeof(url), "%s/oauth2/introspect", tm->config.portal_url);
+    int url_len = snprintf(url, sizeof(url), "%s/oauth2/introspect", tm->config.portal_url);
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token introspection failed: URL too long");
+        return -1;
+    }
+
+    /* URL-encode parameters */
+    char *encoded_token = curl_easy_escape(tm->curl, access_token, 0);
+    char *encoded_client_id = curl_easy_escape(tm->curl, tm->config.client_id, 0);
+
+    if (!encoded_token || !encoded_client_id) {
+        curl_free(encoded_token);
+        curl_free(encoded_client_id);
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token introspection failed: URL encoding failed");
+        return -1;
+    }
 
     /* Build POST data */
     char post_data[4096];
     int len = snprintf(post_data, sizeof(post_data),
                        "token=%s&client_id=%s",
-                       access_token, tm->config.client_id);
+                       encoded_token, encoded_client_id);
+
+    curl_free(encoded_token);
+    curl_free(encoded_client_id);
+
+    if (len < 0 || (size_t)len >= sizeof(post_data)) {
+        snprintf(tm->error_buf, sizeof(tm->error_buf),
+                 "Token introspection failed: POST data too long");
+        return -1;
+    }
 
     if (tm->config.client_secret) {
-        snprintf(post_data + len, sizeof(post_data) - len,
-                 "&client_secret=%s", tm->config.client_secret);
+        char *encoded_secret = curl_easy_escape(tm->curl, tm->config.client_secret, 0);
+        if (!encoded_secret) {
+            snprintf(tm->error_buf, sizeof(tm->error_buf),
+                     "Token introspection failed: URL encoding failed");
+            return -1;
+        }
+        int add_len = snprintf(post_data + len, sizeof(post_data) - len,
+                               "&client_secret=%s", encoded_secret);
+        curl_free(encoded_secret);
+        if (add_len < 0 || (size_t)add_len >= sizeof(post_data) - len) {
+            explicit_bzero(post_data, sizeof(post_data));
+            snprintf(tm->error_buf, sizeof(tm->error_buf),
+                     "Token introspection failed: POST data too long");
+            return -1;
+        }
     }
 
     /* Setup curl */

@@ -297,7 +297,12 @@ int rate_limiter_cleanup(rate_limiter_t *rl)
     struct dirent *entry;
 
     while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, ".state") == NULL) {
+        /* Check if filename ends with ".state" */
+        size_t name_len = strlen(entry->d_name);
+        const char *suffix = ".state";
+        size_t suffix_len = 6;
+        if (name_len < suffix_len ||
+            strcmp(entry->d_name + name_len - suffix_len, suffix) != 0) {
             continue;
         }
 

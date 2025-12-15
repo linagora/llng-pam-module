@@ -65,16 +65,16 @@ void audit_generate_correlation_id(char *buf, size_t buf_size)
     FILE *f = fopen("/dev/urandom", "r");
     if (f) {
         if (fread(uuid, 1, 16, f) != 16) {
-            /* Fallback to time-based pseudo-random */
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            unsigned long seed = ts.tv_sec ^ ts.tv_nsec ^ getpid();
-            for (int i = 0; i < 16; i++) {
-                seed = seed * 1103515245 + 12345;
-                uuid[i] = (seed >> 16) & 0xFF;
-            }
+            /* Failed to read enough random bytes - do not generate UUID */
+            fclose(f);
+            buf[0] = '\0';
+            return;
         }
         fclose(f);
+    } else {
+        /* /dev/urandom unavailable - do not generate UUID */
+        buf[0] = '\0';
+        return;
     }
 
     /* Set version (4) and variant bits */
@@ -349,8 +349,9 @@ int audit_log_event(audit_context_t *ctx, const audit_event_t *event)
 
         int fd = open(ctx->config.log_file, O_WRONLY | O_APPEND | O_CREAT, 0640);
         if (fd >= 0) {
-            /* Ensure proper ownership for log file */
-            write(fd, json_line, strlen(json_line));
+            /* Write and ignore result - audit logging should not fail auth */
+            ssize_t ret = write(fd, json_line, strlen(json_line));
+            (void)ret;  /* Intentionally ignore write errors for audit */
             close(fd);
         }
 
