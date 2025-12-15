@@ -63,6 +63,7 @@ void config_init(pam_llng_config_t *config)
     config->cache_ttl = DEFAULT_CACHE_TTL;
     config->cache_ttl_high_risk = DEFAULT_CACHE_TTL_HIGH_RISK;
     config->cache_dir = strdup(DEFAULT_CACHE_DIR);
+    config->cache_encrypted = true;  /* Encrypted by default */
 
     /* Server settings */
     config->server_group = strdup(DEFAULT_SERVER_GROUP);
@@ -246,6 +247,9 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     else if (strcmp(key, "high_risk_services") == 0) {
         free(config->high_risk_services);
         config->high_risk_services = strdup(value);
+    }
+    else if (strcmp(key, "cache_encrypted") == 0) {
+        config->cache_encrypted = parse_bool(value);
     }
     /* Authorization mode */
     else if (strcmp(key, "authorize_only") == 0) {
@@ -460,6 +464,9 @@ int config_parse_args(int argc, const char **argv, pam_llng_config_t *config)
         }
         else if (strcmp(arg, "no_cache") == 0 || strcmp(arg, "nocache") == 0) {
             config->cache_enabled = false;
+        }
+        else if (strcmp(arg, "no_cache_encrypt") == 0 || strcmp(arg, "nocacheencrypt") == 0) {
+            config->cache_encrypted = false;
         }
         else if (strcmp(arg, "no_verify_ssl") == 0 || strcmp(arg, "insecure") == 0) {
             config->verify_ssl = false;

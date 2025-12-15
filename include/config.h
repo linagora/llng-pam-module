@@ -32,6 +32,7 @@ typedef struct {
     int cache_ttl;           /* Cache TTL in seconds (default: 300) */
     int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
     char *high_risk_services; /* Comma-separated list of high-risk PAM services */
+    bool cache_encrypted;    /* Encrypt cache files with AES-256-GCM (default: true) */
 
     /* Authorization mode */
     bool authorize_only;     /* Only check authorization, no password (for SSH keys) */
