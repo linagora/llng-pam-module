@@ -35,6 +35,7 @@ typedef struct {
     int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
     char *high_risk_services; /* Comma-separated list of high-risk PAM services */
     bool cache_encrypted;    /* Encrypt cache files with AES-256-GCM (default: true) */
+    bool cache_invalidate_on_logout; /* Invalidate cache when session closes (default: true) */
 
     /* Authorization mode */
     bool authorize_only;     /* Only check authorization, no password (for SSH keys) */
@@ -126,6 +127,13 @@ int config_validate_shell(const char *shell, const char *approved_shells);
  * Returns 0 if valid, -1 if invalid
  */
 int config_validate_home(const char *home, const char *approved_prefixes);
+
+/*
+ * Validate skeleton directory path
+ * Must be absolute, owned by root, no symlinks in path
+ * Returns 0 if valid, -1 if invalid
+ */
+int config_validate_skel(const char *skel_path);
 
 /* Default approved shells */
 #define DEFAULT_APPROVED_SHELLS "/bin/bash:/bin/sh:/usr/bin/bash:/usr/bin/sh:/bin/zsh:/usr/bin/zsh:/bin/dash:/usr/bin/dash:/bin/fish:/usr/bin/fish"

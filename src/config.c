@@ -65,6 +65,7 @@ void config_init(pam_llng_config_t *config)
     config->cache_ttl_high_risk = DEFAULT_CACHE_TTL_HIGH_RISK;
     config->cache_dir = strdup(DEFAULT_CACHE_DIR);
     config->cache_encrypted = true;  /* Encrypted by default */
+    config->cache_invalidate_on_logout = true;  /* Invalidate on logout by default */
 
     /* Server settings */
     config->server_group = strdup(DEFAULT_SERVER_GROUP);
@@ -265,6 +266,9 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     }
     else if (strcmp(key, "cache_encrypted") == 0) {
         config->cache_encrypted = parse_bool(value);
+    }
+    else if (strcmp(key, "cache_invalidate_on_logout") == 0) {
+        config->cache_invalidate_on_logout = parse_bool(value);
     }
     /* Authorization mode */
     else if (strcmp(key, "authorize_only") == 0) {
@@ -690,5 +694,59 @@ int config_validate_home(const char *home, const char *approved_prefixes)
     }
 
     free(list_copy);
+    return found ? 0 : -1;
+}
+
+int config_validate_skel(const char *skel_path)
+{
+    if (!skel_path || !*skel_path) return -1;
+
+    /* Must be absolute path */
+    if (skel_path[0] != '/') return -1;
+
+    /* Check for dangerous patterns */
+    if (strstr(skel_path, "..") != NULL) return -1;
+    if (strstr(skel_path, "//") != NULL) return -1;
+
+    /* Check if path exists and is a directory */
+    struct stat st;
+    if (lstat(skel_path, &st) != 0) {
+        return -1;  /* Path doesn't exist or can't be accessed */
+    }
+
+    /* Must be a directory */
+    if (!S_ISDIR(st.st_mode)) {
+        return -1;
+    }
+
+    /* Must not be a symlink (lstat returns the link itself, not target) */
+    if (S_ISLNK(st.st_mode)) {
+        return -1;
+    }
+
+    /* Should be owned by root for security */
+    if (st.st_uid != 0) {
+        return -1;
+    }
+
+    /* Must be an approved path (only /etc/skel, /usr/share/skel, etc.) */
+    const char *approved_skel_prefixes[] = {
+        "/etc/skel",
+        "/usr/share/skel",
+        "/usr/local/etc/skel",
+        NULL
+    };
+
+    int found = 0;
+    for (int i = 0; approved_skel_prefixes[i] != NULL; i++) {
+        if (strcmp(skel_path, approved_skel_prefixes[i]) == 0 ||
+            (strncmp(skel_path, approved_skel_prefixes[i],
+                     strlen(approved_skel_prefixes[i])) == 0 &&
+             skel_path[strlen(approved_skel_prefixes[i])] == '/')) {
+            found = 1;
+            break;
+        }
+    }
+
     return found ? 0 : -1;
 }

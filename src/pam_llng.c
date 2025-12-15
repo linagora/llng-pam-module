@@ -930,16 +930,22 @@ static int create_unix_user(pam_handle_t *pamh,
         LLNG_LOG_WARN(pamh, "Cannot create home directory %s: %s", home_dir, strerror(errno));
         /* Continue anyway - user is created */
     } else {
-        /* Copy skeleton files if configured */
+        /* Copy skeleton files if configured and validated */
         if (config->create_user_skel && access(config->create_user_skel, R_OK) == 0) {
-            pid_t pid = fork();
-            if (pid == 0) {
-                /* Child: copy skel contents */
-                execl("/bin/cp", "cp", "-rT", config->create_user_skel, home_dir, NULL);
-                _exit(127);
-            } else if (pid > 0) {
-                int status;
-                waitpid(pid, &status, 0);
+            /* Validate skel path for security */
+            if (config_validate_skel(config->create_user_skel) == 0) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    /* Child: copy skel contents */
+                    execl("/bin/cp", "cp", "-rT", config->create_user_skel, home_dir, NULL);
+                    _exit(127);
+                } else if (pid > 0) {
+                    int status;
+                    waitpid(pid, &status, 0);
+                }
+            } else {
+                LLNG_LOG_WARN(pamh, "Skel path validation failed for %s, skipping",
+                              config->create_user_skel);
             }
         }
 
@@ -1055,16 +1061,39 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
 }
 
 /*
- * pam_sm_close_session - Close session (no-op)
+ * pam_sm_close_session - Close session
+ *
+ * If cache_invalidate_on_logout is enabled, invalidates the user's
+ * cached tokens to ensure re-authentication on next login.
  */
 PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
                                      int flags,
                                      int argc,
                                      const char **argv)
 {
-    (void)pamh;
     (void)flags;
-    (void)argc;
-    (void)argv;
+
+    const char *user = NULL;
+    int ret;
+
+    /* Get username */
+    ret = pam_get_user(pamh, &user, NULL);
+    if (ret != PAM_SUCCESS || !user || !*user) {
+        /* Can't get user, nothing to invalidate */
+        return PAM_SUCCESS;
+    }
+
+    /* Initialize module to access cache */
+    pam_llng_data_t *data = get_module_data(pamh, argc, argv);
+    if (!data) {
+        return PAM_SUCCESS;  /* No config, nothing to do */
+    }
+
+    /* Invalidate cache for this user if configured */
+    if (data->config.cache_invalidate_on_logout && data->cache) {
+        LLNG_LOG_DEBUG(pamh, "Invalidating cache for user %s on session close", user);
+        cache_invalidate_user(data->cache, user);
+    }
+
     return PAM_SUCCESS;
 }
