@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -253,9 +254,16 @@ int rate_limiter_record_failure(rate_limiter_t *rl, const char *key)
             multiplier *= rl->config.backoff_multiplier;
         }
 
-        int lockout_duration = (int)(rl->config.initial_lockout_sec * multiplier);
-        if (lockout_duration > rl->config.max_lockout_sec) {
+        /* Compute lockout duration with explicit overflow protection */
+        double duration_d = (double)rl->config.initial_lockout_sec * multiplier;
+        int lockout_duration;
+
+        if (duration_d > (double)rl->config.max_lockout_sec) {
             lockout_duration = rl->config.max_lockout_sec;
+        } else if (duration_d > (double)INT_MAX) {
+            lockout_duration = rl->config.max_lockout_sec;
+        } else {
+            lockout_duration = (int)duration_d;
         }
 
         state.lockout_until = now + lockout_duration;

@@ -10,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 
 #include "secret_store.h"
 
@@ -35,12 +37,43 @@ static void setup(void)
     mkdir(test_store_dir, 0700);
 }
 
+/* Recursively remove directory - safe alternative to system("rm -rf") */
+static int remove_directory(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) {
+        if (errno == ENOENT) return 0;  /* Already gone */
+        return -1;
+    }
+
+    struct dirent *entry;
+    char filepath[512];
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(filepath, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                remove_directory(filepath);
+            } else {
+                unlink(filepath);
+            }
+        }
+    }
+
+    closedir(dir);
+    return rmdir(path);
+}
+
 /* Cleanup test directory */
 static void cleanup(void)
 {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_store_dir);
-    system(cmd);
+    remove_directory(test_store_dir);
 }
 
 /* Test initialization */

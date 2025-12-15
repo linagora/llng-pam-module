@@ -144,25 +144,43 @@ int notify_send_json(notify_context_t *ctx, const char *json_payload)
 
     /* Add HMAC signature header if secret is configured */
     if (ctx->config.hmac_secret) {
-        char signature[65];
-        generate_signature(ctx->config.hmac_secret, json_payload,
-                          signature, sizeof(signature));
-
-        char sig_header[128];
-        snprintf(sig_header, sizeof(sig_header), "X-Signature-256: sha256=%s", signature);
-        headers = curl_slist_append(headers, sig_header);
-
         /*
-         * X-Timestamp header for replay attack protection.
-         * Webhook receivers SHOULD:
+         * Include timestamp in HMAC for replay attack protection.
+         * Signature is computed as: HMAC-SHA256(secret, timestamp + "." + body)
+         * This binds the timestamp to the payload, preventing replay attacks.
+         *
+         * Webhook receivers MUST:
          * 1. Reject requests with timestamps older than a threshold (e.g., 5 minutes)
-         * 2. Include the timestamp in the HMAC verification:
-         *    expected_sig = HMAC-SHA256(secret, timestamp + "." + body)
-         * This prevents replay attacks where old valid payloads are resent.
+         * 2. Verify signature using: HMAC-SHA256(secret, X-Timestamp + "." + body)
          */
-        char ts_header[64];
-        snprintf(ts_header, sizeof(ts_header), "X-Timestamp: %ld", (long)time(NULL));
-        headers = curl_slist_append(headers, ts_header);
+        long timestamp = (long)time(NULL);
+        char ts_str[32];
+        snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
+
+        /* Build signed message: timestamp.payload */
+        size_t ts_len = strlen(ts_str);
+        size_t payload_len = strlen(json_payload);
+        size_t signed_msg_len = ts_len + 1 + payload_len;
+        char *signed_msg = malloc(signed_msg_len + 1);
+
+        if (signed_msg) {
+            memcpy(signed_msg, ts_str, ts_len);
+            signed_msg[ts_len] = '.';
+            memcpy(signed_msg + ts_len + 1, json_payload, payload_len + 1);
+
+            char signature[65];
+            generate_signature(ctx->config.hmac_secret, signed_msg,
+                              signature, sizeof(signature));
+            free(signed_msg);
+
+            char sig_header[128];
+            snprintf(sig_header, sizeof(sig_header), "X-Signature-256: sha256=%s", signature);
+            headers = curl_slist_append(headers, sig_header);
+
+            char ts_header[64];
+            snprintf(ts_header, sizeof(ts_header), "X-Timestamp: %ld", timestamp);
+            headers = curl_slist_append(headers, ts_header);
+        }
     }
 
     curl_easy_setopt(ctx->curl, CURLOPT_URL, ctx->config.webhook_url);

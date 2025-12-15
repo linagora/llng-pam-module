@@ -355,9 +355,17 @@ int audit_log_event(audit_context_t *ctx, const audit_event_t *event)
         bool permissions_ok = true;
 
         if (stat(ctx->config.log_file, &st) == 0) {
-            /* File exists - check permissions are not too open */
+            /* File exists - check permissions and ownership */
             if (st.st_mode & S_IWOTH) {
                 /* World-writable is a security risk - refuse to write */
+                permissions_ok = false;
+            }
+            if (st.st_mode & S_IWGRP) {
+                /* Group-writable is a security risk - refuse to write */
+                permissions_ok = false;
+            }
+            if (st.st_uid != geteuid()) {
+                /* File not owned by effective user - refuse to write */
                 permissions_ok = false;
             }
         }
