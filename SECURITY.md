@@ -56,9 +56,14 @@ The PAM module authenticates to the LLNG server using:
 | Setting | Description |
 |---------|-------------|
 | `server_token_file` | Path to file containing server bearer token |
-| `server_group` | Server group name _(default: "default")_ |
+| `server_group` | Server group name (default: "default") |
+| `token_rotate_refresh` | Automatically rotate refresh tokens (default: true) |
 
-The server token should be stored in a file with restricted permissions _(0600)_ owned by root.
+The server token should be stored in a file with restricted permissions (0600) owned by root.
+
+### Automatic Token Rotation
+
+When `token_rotate_refresh = true` (default), the module automatically rotates the refresh token after each successful token refresh. This limits the window of opportunity if a token is compromised, as stolen tokens become invalid after the next legitimate use.
 
 ## Token Cache Security
 

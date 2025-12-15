@@ -539,7 +539,7 @@ sudo llng-pam-enroll
 
 1. **Protect configuration files**: `/etc/security/pam_llng.conf` and `.token` should be readable only by root
 2. **Use TLS**: Always use HTTPS for portal_url
-3. **Server tokens**: Treat like SSH private keys; rotate if compromised
+3. **Server tokens**: Server tokens are automatically rotated via refresh token mechanism (`token_rotate_refresh = true` by default). If you suspect compromise, re-enroll the server with `llng-pam-enroll`
 4. **Backup access**: Keep a root password or console access as fallback
 
 ## License
