@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <linux/limits.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -490,4 +493,174 @@ bool token_manager_check_binding(token_manager_t *tm,
 const char *token_manager_error(token_manager_t *tm)
 {
     return tm ? tm->error_buf : "NULL token manager";
+}
+
+int token_manager_load_file(const char *filepath, token_info_t *info)
+{
+    if (!filepath || !info) return -1;
+
+    memset(info, 0, sizeof(*info));
+
+    FILE *fp = fopen(filepath, "r");
+    if (!fp) return -1;
+
+    /* Read first character to detect format */
+    int c = fgetc(fp);
+    if (c == EOF) {
+        fclose(fp);
+        return -1;
+    }
+    ungetc(c, fp);
+
+    if (c == '{') {
+        /* JSON format */
+        fseek(fp, 0, SEEK_END);
+        long fsize = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+
+        if (fsize <= 0 || fsize > 1024 * 1024) {
+            fclose(fp);
+            return -1;
+        }
+
+        char *content = malloc(fsize + 1);
+        if (!content) {
+            fclose(fp);
+            return -1;
+        }
+
+        if (fread(content, 1, fsize, fp) != (size_t)fsize) {
+            free(content);
+            fclose(fp);
+            return -1;
+        }
+        content[fsize] = '\0';
+        fclose(fp);
+
+        /* Parse JSON */
+        struct json_object *root = json_tokener_parse(content);
+        explicit_bzero(content, fsize);
+        free(content);
+
+        if (!root) return -1;
+
+        struct json_object *obj;
+
+        if (json_object_object_get_ex(root, "access_token", &obj)) {
+            info->access_token = strdup(json_object_get_string(obj));
+        }
+
+        if (json_object_object_get_ex(root, "refresh_token", &obj)) {
+            info->refresh_token = strdup(json_object_get_string(obj));
+        }
+
+        if (json_object_object_get_ex(root, "expires_at", &obj)) {
+            info->expires_at = (time_t)json_object_get_int64(obj);
+            time_t now = time(NULL);
+            info->expires_in = (info->expires_at > now) ?
+                               (int)(info->expires_at - now) : 0;
+        }
+
+        if (json_object_object_get_ex(root, "enrolled_at", &obj)) {
+            info->issued_at = (time_t)json_object_get_int64(obj);
+        }
+
+        json_object_put(root);
+    } else {
+        /* Legacy plain text format - single line with access_token */
+        char line[8192];
+        if (!fgets(line, sizeof(line), fp)) {
+            fclose(fp);
+            return -1;
+        }
+        fclose(fp);
+
+        /* Remove trailing newline */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
+        }
+
+        if (len == 0) return -1;
+
+        info->access_token = strdup(line);
+        explicit_bzero(line, sizeof(line));
+
+        /* Legacy format doesn't have expiry info - assume valid */
+        info->expires_at = 0;
+        info->expires_in = 0;
+    }
+
+    return info->access_token ? 0 : -1;
+}
+
+int token_manager_save_file(const char *filepath, const token_info_t *info)
+{
+    if (!filepath || !info || !info->access_token) return -1;
+
+    /* Build JSON object */
+    struct json_object *root = json_object_new_object();
+    if (!root) return -1;
+
+    json_object_object_add(root, "access_token",
+                           json_object_new_string(info->access_token));
+
+    if (info->refresh_token) {
+        json_object_object_add(root, "refresh_token",
+                               json_object_new_string(info->refresh_token));
+    }
+
+    if (info->expires_at > 0) {
+        json_object_object_add(root, "expires_at",
+                               json_object_new_int64((int64_t)info->expires_at));
+    }
+
+    if (info->issued_at > 0) {
+        json_object_object_add(root, "enrolled_at",
+                               json_object_new_int64((int64_t)info->issued_at));
+    }
+
+    /* Serialize JSON */
+    const char *json_str = json_object_to_json_string_ext(root,
+                                                          JSON_C_TO_STRING_PRETTY);
+    if (!json_str) {
+        json_object_put(root);
+        return -1;
+    }
+
+    /* Write to temp file first, then rename (atomic) */
+    char tmppath[PATH_MAX];
+    snprintf(tmppath, sizeof(tmppath), "%s.tmp.%d", filepath, (int)getpid());
+
+    /* Set restrictive umask */
+    mode_t old_umask = umask(077);
+
+    FILE *fp = fopen(tmppath, "w");
+    if (!fp) {
+        umask(old_umask);
+        json_object_put(root);
+        return -1;
+    }
+
+    int ret = 0;
+    if (fputs(json_str, fp) == EOF) {
+        ret = -1;
+    }
+
+    fclose(fp);
+    json_object_put(root);
+    umask(old_umask);
+
+    if (ret != 0) {
+        unlink(tmppath);
+        return -1;
+    }
+
+    /* Atomic rename */
+    if (rename(tmppath, filepath) != 0) {
+        unlink(tmppath);
+        return -1;
+    }
+
+    return 0;
 }

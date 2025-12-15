@@ -102,4 +102,17 @@ void token_info_free(token_info_t *info);
  */
 const char *token_manager_error(token_manager_t *tm);
 
+/*
+ * Load token from JSON file
+ * Returns 0 on success, -1 on error
+ * Note: Also handles legacy plain-text format (access_token only)
+ */
+int token_manager_load_file(const char *filepath, token_info_t *info);
+
+/*
+ * Save token to JSON file
+ * Returns 0 on success, -1 on error
+ */
+int token_manager_save_file(const char *filepath, const token_info_t *info);
+
 #endif /* TOKEN_MANAGER_H */

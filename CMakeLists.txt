@@ -103,6 +103,18 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-enroll
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+# Install heartbeat script
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-heartbeat
+    DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
+# Install systemd units
+install(FILES
+    ${CMAKE_SOURCE_DIR}/systemd/pam-llng-heartbeat.timer
+    ${CMAKE_SOURCE_DIR}/systemd/pam-llng-heartbeat.service
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system
+)
+
 # Install man page
 install(FILES ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
