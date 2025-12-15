@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <openssl/evp.h>
 
 #include "rate_limiter.h"
@@ -32,18 +33,33 @@ struct rate_limiter {
 };
 
 /*
+ * Thread-local storage for EVP_MD_CTX with proper cleanup.
+ * Uses pthread_key_create with destructor to avoid memory leaks
+ * in long-running processes with thread pools.
+ */
+static pthread_key_t evp_ctx_key;
+static pthread_once_t evp_ctx_key_once = PTHREAD_ONCE_INIT;
+
+static void evp_ctx_destructor(void *ptr)
+{
+    if (ptr) {
+        EVP_MD_CTX_free((EVP_MD_CTX *)ptr);
+    }
+}
+
+static void evp_ctx_key_init(void)
+{
+    pthread_key_create(&evp_ctx_key, evp_ctx_destructor);
+}
+
+/*
  * Hash a key to a filename-safe string.
  * Uses thread-local EVP_MD_CTX to avoid allocation/deallocation overhead
  * in the hot path (called on every rate limiter check).
- *
- * Note: The thread-local context is intentionally never freed. This is
- * acceptable for PAM modules where processes are typically short-lived.
- * For long-running daemons with thread pools, consider using pthread_key_create()
- * with a destructor callback instead.
+ * The context is automatically freed when the thread exits.
  */
 static void hash_key(const char *key, char *out, size_t out_size)
 {
-    static __thread EVP_MD_CTX *ctx = NULL;
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hash_len = 0;
 
@@ -52,21 +68,25 @@ static void hash_key(const char *key, char *out, size_t out_size)
         return;
     }
 
-    /* Lazy initialization of thread-local context */
+    /* Initialize pthread key once */
+    pthread_once(&evp_ctx_key_once, evp_ctx_key_init);
+
+    /* Get or create thread-local context */
+    EVP_MD_CTX *ctx = pthread_getspecific(evp_ctx_key);
     if (!ctx) {
         ctx = EVP_MD_CTX_new();
         if (!ctx) {
             out[0] = '\0';
             return;
         }
+        pthread_setspecific(evp_ctx_key, ctx);
     }
 
     if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
         EVP_DigestUpdate(ctx, key, strlen(key)) != 1 ||
         EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
         /* Reset context after error to ensure it's usable for future operations */
-        EVP_MD_CTX_free(ctx);
-        ctx = NULL;
+        EVP_MD_CTX_reset(ctx);
         out[0] = '\0';
         return;
     }
