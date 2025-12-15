@@ -391,38 +391,14 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
         return PAM_AUTH_ERR;
     }
 
-#ifdef ENABLE_CACHE
-    /* Check cache first */
-    if (data->cache) {
-        cache_entry_t entry;
-        if (cache_lookup(data->cache, password, user, &entry)) {
-            LLNG_LOG_DEBUG(pamh, "Cache hit for user %s", user);
-            bool authorized = entry.authorized;
-            cache_entry_free(&entry);
-
-            if (audit_initialized) {
-                audit_event.event_type = authorized ? AUDIT_AUTH_SUCCESS : AUDIT_AUTH_FAILURE;
-                audit_event.cache_hit = true;
-                audit_event.result_code = authorized ? PAM_SUCCESS : PAM_AUTH_ERR;
-                audit_event_set_end_time(&audit_event);
-                audit_log_event(data->audit, &audit_event);
-            }
-
-            if (authorized && data->rate_limiter) {
-                char rate_key[256];
-                rate_limiter_build_key(user, client_ip, rate_key, sizeof(rate_key));
-                rate_limiter_reset(data->rate_limiter, rate_key);
-            }
-
-            return authorized ? PAM_SUCCESS : PAM_AUTH_ERR;
-        }
-    }
-#endif
-
-    /* Introspect the token */
+    /*
+     * Verify the one-time PAM token via /pam/verify
+     * The token is destroyed after successful verification (single-use).
+     * Note: Cache is not used for one-time tokens.
+     */
     llng_response_t response = {0};
-    if (llng_introspect_token(data->client, password, &response) != 0) {
-        LLNG_LOG_ERR(pamh, "Token introspection failed: %s",
+    if (llng_verify_token(data->client, password, &response) != 0) {
+        LLNG_LOG_ERR(pamh, "Token verification failed: %s",
                 llng_client_error(data->client));
 
         if (audit_initialized) {
@@ -436,9 +412,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
         return PAM_AUTHINFO_UNAVAIL;
     }
 
-    /* Check if token is active */
+    /* Check if token is valid (active field from response) */
     if (!response.active) {
-        LLNG_LOG_INFO(pamh, "Token is not active for user %s", user);
+        LLNG_LOG_INFO(pamh, "Token is not valid for user %s: %s", user,
+                 response.reason ? response.reason : "unknown reason");
         pam_result = PAM_AUTH_ERR;
 
         if (data->rate_limiter) {
@@ -449,29 +426,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
 
         if (audit_initialized) {
             audit_event.result_code = PAM_AUTH_ERR;
-            audit_event.reason = "Token not active";
-            audit_event_set_end_time(&audit_event);
-            audit_log_event(data->audit, &audit_event);
-        }
-
-        llng_response_free(&response);
-        return pam_result;
-    }
-
-    /* Check if token has the pam scope */
-    if (!response.scope || strstr(response.scope, "pam") == NULL) {
-        LLNG_LOG_INFO(pamh, "Token does not have pam scope for user %s", user);
-        pam_result = PAM_AUTH_ERR;
-
-        if (data->rate_limiter) {
-            char rate_key[256];
-            rate_limiter_build_key(user, client_ip, rate_key, sizeof(rate_key));
-            rate_limiter_record_failure(data->rate_limiter, rate_key);
-        }
-
-        if (audit_initialized) {
-            audit_event.result_code = PAM_AUTH_ERR;
-            audit_event.reason = "Token missing pam scope";
+            audit_event.reason = response.reason ? response.reason : "Token not valid";
             audit_event_set_end_time(&audit_event);
             audit_log_event(data->audit, &audit_event);
         }
@@ -503,14 +458,6 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
         llng_response_free(&response);
         return pam_result;
     }
-
-#ifdef ENABLE_CACHE
-    /* Cache the result */
-    if (data->cache) {
-        int ttl = response.expires_in > 0 ? response.expires_in : data->config.cache_ttl;
-        cache_store(data->cache, password, user, true, ttl);
-    }
-#endif
 
     /* Success - reset rate limiter */
     if (data->rate_limiter) {
