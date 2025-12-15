@@ -37,6 +37,8 @@ struct llng_client {
     bool verify_ssl;
     char *ca_cert;
     char *signing_secret;  /* Optional HMAC secret for request signing */
+    int min_tls_version;   /* Minimum TLS version: 12=1.2, 13=1.3 */
+    char *cert_pin;        /* Certificate pin for CURLOPT_PINNEDPUBLICKEY */
 };
 
 /* Buffer for curl responses */
@@ -228,6 +230,8 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
     client->verify_ssl = config->verify_ssl;
     client->ca_cert = strdup_or_null(config->ca_cert);
     client->signing_secret = strdup_or_null(config->signing_secret);
+    client->min_tls_version = config->min_tls_version > 0 ? config->min_tls_version : 13;
+    client->cert_pin = strdup_or_null(config->cert_pin);
 
     return client;
 }
@@ -256,6 +260,7 @@ void llng_client_destroy(llng_client_t *client)
     secure_free(client->signing_secret);
     free(client->server_group);
     free(client->ca_cert);
+    free(client->cert_pin);
     explicit_bzero(client->error, sizeof(client->error));
     free(client);
 }
@@ -279,6 +284,30 @@ static void setup_curl(llng_client_t *client)
 
     if (client->ca_cert) {
         curl_easy_setopt(client->curl, CURLOPT_CAINFO, client->ca_cert);
+    }
+
+    /* Set minimum TLS version (default: TLS 1.3) */
+    long ssl_version;
+    switch (client->min_tls_version) {
+        case 12:
+            ssl_version = CURL_SSLVERSION_TLSv1_2;
+            break;
+        case 13:
+        default:
+            ssl_version = CURL_SSLVERSION_TLSv1_3;
+            break;
+    }
+    curl_easy_setopt(client->curl, CURLOPT_SSLVERSION, ssl_version);
+
+    /* Certificate pinning if configured */
+    if (client->cert_pin) {
+        /*
+         * CURLOPT_PINNEDPUBLICKEY accepts formats:
+         * - sha256//base64hash (recommended)
+         * - Path to DER or PEM file
+         * Multiple pins can be separated by ';'
+         */
+        curl_easy_setopt(client->curl, CURLOPT_PINNEDPUBLICKEY, client->cert_pin);
     }
 }
 

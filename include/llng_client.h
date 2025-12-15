@@ -39,6 +39,8 @@ typedef struct {
     bool verify_ssl;
     char *ca_cert;
     char *signing_secret;  /* Optional HMAC secret for request signing */
+    int min_tls_version;   /* Minimum TLS version: 12=1.2, 13=1.3 (default: 13) */
+    char *cert_pin;        /* Certificate pin (sha256//base64 format, optional) */
 } llng_client_config_t;
 
 /* Client handle */

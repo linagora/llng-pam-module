@@ -57,6 +57,7 @@ void config_init(pam_llng_config_t *config)
     config->timeout = DEFAULT_TIMEOUT;
     config->verify_ssl = true;
     config->log_level = 1;  /* warn */
+    config->min_tls_version = 13;  /* TLS 1.3 by default */
 
     /* Cache settings */
     config->cache_enabled = true;
@@ -126,6 +127,7 @@ void config_free(pam_llng_config_t *config)
     free(config->server_token_file);
     free(config->server_group);
     free(config->ca_cert);
+    free(config->cert_pin);
 
     /* Cache settings */
     free(config->cache_dir);
@@ -232,6 +234,16 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     else if (strcmp(key, "ca_cert") == 0) {
         free(config->ca_cert);
         config->ca_cert = strdup(value);
+    }
+    else if (strcmp(key, "min_tls_version") == 0) {
+        config->min_tls_version = atoi(value);
+        /* Normalize: accept 1.2, 1.3, 12, 13 */
+        if (config->min_tls_version == 1) config->min_tls_version = 12;  /* "1" -> 1.2 legacy */
+        else if (config->min_tls_version < 12) config->min_tls_version = 13;  /* Invalid -> default */
+    }
+    else if (strcmp(key, "cert_pin") == 0) {
+        free(config->cert_pin);
+        config->cert_pin = strdup(value);
     }
     /* Cache settings */
     else if (strcmp(key, "cache_enabled") == 0 || strcmp(key, "cache") == 0) {

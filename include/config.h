@@ -25,6 +25,8 @@ typedef struct {
     int timeout;             /* HTTP timeout in seconds (default: 10) */
     bool verify_ssl;         /* Verify SSL certificates (default: true) */
     char *ca_cert;           /* CA certificate path */
+    int min_tls_version;     /* Minimum TLS version: 12=1.2, 13=1.3 (default: 13) */
+    char *cert_pin;          /* Certificate pin (sha256//base64 format, optional) */
 
     /* Cache settings */
     bool cache_enabled;      /* Enable token caching (default: true) */
