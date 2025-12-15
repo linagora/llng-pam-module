@@ -25,6 +25,8 @@ typedef struct {
     int timeout;             /* HTTP timeout in seconds (default: 10) */
     bool verify_ssl;         /* Verify SSL certificates (default: true) */
     char *ca_cert;           /* CA certificate path */
+    int min_tls_version;     /* Minimum TLS version: 12=1.2, 13=1.3 (default: 13) */
+    char *cert_pin;          /* Certificate pin (sha256//base64 format, optional) */
 
     /* Cache settings */
     bool cache_enabled;      /* Enable token caching (default: true) */
@@ -32,6 +34,8 @@ typedef struct {
     int cache_ttl;           /* Cache TTL in seconds (default: 300) */
     int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
     char *high_risk_services; /* Comma-separated list of high-risk PAM services */
+    bool cache_encrypted;    /* Encrypt cache files with AES-256-GCM (default: true) */
+    bool cache_invalidate_on_logout; /* Invalidate cache when session closes (default: true) */
 
     /* Authorization mode */
     bool authorize_only;     /* Only check authorization, no password (for SSH keys) */
@@ -68,6 +72,20 @@ typedef struct {
     bool notify_enabled;            /* Enable webhook notifications (default: false) */
     char *notify_url;               /* Webhook URL for security events */
     char *notify_secret;            /* HMAC secret for webhook signatures */
+
+    /* Request signing (optional, defense in depth) */
+    char *request_signing_secret;   /* HMAC secret for request signatures (optional) */
+
+    /* Auto-create Unix accounts */
+    bool create_user_enabled;       /* Enable auto user creation (default: false) */
+    char *create_user_shell;        /* Default shell (default: from LLNG or /bin/bash) */
+    char *create_user_groups;       /* Additional groups (comma-separated) */
+    char *create_user_home_base;    /* Home base directory (default: /home) */
+    char *create_user_skel;         /* Skeleton directory (default: /etc/skel) */
+
+    /* Path validation */
+    char *approved_shells;          /* Colon-separated approved shells (default: common shells) */
+    char *approved_home_prefixes;   /* Colon-separated home prefixes (default: /home:/var/home) */
 } pam_llng_config_t;
 
 /*
@@ -97,5 +115,30 @@ void config_init(pam_llng_config_t *config);
  * Returns 0 if valid, -1 if invalid (with error logged)
  */
 int config_validate(const pam_llng_config_t *config);
+
+/*
+ * Validate shell path against approved shells list
+ * Returns 0 if valid, -1 if invalid
+ */
+int config_validate_shell(const char *shell, const char *approved_shells);
+
+/*
+ * Validate home directory path against approved prefixes
+ * Returns 0 if valid, -1 if invalid
+ */
+int config_validate_home(const char *home, const char *approved_prefixes);
+
+/*
+ * Validate skeleton directory path
+ * Must be absolute, owned by root, no symlinks in path
+ * Returns 0 if valid, -1 if invalid
+ */
+int config_validate_skel(const char *skel_path);
+
+/* Default approved shells */
+#define DEFAULT_APPROVED_SHELLS "/bin/bash:/bin/sh:/usr/bin/bash:/usr/bin/sh:/bin/zsh:/usr/bin/zsh:/bin/dash:/usr/bin/dash:/bin/fish:/usr/bin/fish"
+
+/* Default approved home prefixes */
+#define DEFAULT_APPROVED_HOME_PREFIXES "/home:/var/home"
 
 #endif /* CONFIG_H */

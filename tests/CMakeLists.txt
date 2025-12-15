@@ -39,5 +39,20 @@ target_include_directories(test_secret_store PRIVATE
 target_link_libraries(test_secret_store ${OPENSSL_LIBRARIES})
 add_test(NAME test_secret_store COMMAND test_secret_store)
 
+# Test NSS module helper functions
+add_executable(test_nss_llng test_nss_llng.c)
+target_include_directories(test_nss_llng PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_nss_llng COMMAND test_nss_llng)
+
+# Test path validation
+add_executable(test_path_validator test_path_validator.c ../src/config.c)
+target_include_directories(test_path_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_path_validator COMMAND test_path_validator)
+
+# Test username validation
+add_executable(test_username_validator test_username_validator.c)
+target_include_directories(test_username_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_username_validator COMMAND test_username_validator)
+
 # Note: Integration tests require a running LLNG instance
 # and are meant to be run manually

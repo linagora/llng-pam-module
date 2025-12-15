@@ -8,11 +8,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 #include "llng_client.h"
+
+/* TLS version constants for min_tls_version configuration */
+#define TLS_VERSION_1_2 12
+#define TLS_VERSION_1_3 13
 
 /* Thread-safe curl initialization */
 static pthread_once_t curl_init_once = PTHREAD_ONCE_INIT;
@@ -33,26 +40,42 @@ struct llng_client {
     int timeout;
     bool verify_ssl;
     char *ca_cert;
+    char *signing_secret;  /* Optional HMAC secret for request signing */
+    int min_tls_version;   /* Minimum TLS version: 12=1.2, 13=1.3 */
+    char *cert_pin;        /* Certificate pin for CURLOPT_PINNEDPUBLICKEY */
 };
 
-/* Buffer for curl responses */
+/* Buffer for curl responses with exponential growth */
 typedef struct {
     char *data;
     size_t size;
+    size_t capacity;
 } response_buffer_t;
 
-/* Curl write callback */
+#define INITIAL_BUFFER_SIZE 4096
+
+/* Curl write callback with exponential buffer growth */
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t realsize = size * nmemb;
     response_buffer_t *buf = (response_buffer_t *)userp;
 
-    char *ptr = realloc(buf->data, buf->size + realsize + 1);
-    if (!ptr) {
-        return 0;
+    /* Check if we need to grow the buffer */
+    size_t needed = buf->size + realsize + 1;
+    if (needed > buf->capacity) {
+        /* Grow by 1.5x or to needed size, whichever is larger */
+        size_t new_capacity = buf->capacity + (buf->capacity >> 1);
+        if (new_capacity < needed) {
+            new_capacity = needed;
+        }
+        char *ptr = realloc(buf->data, new_capacity);
+        if (!ptr) {
+            return 0;
+        }
+        buf->data = ptr;
+        buf->capacity = new_capacity;
     }
 
-    buf->data = ptr;
     memcpy(&(buf->data[buf->size]), contents, realsize);
     buf->size += realsize;
     buf->data[buf->size] = '\0';
@@ -63,8 +86,9 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 /* Initialize response buffer */
 static void init_buffer(response_buffer_t *buf)
 {
-    buf->data = malloc(1);
+    buf->data = malloc(INITIAL_BUFFER_SIZE);
     buf->size = 0;
+    buf->capacity = INITIAL_BUFFER_SIZE;
     if (buf->data) {
         buf->data[0] = '\0';
     }
@@ -76,12 +100,164 @@ static void free_buffer(response_buffer_t *buf)
     free(buf->data);
     buf->data = NULL;
     buf->size = 0;
+    buf->capacity = 0;
 }
 
 /* Helper to duplicate string or NULL */
 static char *strdup_or_null(const char *s)
 {
     return s ? strdup(s) : NULL;
+}
+
+/*
+ * Generate HMAC-SHA256 signature for request signing.
+ * Message format: timestamp.method.path.body
+ * Output: hex-encoded signature string (65 bytes including null terminator)
+ */
+static void generate_request_signature(const char *secret,
+                                        long timestamp,
+                                        const char *method,
+                                        const char *path,
+                                        const char *body,
+                                        char *signature,
+                                        size_t sig_size)
+{
+    if (!secret || !signature || sig_size < 65) {
+        if (signature && sig_size > 0) signature[0] = '\0';
+        return;
+    }
+
+    /* Build message: timestamp.method.path.body */
+    char ts_str[32];
+    snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
+
+    size_t msg_len = strlen(ts_str) + 1 + strlen(method) + 1 +
+                     strlen(path) + 1 + (body ? strlen(body) : 0);
+    char *message = malloc(msg_len + 1);
+    if (!message) {
+        signature[0] = '\0';
+        return;
+    }
+
+    snprintf(message, msg_len + 1, "%s.%s.%s.%s",
+             ts_str, method, path, body ? body : "");
+
+    /* Generate HMAC-SHA256 */
+    unsigned char hmac[EVP_MAX_MD_SIZE];
+    unsigned int hmac_len = 0;
+
+    unsigned char *result = HMAC(EVP_sha256(), secret, strlen(secret),
+                                  (unsigned char *)message, strlen(message),
+                                  hmac, &hmac_len);
+
+    /* Clear and free message */
+    explicit_bzero(message, msg_len + 1);
+    free(message);
+
+    /* Check HMAC result */
+    if (!result) {
+        signature[0] = '\0';
+        return;
+    }
+
+    /* Convert to hex string */
+    for (unsigned int i = 0; i < hmac_len && (i * 2 + 2) < sig_size; i++) {
+        snprintf(signature + (i * 2), 3, "%02x", hmac[i]);
+    }
+
+    /* Clear HMAC buffer */
+    explicit_bzero(hmac, sizeof(hmac));
+}
+
+/*
+ * Generate a unique nonce for replay protection.
+ * Format: timestamp_ms-uuid
+ */
+static void generate_nonce(char *nonce, size_t nonce_size)
+{
+    if (!nonce || nonce_size < 64) {
+        if (nonce && nonce_size > 0) nonce[0] = '\0';
+        return;
+    }
+
+    /* Get timestamp in milliseconds */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long long timestamp_ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+    /* Generate UUID v4 */
+    unsigned char uuid[16];
+    FILE *f = fopen("/dev/urandom", "r");
+    if (f) {
+        if (fread(uuid, 1, 16, f) != 16) {
+            fclose(f);
+            /* Fallback: use timestamp only */
+            snprintf(nonce, nonce_size, "%lld", timestamp_ms);
+            return;
+        }
+        fclose(f);
+    } else {
+        /* Fallback: use timestamp only */
+        snprintf(nonce, nonce_size, "%lld", timestamp_ms);
+        return;
+    }
+
+    /* Set version (4) and variant bits */
+    uuid[6] = (uuid[6] & 0x0F) | 0x40;
+    uuid[8] = (uuid[8] & 0x3F) | 0x80;
+
+    snprintf(nonce, nonce_size,
+             "%lld-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             timestamp_ms,
+             uuid[0], uuid[1], uuid[2], uuid[3],
+             uuid[4], uuid[5],
+             uuid[6], uuid[7],
+             uuid[8], uuid[9],
+             uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+}
+
+/*
+ * Add request signing headers if signing_secret is configured.
+ * Adds X-Timestamp, X-Nonce, and X-Signature-256 headers.
+ *
+ * The nonce provides replay protection - server should reject
+ * requests with previously seen nonces within a time window.
+ */
+static struct curl_slist *add_signing_headers(struct curl_slist *headers,
+                                               const char *signing_secret,
+                                               const char *method,
+                                               const char *path,
+                                               const char *body)
+{
+    if (!signing_secret) {
+        return headers;
+    }
+
+    long timestamp = (long)time(NULL);
+
+    /* Generate unique nonce */
+    char nonce[80];
+    generate_nonce(nonce, sizeof(nonce));
+
+    /* Generate signature (includes nonce in message) */
+    char signature[65];
+    generate_request_signature(signing_secret, timestamp, method, path, body,
+                               signature, sizeof(signature));
+
+    /* Add headers */
+    char ts_header[64];
+    snprintf(ts_header, sizeof(ts_header), "X-Timestamp: %ld", timestamp);
+    headers = curl_slist_append(headers, ts_header);
+
+    char nonce_header[128];
+    snprintf(nonce_header, sizeof(nonce_header), "X-Nonce: %s", nonce);
+    headers = curl_slist_append(headers, nonce_header);
+
+    char sig_header[128];
+    snprintf(sig_header, sizeof(sig_header), "X-Signature-256: sha256=%s", signature);
+    headers = curl_slist_append(headers, sig_header);
+
+    return headers;
 }
 
 /* Base64 encode for Basic auth */
@@ -139,6 +315,9 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
     client->timeout = config->timeout > 0 ? config->timeout : 10;
     client->verify_ssl = config->verify_ssl;
     client->ca_cert = strdup_or_null(config->ca_cert);
+    client->signing_secret = strdup_or_null(config->signing_secret);
+    client->min_tls_version = config->min_tls_version > 0 ? config->min_tls_version : TLS_VERSION_1_3;
+    client->cert_pin = strdup_or_null(config->cert_pin);
 
     return client;
 }
@@ -164,8 +343,10 @@ void llng_client_destroy(llng_client_t *client)
     /* Securely erase secrets before freeing */
     secure_free(client->client_secret);
     secure_free(client->server_token);
+    secure_free(client->signing_secret);
     free(client->server_group);
     free(client->ca_cert);
+    free(client->cert_pin);
     explicit_bzero(client->error, sizeof(client->error));
     free(client);
 }
@@ -189,6 +370,30 @@ static void setup_curl(llng_client_t *client)
 
     if (client->ca_cert) {
         curl_easy_setopt(client->curl, CURLOPT_CAINFO, client->ca_cert);
+    }
+
+    /* Set minimum TLS version (default: TLS 1.3) */
+    long ssl_version;
+    switch (client->min_tls_version) {
+        case TLS_VERSION_1_2:
+            ssl_version = CURL_SSLVERSION_TLSv1_2;
+            break;
+        case TLS_VERSION_1_3:
+        default:
+            ssl_version = CURL_SSLVERSION_TLSv1_3;
+            break;
+    }
+    curl_easy_setopt(client->curl, CURLOPT_SSLVERSION, ssl_version);
+
+    /* Certificate pinning if configured */
+    if (client->cert_pin) {
+        /*
+         * CURLOPT_PINNEDPUBLICKEY accepts formats:
+         * - sha256//base64hash (recommended)
+         * - Path to DER or PEM file
+         * Multiple pins can be separated by ';'
+         */
+        curl_easy_setopt(client->curl, CURLOPT_PINNEDPUBLICKEY, client->cert_pin);
     }
 }
 
@@ -227,6 +432,10 @@ int llng_verify_token(llng_client_t *client,
              client->server_token);
     headers = curl_slist_append(headers, auth_header);
     headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    /* Add request signing headers if configured */
+    headers = add_signing_headers(headers, client->signing_secret,
+                                   "POST", "/pam/verify", req_body);
 
     response_buffer_t buf;
     init_buffer(&buf);
@@ -307,6 +516,22 @@ int llng_verify_token(llng_client_t *client,
                     struct json_object *g = json_object_array_get_idx(val, i);
                     response->groups[i] = strdup(json_object_get_string(g));
                 }
+            }
+        }
+    }
+
+    /* User attributes for account creation (from attrs object) */
+    struct json_object *attrs_obj;
+    if (json_object_object_get_ex(json, "attrs", &attrs_obj)) {
+        if (json_object_is_type(attrs_obj, json_type_object)) {
+            if (json_object_object_get_ex(attrs_obj, "gecos", &val)) {
+                response->gecos = strdup(json_object_get_string(val));
+            }
+            if (json_object_object_get_ex(attrs_obj, "shell", &val)) {
+                response->shell = strdup(json_object_get_string(val));
+            }
+            if (json_object_object_get_ex(attrs_obj, "home", &val)) {
+                response->home = strdup(json_object_get_string(val));
             }
         }
     }
@@ -464,6 +689,10 @@ int llng_authorize_user(llng_client_t *client,
     headers = curl_slist_append(headers, auth_header);
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
+    /* Add request signing headers if configured */
+    headers = add_signing_headers(headers, client->signing_secret,
+                                   "POST", "/pam/authorize", req_body);
+
     response_buffer_t buf;
     init_buffer(&buf);
 
@@ -476,6 +705,7 @@ int llng_authorize_user(llng_client_t *client,
 
     json_object_put(req_json);
     curl_slist_free_all(headers);
+    explicit_bzero(auth_header, sizeof(auth_header));
 
     if (res != CURLE_OK) {
         snprintf(client->error, sizeof(client->error),
@@ -556,6 +786,9 @@ void llng_response_free(llng_response_t *response)
     free(response->user);
     free(response->reason);
     free(response->scope);
+    free(response->gecos);
+    free(response->shell);
+    free(response->home);
 
     if (response->groups) {
         for (size_t i = 0; i < response->groups_count; i++) {

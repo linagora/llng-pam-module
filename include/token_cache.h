@@ -20,11 +20,24 @@ typedef struct {
     time_t cached_at;      /* When entry was cached */
 } cache_entry_t;
 
+/* Cache configuration */
+typedef struct {
+    const char *cache_dir;  /* Directory for cache files */
+    int ttl;                /* Default TTL in seconds */
+    bool encrypt;           /* Enable AES-256-GCM encryption (default: true) */
+} cache_config_t;
+
 /* Cache handle */
 typedef struct token_cache token_cache_t;
 
 /*
- * Initialize the token cache
+ * Initialize the token cache with configuration
+ * Returns NULL on failure
+ */
+token_cache_t *cache_init_config(const cache_config_t *config);
+
+/*
+ * Initialize the token cache (legacy, encryption disabled)
  * cache_dir: Directory for cache files
  * ttl: Default TTL in seconds
  * Returns NULL on failure
