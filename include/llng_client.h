@@ -38,6 +38,7 @@ typedef struct {
     int timeout;
     bool verify_ssl;
     char *ca_cert;
+    char *signing_secret;  /* Optional HMAC secret for request signing */
 } llng_client_config_t;
 
 /* Client handle */

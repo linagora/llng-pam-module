@@ -8,9 +8,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 #include "llng_client.h"
 
@@ -33,6 +36,7 @@ struct llng_client {
     int timeout;
     bool verify_ssl;
     char *ca_cert;
+    char *signing_secret;  /* Optional HMAC secret for request signing */
 };
 
 /* Buffer for curl responses */
@@ -82,6 +86,90 @@ static void free_buffer(response_buffer_t *buf)
 static char *strdup_or_null(const char *s)
 {
     return s ? strdup(s) : NULL;
+}
+
+/*
+ * Generate HMAC-SHA256 signature for request signing.
+ * Message format: timestamp.method.path.body
+ * Output: hex-encoded signature string (65 bytes including null terminator)
+ */
+static void generate_request_signature(const char *secret,
+                                        long timestamp,
+                                        const char *method,
+                                        const char *path,
+                                        const char *body,
+                                        char *signature,
+                                        size_t sig_size)
+{
+    if (!secret || !signature || sig_size < 65) {
+        if (signature && sig_size > 0) signature[0] = '\0';
+        return;
+    }
+
+    /* Build message: timestamp.method.path.body */
+    char ts_str[32];
+    snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
+
+    size_t msg_len = strlen(ts_str) + 1 + strlen(method) + 1 +
+                     strlen(path) + 1 + (body ? strlen(body) : 0);
+    char *message = malloc(msg_len + 1);
+    if (!message) {
+        signature[0] = '\0';
+        return;
+    }
+
+    snprintf(message, msg_len + 1, "%s.%s.%s.%s",
+             ts_str, method, path, body ? body : "");
+
+    /* Generate HMAC-SHA256 */
+    unsigned char hmac[EVP_MAX_MD_SIZE];
+    unsigned int hmac_len = 0;
+
+    HMAC(EVP_sha256(), secret, strlen(secret),
+         (unsigned char *)message, strlen(message),
+         hmac, &hmac_len);
+
+    /* Clear and free message */
+    explicit_bzero(message, msg_len + 1);
+    free(message);
+
+    /* Convert to hex string */
+    for (unsigned int i = 0; i < hmac_len && (i * 2 + 2) < sig_size; i++) {
+        snprintf(signature + (i * 2), 3, "%02x", hmac[i]);
+    }
+}
+
+/*
+ * Add request signing headers if signing_secret is configured.
+ * Adds X-Timestamp and X-Signature-256 headers.
+ */
+static struct curl_slist *add_signing_headers(struct curl_slist *headers,
+                                               const char *signing_secret,
+                                               const char *method,
+                                               const char *path,
+                                               const char *body)
+{
+    if (!signing_secret) {
+        return headers;
+    }
+
+    long timestamp = (long)time(NULL);
+
+    /* Generate signature */
+    char signature[65];
+    generate_request_signature(signing_secret, timestamp, method, path, body,
+                               signature, sizeof(signature));
+
+    /* Add headers */
+    char ts_header[64];
+    snprintf(ts_header, sizeof(ts_header), "X-Timestamp: %ld", timestamp);
+    headers = curl_slist_append(headers, ts_header);
+
+    char sig_header[128];
+    snprintf(sig_header, sizeof(sig_header), "X-Signature-256: sha256=%s", signature);
+    headers = curl_slist_append(headers, sig_header);
+
+    return headers;
 }
 
 /* Base64 encode for Basic auth */
@@ -139,6 +227,7 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
     client->timeout = config->timeout > 0 ? config->timeout : 10;
     client->verify_ssl = config->verify_ssl;
     client->ca_cert = strdup_or_null(config->ca_cert);
+    client->signing_secret = strdup_or_null(config->signing_secret);
 
     return client;
 }
@@ -164,6 +253,7 @@ void llng_client_destroy(llng_client_t *client)
     /* Securely erase secrets before freeing */
     secure_free(client->client_secret);
     secure_free(client->server_token);
+    secure_free(client->signing_secret);
     free(client->server_group);
     free(client->ca_cert);
     explicit_bzero(client->error, sizeof(client->error));
@@ -227,6 +317,10 @@ int llng_verify_token(llng_client_t *client,
              client->server_token);
     headers = curl_slist_append(headers, auth_header);
     headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    /* Add request signing headers if configured */
+    headers = add_signing_headers(headers, client->signing_secret,
+                                   "POST", "/pam/verify", req_body);
 
     response_buffer_t buf;
     init_buffer(&buf);
@@ -480,6 +574,10 @@ int llng_authorize_user(llng_client_t *client,
     headers = curl_slist_append(headers, auth_header);
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
+    /* Add request signing headers if configured */
+    headers = add_signing_headers(headers, client->signing_secret,
+                                   "POST", "/pam/authorize", req_body);
+
     response_buffer_t buf;
     init_buffer(&buf);
 
@@ -492,6 +590,7 @@ int llng_authorize_user(llng_client_t *client,
 
     json_object_put(req_json);
     curl_slist_free_all(headers);
+    explicit_bzero(auth_header, sizeof(auth_header));
 
     if (res != CURLE_OK) {
         snprintf(client->error, sizeof(client->error),

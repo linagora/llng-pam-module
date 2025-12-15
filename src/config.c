@@ -144,6 +144,9 @@ void config_free(pam_llng_config_t *config)
     free(config->notify_url);
     secure_free_str(config->notify_secret);
 
+    /* Request signing */
+    secure_free_str(config->request_signing_secret);
+
     /* User creation */
     free(config->create_user_shell);
     free(config->create_user_groups);
@@ -335,6 +338,11 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     else if (strcmp(key, "notify_secret") == 0 || strcmp(key, "webhook_secret") == 0) {
         free(config->notify_secret);
         config->notify_secret = strdup(value);
+    }
+    /* Request signing settings */
+    else if (strcmp(key, "request_signing_secret") == 0) {
+        free(config->request_signing_secret);
+        config->request_signing_secret = strdup(value);
     }
     /* User creation settings */
     else if (strcmp(key, "create_user") == 0 || strcmp(key, "create_user_enabled") == 0) {

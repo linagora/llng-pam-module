@@ -70,6 +70,9 @@ typedef struct {
     char *notify_url;               /* Webhook URL for security events */
     char *notify_secret;            /* HMAC secret for webhook signatures */
 
+    /* Request signing (optional, defense in depth) */
+    char *request_signing_secret;   /* HMAC secret for request signatures (optional) */
+
     /* Auto-create Unix accounts */
     bool create_user_enabled;       /* Enable auto user creation (default: false) */
     char *create_user_shell;        /* Default shell (default: from LLNG or /bin/bash) */
