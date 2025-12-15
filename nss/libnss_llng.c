@@ -125,6 +125,78 @@ static int safe_strcpy(char **dst, size_t *remaining, const char *src)
 }
 
 /*
+ * Check if path contains dangerous patterns.
+ * Returns 1 if dangerous, 0 if safe.
+ */
+static int path_is_dangerous(const char *path)
+{
+    if (!path || !*path) return 1;
+
+    /* Must be absolute */
+    if (path[0] != '/') return 1;
+
+    /* Check for path traversal and dangerous patterns */
+    if (strstr(path, "..")) return 1;
+    if (strstr(path, "//")) return 1;
+
+    /* Check for shell metacharacters */
+    for (const char *p = path; *p; p++) {
+        if (*p == ';' || *p == '|' || *p == '&' || *p == '$' ||
+            *p == '`' || *p == '\n' || *p == '\r' || *p == '\'' ||
+            *p == '"' || *p == '(' || *p == ')' || *p == '<' ||
+            *p == '>' || *p == ' ' || *p == '\t') {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* Default approved shells */
+static const char *default_approved_shells[] = {
+    "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh",
+    "/bin/zsh", "/usr/bin/zsh", "/bin/dash", "/usr/bin/dash",
+    "/bin/fish", "/usr/bin/fish", NULL
+};
+
+/* Default approved home prefixes */
+static const char *default_approved_home_prefixes[] = {
+    "/home/", "/var/home/", NULL
+};
+
+/*
+ * Validate shell path against approved list.
+ * Returns 0 if valid, -1 if invalid.
+ */
+static int validate_shell(const char *shell)
+{
+    if (path_is_dangerous(shell)) return -1;
+
+    /* Check against approved shells */
+    for (const char **s = default_approved_shells; *s; s++) {
+        if (strcmp(shell, *s) == 0) return 0;
+    }
+
+    return -1;
+}
+
+/*
+ * Validate home directory path.
+ * Returns 0 if valid, -1 if invalid.
+ */
+static int validate_home(const char *home)
+{
+    if (path_is_dangerous(home)) return -1;
+
+    /* Check against approved prefixes */
+    for (const char **p = default_approved_home_prefixes; *p; p++) {
+        if (strncmp(home, *p, strlen(*p)) == 0) return 0;
+    }
+
+    return -1;
+}
+
+/*
  * Check if a UID is already in use by reading /etc/passwd directly.
  * This avoids NSS recursion by not calling getpwuid().
  * Returns 1 if UID is in use, 0 otherwise.
@@ -616,14 +688,16 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         return -1;
     }
 
-    /* Home directory */
+    /* Home directory - validate server-provided path */
     pw->pw_dir = p;
     char home_buf[256];
     if (json_object_object_get_ex(json, "home", &val)) {
         const char *home = json_object_get_string(val);
-        if (home && *home) {
+        /* Only use server-provided home if it passes validation */
+        if (home && *home && validate_home(home) == 0) {
             snprintf(home_buf, sizeof(home_buf), "%s", home);
         } else {
+            /* Fall back to default if invalid or missing */
             snprintf(home_buf, sizeof(home_buf), "%s/%s", g_config.default_home_base, username);
         }
     } else {
@@ -634,14 +708,16 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         return -1;
     }
 
-    /* Shell */
+    /* Shell - validate server-provided path */
     pw->pw_shell = p;
     const char *shell_to_use = g_config.default_shell;
     if (json_object_object_get_ex(json, "shell", &val)) {
         const char *shell = json_object_get_string(val);
-        if (shell && *shell) {
+        /* Only use server-provided shell if it passes validation */
+        if (shell && *shell && validate_shell(shell) == 0) {
             shell_to_use = shell;
         }
+        /* Otherwise fall back to default shell */
     }
     if (safe_strcpy(&p, &remaining, shell_to_use) != 0) {
         json_object_put(json);

@@ -145,8 +145,29 @@ All paths are validated before use:
 The NSS module (`libnss_llng.so`) provides user resolution:
 
 - **Buffer overflow protection**: All string copies use bounds-checked `safe_strcpy()`
-- **Input validation**: All inputs sanitized before use
-- **Fail-safe**: Returns appropriate error codes on any failure
+- **Server input validation**: Shell and home paths from server are validated against approved lists
+- **UID range enforcement**: Server-provided UIDs must be within configured min_uid/max_uid range
+- **Fail-safe**: Returns appropriate error codes on any failure; invalid paths fall back to defaults
+
+### Direct /etc/passwd and /etc/shadow Manipulation
+
+User accounts are created by directly writing to `/etc/passwd` and `/etc/shadow` rather than using external tools like `useradd`. This design choice was made for:
+
+**Advantages**:
+- **Portability**: No dependency on `useradd` which may not exist or have different options across distributions
+- **Atomicity**: Single-process control over file locking ensures consistent state
+- **Predictability**: No external tool behavior variations or unexpected prompts
+
+**Trade-offs**:
+- PAM account creation hooks are not triggered (this module IS the PAM hook)
+- SELinux contexts must be handled separately if required
+- System audit logs only see file modifications, not semantic "user created" events
+
+**Mitigations**:
+- The module emits its own structured audit events when `audit_enabled = true`
+- File operations use exclusive locks (`flock`) to prevent race conditions
+- If `/etc/shadow` write fails after `/etc/passwd` succeeds, rollback is attempted via `userdel`
+- TOCTOU protection: user existence is re-checked after acquiring locks
 
 ## Audit Logging
 

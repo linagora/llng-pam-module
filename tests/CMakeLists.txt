@@ -49,5 +49,10 @@ add_executable(test_path_validator test_path_validator.c ../src/config.c)
 target_include_directories(test_path_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_path_validator COMMAND test_path_validator)
 
+# Test username validation
+add_executable(test_username_validator test_username_validator.c)
+target_include_directories(test_username_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_username_validator COMMAND test_username_validator)
+
 # Note: Integration tests require a running LLNG instance
 # and are meant to be run manually
