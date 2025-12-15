@@ -40,6 +40,9 @@
 #define DEFAULT_MIN_UID 10000
 #define DEFAULT_MAX_UID 60000
 
+/* Reserved UID for 'nobody' user - must never be assigned */
+#define NOBODY_UID 65534
+
 /* Recursion guard - prevent infinite loops when NSS calls trigger more NSS lookups */
 static __thread int g_in_nss_lookup = 0;
 
@@ -212,7 +215,7 @@ static uid_t generate_unique_uid(const char *username, uid_t min_uid, uid_t max_
 
         /* Skip reserved UIDs */
         if (candidate < 1000) continue;      /* System UIDs */
-        if (candidate == 65534) continue;    /* nobody */
+        if (candidate == NOBODY_UID) continue;
 
         if (!uid_exists_locally(candidate)) {
             return candidate;
@@ -605,7 +608,7 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         pw->pw_uid = (uid_t)json_object_get_int(val);
         /* Validate server-provided UID is in acceptable range */
         if (pw->pw_uid < g_config.min_uid || pw->pw_uid > g_config.max_uid ||
-            pw->pw_uid == 65534) {
+            pw->pw_uid == NOBODY_UID) {
             /* Reject UIDs outside configured range and nobody - security risk */
             json_object_put(json);
             return -1;

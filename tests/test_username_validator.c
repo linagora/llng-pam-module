@@ -32,7 +32,7 @@ static int validate_username(const char *user)
 
     size_t len = strlen(user);
     /* POSIX username max is typically 32, be conservative */
-    if (len > 32 || len == 0) return 0;
+    if (len > 32) return 0;
 
     /* First character must be lowercase letter or underscore */
     if (!islower((unsigned char)user[0]) && user[0] != '_') return 0;

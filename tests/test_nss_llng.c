@@ -12,6 +12,9 @@
 #include <sys/types.h>
 #include <pwd.h>
 
+/* Reserved UID for 'nobody' user - must never be assigned */
+#define NOBODY_UID 65534
+
 static int tests_run = 0;
 static int tests_passed = 0;
 
@@ -90,7 +93,7 @@ static uid_t generate_unique_uid(const char *username, uid_t min_uid, uid_t max_
     for (int attempt = 0; attempt < 100; attempt++) {
         uid_t candidate = min_uid + ((hash + (unsigned int)attempt) % range);
         if (candidate < 1000) continue;
-        if (candidate == 65534) continue;
+        if (candidate == NOBODY_UID) continue;
         if (!uid_exists_locally(candidate)) {
             return candidate;
         }
