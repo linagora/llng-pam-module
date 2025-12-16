@@ -406,6 +406,127 @@ static const char *get_client_ip(pam_handle_t *pamh)
     return "local";
 }
 
+/*
+ * Extract SSH certificate info from PAM environment.
+ * SSH sets SSH_USER_AUTH environment variable with certificate details.
+ * Format: "publickey <algorithm> <fingerprint>:<key_id>:<serial>:<principals>"
+ * Or for OpenSSH 8.5+, multiple methods comma-separated.
+ *
+ * Returns 1 if certificate info was found, 0 otherwise.
+ */
+static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_info)
+{
+    if (!cert_info) return 0;
+    memset(cert_info, 0, sizeof(*cert_info));
+
+    /* Get SSH_USER_AUTH from PAM environment */
+    const char *ssh_auth = pam_getenv(pamh, "SSH_USER_AUTH");
+    if (!ssh_auth || !*ssh_auth) {
+        LLNG_LOG_DEBUG(pamh, "No SSH_USER_AUTH in environment");
+        return 0;
+    }
+
+    LLNG_LOG_DEBUG(pamh, "SSH_USER_AUTH: %s", ssh_auth);
+
+    /*
+     * Check if this is certificate authentication.
+     * Certificate auth shows as: "publickey <algo>-cert-v01@openssh.com ..."
+     * Regular key auth shows as: "publickey <algo> ..."
+     */
+    if (strstr(ssh_auth, "-cert-") == NULL) {
+        LLNG_LOG_DEBUG(pamh, "SSH authentication is not certificate-based");
+        return 0;
+    }
+
+    /*
+     * Parse SSH_USER_AUTH. The format varies between SSH versions.
+     * We try to extract what we can.
+     *
+     * OpenSSH exposes certificate info via SSH_CERT_* environment variables
+     * when ExposeAuthInfo is enabled in sshd_config.
+     */
+    cert_info->valid = true;
+
+    /* Try to get certificate details from SSH_CERT_* environment vars */
+    const char *key_id = pam_getenv(pamh, "SSH_CERT_KEY_ID");
+    if (key_id) {
+        cert_info->key_id = strdup(key_id);
+    }
+
+    const char *serial = pam_getenv(pamh, "SSH_CERT_SERIAL");
+    if (serial) {
+        cert_info->serial = strdup(serial);
+    }
+
+    const char *principals = pam_getenv(pamh, "SSH_CERT_PRINCIPALS");
+    if (principals) {
+        cert_info->principals = strdup(principals);
+    }
+
+    const char *ca_fp = pam_getenv(pamh, "SSH_CERT_CA_KEY_FP");
+    if (ca_fp) {
+        cert_info->ca_fingerprint = strdup(ca_fp);
+    }
+
+    /* If we didn't get any details, try to parse from SSH_USER_AUTH */
+    if (!cert_info->key_id && !cert_info->serial) {
+        /*
+         * Try parsing format: "publickey algo fingerprint:keyid:serial:principals"
+         * This is a simplified parser - real format may vary.
+         */
+        char *auth_copy = strdup(ssh_auth);
+        if (auth_copy) {
+            /* Skip "publickey " prefix */
+            char *p = auth_copy;
+            if (strncmp(p, "publickey ", 10) == 0) {
+                p += 10;
+            }
+            /* Skip algorithm */
+            char *space = strchr(p, ' ');
+            if (space) {
+                p = space + 1;
+                /* Now p points to fingerprint or other data */
+                char *colon = strchr(p, ':');
+                if (colon) {
+                    /* Extract fingerprint */
+                    *colon = '\0';
+                    cert_info->ca_fingerprint = strdup(p);
+                    p = colon + 1;
+
+                    /* Try to extract key_id */
+                    colon = strchr(p, ':');
+                    if (colon) {
+                        *colon = '\0';
+                        if (*p) cert_info->key_id = strdup(p);
+                        p = colon + 1;
+
+                        /* Try to extract serial */
+                        colon = strchr(p, ':');
+                        if (colon) {
+                            *colon = '\0';
+                            if (*p) cert_info->serial = strdup(p);
+                            p = colon + 1;
+                            if (*p) cert_info->principals = strdup(p);
+                        } else if (*p) {
+                            cert_info->serial = strdup(p);
+                        }
+                    } else if (*p) {
+                        cert_info->key_id = strdup(p);
+                    }
+                }
+            }
+            free(auth_copy);
+        }
+    }
+
+    LLNG_LOG_DEBUG(pamh, "SSH cert info: key_id=%s serial=%s principals=%s",
+                   cert_info->key_id ? cert_info->key_id : "(none)",
+                   cert_info->serial ? cert_info->serial : "(none)",
+                   cert_info->principals ? cert_info->principals : "(none)");
+
+    return 1;
+}
+
 /* Get TTY from PAM */
 static const char *get_tty(pam_handle_t *pamh)
 {
@@ -668,6 +789,9 @@ PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh,
  *
  * This function calls the /pam/authorize endpoint to verify the user
  * has permission to access this server, based on server groups.
+ *
+ * For sudo service, it also checks if the user has sudo permissions
+ * and stores the result in PAM data for later use.
  */
 PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
                                 int flags,
@@ -714,6 +838,17 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         service = "unknown";
     }
 
+    /*
+     * Detect if this is an SSH connection with certificate authentication.
+     * Extract certificate info to send to LLNG for authorization.
+     */
+    llng_ssh_cert_info_t ssh_cert_info = {0};
+    bool has_ssh_cert = false;
+
+    if (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0) {
+        has_ssh_cert = extract_ssh_cert_info(pamh, &ssh_cert_info);
+    }
+
     /* Initialize audit event */
     if (data->audit) {
         audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);  /* Default to denied */
@@ -724,9 +859,20 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_initialized = true;
     }
 
-    /* Call authorization endpoint */
+    /* Call authorization endpoint (with or without SSH cert info) */
     llng_response_t response = {0};
-    if (llng_authorize_user(data->client, user, hostname, service, &response) != 0) {
+    int auth_result;
+
+    if (has_ssh_cert) {
+        LLNG_LOG_DEBUG(pamh, "Authorizing with SSH certificate info");
+        auth_result = llng_authorize_user_with_cert(data->client, user, hostname,
+                                                     service, &ssh_cert_info, &response);
+        llng_ssh_cert_info_free(&ssh_cert_info);
+    } else {
+        auth_result = llng_authorize_user(data->client, user, hostname, service, &response);
+    }
+
+    if (auth_result != 0) {
         LLNG_LOG_ERR(pamh, "Authorization check failed: %s",
                 llng_client_error(data->client));
 
@@ -757,6 +903,40 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         return PAM_PERM_DENIED;
     }
 
+    /*
+     * Handle sudo authorization.
+     * For sudo service, check if the user has sudo_allowed permission.
+     * Store the result in PAM environment for sudo to use.
+     */
+    if (strcmp(service, "sudo") == 0) {
+        if (response.has_permissions && !response.permissions.sudo_allowed) {
+            LLNG_LOG_INFO(pamh, "User %s authorized for SSH but not for sudo", user);
+
+            if (audit_initialized) {
+                audit_event.result_code = PAM_PERM_DENIED;
+                audit_event.reason = "Sudo not allowed";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            llng_response_free(&response);
+            return PAM_PERM_DENIED;
+        }
+
+        /* Store sudo_nopasswd flag if applicable */
+        if (response.has_permissions && response.permissions.sudo_nopasswd) {
+            pam_putenv(pamh, "LLNG_SUDO_NOPASSWD=1");
+            LLNG_LOG_DEBUG(pamh, "User %s granted sudo without password", user);
+        }
+    }
+
+    /* Store permissions in PAM data for potential use by other modules */
+    if (response.has_permissions) {
+        if (response.permissions.sudo_allowed) {
+            pam_putenv(pamh, "LLNG_SUDO_ALLOWED=1");
+        }
+    }
+
     /* Success */
     if (audit_initialized) {
         audit_event.event_type = AUDIT_AUTHZ_SUCCESS;
@@ -765,7 +945,9 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_log_event(data->audit, &audit_event);
     }
 
-    LLNG_LOG_INFO(pamh, "User %s authorized for access", user);
+    LLNG_LOG_INFO(pamh, "User %s authorized for access%s", user,
+                  (response.has_permissions && response.permissions.sudo_allowed) ?
+                  " (sudo allowed)" : "");
     llng_response_free(&response);
     return PAM_SUCCESS;
 }

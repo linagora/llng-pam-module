@@ -54,5 +54,21 @@ add_executable(test_username_validator test_username_validator.c)
 target_include_directories(test_username_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_username_validator COMMAND test_username_validator)
 
+# Test llng_client structures and functions
+add_executable(test_llng_client test_llng_client.c ../src/llng_client.c)
+target_include_directories(test_llng_client PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CURL_INCLUDE_DIRS}
+    ${JSON_C_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_link_libraries(test_llng_client
+    ${CURL_LIBRARIES}
+    ${JSON_C_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+    pthread
+)
+add_test(NAME test_llng_client COMMAND test_llng_client)
+
 # Note: Integration tests require a running LLNG instance
 # and are meant to be run manually

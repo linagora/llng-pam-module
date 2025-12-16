@@ -794,8 +794,220 @@ int llng_authorize_user(llng_client_t *client,
         }
     }
 
+    /* Parse permissions object */
+    struct json_object *perms_obj;
+    if (json_object_object_get_ex(json, "permissions", &perms_obj)) {
+        if (json_object_is_type(perms_obj, json_type_object)) {
+            response->has_permissions = true;
+            if (json_object_object_get_ex(perms_obj, "sudo_allowed", &val)) {
+                response->permissions.sudo_allowed = json_object_get_boolean(val);
+            }
+            if (json_object_object_get_ex(perms_obj, "sudo_nopasswd", &val)) {
+                response->permissions.sudo_nopasswd = json_object_get_boolean(val);
+            }
+        }
+    }
+
     json_object_put(json);
     return 0;
+}
+
+/*
+ * Internal helper for authorize with optional SSH cert info
+ */
+static int llng_authorize_user_internal(llng_client_t *client,
+                                         const char *user,
+                                         const char *host,
+                                         const char *service,
+                                         const llng_ssh_cert_info_t *ssh_cert,
+                                         llng_response_t *response)
+{
+    if (!client || !user || !response) {
+        if (client) snprintf(client->error, sizeof(client->error), "Invalid parameters");
+        return -1;
+    }
+
+    if (!client->server_token) {
+        snprintf(client->error, sizeof(client->error),
+                 "No server token configured. Server must be enrolled first.");
+        return -1;
+    }
+
+    memset(response, 0, sizeof(*response));
+    setup_curl(client);
+
+    /* Build URL */
+    char url[1024];
+    snprintf(url, sizeof(url), "%s/pam/authorize", client->portal_url);
+
+    /* Build JSON request body */
+    struct json_object *req_json = json_object_new_object();
+    json_object_object_add(req_json, "user", json_object_new_string(user));
+    if (host) {
+        json_object_object_add(req_json, "host", json_object_new_string(host));
+    }
+    if (service) {
+        json_object_object_add(req_json, "service", json_object_new_string(service));
+    }
+    if (client->server_group) {
+        json_object_object_add(req_json, "server_group",
+                               json_object_new_string(client->server_group));
+    }
+
+    /* Add SSH certificate info if provided */
+    if (ssh_cert && ssh_cert->valid) {
+        struct json_object *cert_json = json_object_new_object();
+        if (ssh_cert->key_id) {
+            json_object_object_add(cert_json, "key_id",
+                                   json_object_new_string(ssh_cert->key_id));
+        }
+        if (ssh_cert->serial) {
+            json_object_object_add(cert_json, "serial",
+                                   json_object_new_string(ssh_cert->serial));
+        }
+        if (ssh_cert->principals) {
+            json_object_object_add(cert_json, "principals",
+                                   json_object_new_string(ssh_cert->principals));
+        }
+        if (ssh_cert->ca_fingerprint) {
+            json_object_object_add(cert_json, "ca_fingerprint",
+                                   json_object_new_string(ssh_cert->ca_fingerprint));
+        }
+        json_object_object_add(req_json, "ssh_cert", cert_json);
+    }
+
+    const char *req_body = json_object_to_json_string(req_json);
+
+    /* Build headers with Bearer token */
+    struct curl_slist *headers = NULL;
+    char auth_header[4200];
+    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s",
+             client->server_token);
+    headers = curl_slist_append(headers, auth_header);
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    /* Add request signing headers if configured */
+    headers = add_signing_headers(headers, client->signing_secret,
+                                   "POST", "/pam/authorize", req_body);
+
+    response_buffer_t buf;
+    init_buffer(&buf);
+
+    curl_easy_setopt(client->curl, CURLOPT_URL, url);
+    curl_easy_setopt(client->curl, CURLOPT_POSTFIELDS, req_body);
+    curl_easy_setopt(client->curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(client->curl, CURLOPT_WRITEDATA, &buf);
+
+    CURLcode res = curl_easy_perform(client->curl);
+
+    json_object_put(req_json);
+    curl_slist_free_all(headers);
+    explicit_bzero(auth_header, sizeof(auth_header));
+
+    if (res != CURLE_OK) {
+        snprintf(client->error, sizeof(client->error),
+                 "Curl error: %s", curl_easy_strerror(res));
+        free_buffer(&buf);
+        return -1;
+    }
+
+    long http_code;
+    curl_easy_getinfo(client->curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    if (http_code == 401) {
+        snprintf(client->error, sizeof(client->error),
+                 "Server token invalid or expired. Re-enrollment required.");
+        free_buffer(&buf);
+        return -1;
+    }
+
+    if (http_code == 403) {
+        snprintf(client->error, sizeof(client->error),
+                 "Server not enrolled. Run enrollment first.");
+        free_buffer(&buf);
+        return -1;
+    }
+
+    if (http_code != 200) {
+        snprintf(client->error, sizeof(client->error),
+                 "HTTP error: %ld", http_code);
+        free_buffer(&buf);
+        return -1;
+    }
+
+    /* Parse JSON response */
+    struct json_object *json = json_tokener_parse(buf.data);
+    free_buffer(&buf);
+
+    if (!json) {
+        snprintf(client->error, sizeof(client->error), "Invalid JSON response");
+        return -1;
+    }
+
+    struct json_object *val;
+
+    if (json_object_object_get_ex(json, "authorized", &val)) {
+        response->authorized = json_object_get_boolean(val);
+    }
+
+    if (json_object_object_get_ex(json, "user", &val)) {
+        response->user = strdup(json_object_get_string(val));
+    }
+
+    if (json_object_object_get_ex(json, "reason", &val)) {
+        response->reason = strdup(json_object_get_string(val));
+    }
+
+    if (json_object_object_get_ex(json, "groups", &val)) {
+        if (json_object_is_type(val, json_type_array)) {
+            size_t count = json_object_array_length(val);
+            response->groups = calloc(count + 1, sizeof(char *));
+            if (response->groups) {
+                response->groups_count = count;
+                for (size_t i = 0; i < count; i++) {
+                    struct json_object *g = json_object_array_get_idx(val, i);
+                    response->groups[i] = strdup(json_object_get_string(g));
+                }
+            }
+        }
+    }
+
+    /* Parse permissions object */
+    struct json_object *perms_obj;
+    if (json_object_object_get_ex(json, "permissions", &perms_obj)) {
+        if (json_object_is_type(perms_obj, json_type_object)) {
+            response->has_permissions = true;
+            if (json_object_object_get_ex(perms_obj, "sudo_allowed", &val)) {
+                response->permissions.sudo_allowed = json_object_get_boolean(val);
+            }
+            if (json_object_object_get_ex(perms_obj, "sudo_nopasswd", &val)) {
+                response->permissions.sudo_nopasswd = json_object_get_boolean(val);
+            }
+        }
+    }
+
+    json_object_put(json);
+    return 0;
+}
+
+int llng_authorize_user_with_cert(llng_client_t *client,
+                                   const char *user,
+                                   const char *host,
+                                   const char *service,
+                                   const llng_ssh_cert_info_t *ssh_cert,
+                                   llng_response_t *response)
+{
+    return llng_authorize_user_internal(client, user, host, service, ssh_cert, response);
+}
+
+void llng_ssh_cert_info_free(llng_ssh_cert_info_t *cert_info)
+{
+    if (!cert_info) return;
+    free(cert_info->key_id);
+    free(cert_info->serial);
+    free(cert_info->principals);
+    free(cert_info->ca_fingerprint);
+    memset(cert_info, 0, sizeof(*cert_info));
 }
 
 void llng_response_free(llng_response_t *response)
