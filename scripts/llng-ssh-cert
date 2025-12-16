@@ -26,13 +26,30 @@ ADD_TO_AGENT=true
 USE_TOKEN=""
 VERIFY_SSL=true
 TIMEOUT=30
+TEMP_FILES=()
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Cleanup function for temp files
+cleanup() {
+    for f in "${TEMP_FILES[@]}"; do
+        rm -f "$f" 2>/dev/null
+    done
+}
+trap cleanup EXIT
+
+# Colors for output (only if terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 # Print colored output
 info() {
@@ -113,8 +130,8 @@ device_auth_flow() {
     # shellcheck disable=SC2086
     device_response=$(curl $curl_options -X POST "${PORTAL_URL}/oauth2/device" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "client_id=${CLIENT_ID}" \
-        -d "scope=${SCOPE}") || {
+        --data-urlencode "client_id=${CLIENT_ID}" \
+        --data-urlencode "scope=${SCOPE}") || {
         error "Failed to initiate device authorization"
         return 1
     }
@@ -180,9 +197,9 @@ device_auth_flow() {
         # shellcheck disable=SC2086
         token_response=$(curl $curl_options -X POST "${PORTAL_URL}/oauth2/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-            -d "device_code=${device_code}" \
-            -d "client_id=${CLIENT_ID}" 2>/dev/null) || continue
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+            --data-urlencode "device_code=${device_code}" \
+            --data-urlencode "client_id=${CLIENT_ID}" 2>/dev/null) || continue
 
         debug "Token response: $token_response"
 
@@ -317,11 +334,11 @@ Obtain SSH certificates from LemonLDAP::NG.
 Options:
   -p, --portal URL       LLNG portal URL (required)
   -v, --validity MIN     Certificate validity in minutes (default: $VALIDITY_MINUTES)
-  -k, --key FILE         Public key file (default: from SSH agent)
+  -K, --key FILE         Public key file (default: from SSH agent)
   -o, --output FILE      Output certificate file (default: add to agent)
-  -t, --token TOKEN      Use existing access token
+  -t, --token-file FILE  Read access token from file (use - for stdin)
   -c, --client-id ID     OIDC client ID (default: $CLIENT_ID)
-  -i, --insecure         Skip SSL certificate verification
+  -k, --insecure         Skip SSL certificate verification
   -d, --debug            Enable debug output
   -h, --help             Show this help
   -V, --version          Show version
@@ -362,10 +379,14 @@ parse_args() {
                     error "Option $1 requires an argument"
                     exit 1
                 fi
+                if ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -le 0 ]; then
+                    error "Validity must be a positive integer (minutes)"
+                    exit 1
+                fi
                 VALIDITY_MINUTES="$2"
                 shift 2
                 ;;
-            -k|--key)
+            -K|--key)
                 if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
                     error "Option $1 requires an argument"
                     exit 1
@@ -382,12 +403,19 @@ parse_args() {
                 ADD_TO_AGENT=false
                 shift 2
                 ;;
-            -t|--token)
+            -t|--token-file)
                 if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
                     error "Option $1 requires an argument"
                     exit 1
                 fi
-                USE_TOKEN="$2"
+                if [ "$2" = "-" ]; then
+                    USE_TOKEN=$(cat)
+                elif [ -f "$2" ]; then
+                    USE_TOKEN=$(cat "$2")
+                else
+                    error "Token file not found: $2"
+                    exit 1
+                fi
                 shift 2
                 ;;
             -c|--client-id)
@@ -398,7 +426,7 @@ parse_args() {
                 CLIENT_ID="$2"
                 shift 2
                 ;;
-            -i|--insecure)
+            -k|--insecure)
                 VERIFY_SSL=false
                 shift
                 ;;
@@ -477,30 +505,17 @@ main() {
         echo "  ssh-add ${OUTPUT_FILE%-cert.pub}"
         echo "  ssh user@server"
     elif [ "$ADD_TO_AGENT" = "true" ]; then
-        # Create temp file and add to agent
-        local temp_cert
-        temp_cert=$(mktemp /tmp/ssh-cert-XXXXXX.pub)
-        echo "$certificate" > "$temp_cert"
-
-        # If we have a key file, create matching cert file
+        # If we have a key file, create matching cert file and add to agent
         if [ -n "$PUBLIC_KEY_FILE" ]; then
             local cert_file="${PUBLIC_KEY_FILE%.pub}-cert.pub"
             echo "$certificate" > "$cert_file"
             chmod 644 "$cert_file"
             info "Certificate saved to: $cert_file"
-
-            # Add the key (which will pick up the cert)
-            local key_file="${PUBLIC_KEY_FILE%.pub}"
-            if [ -f "$key_file" ]; then
-                ssh-add "$key_file" 2>/dev/null && \
-                    info "Certificate added to SSH agent"
-            fi
+            add_to_agent "$cert_file"
         else
             info "Certificate (copy to your key location with -cert.pub suffix):"
             echo "$certificate"
         fi
-
-        rm -f "$temp_cert"
     else
         echo "$certificate"
     fi

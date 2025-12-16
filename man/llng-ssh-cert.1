@@ -23,19 +23,19 @@ LemonLDAP::NG portal URL (required).
 .BR \-v ", " \-\-validity " " \fIMINUTES\fR
 Certificate validity in minutes. Default: 30
 .TP
-.BR \-k ", " \-\-key " " \fIFILE\fR
+.BR \-K ", " \-\-key " " \fIFILE\fR
 Public key file to sign. Default: uses key from SSH agent.
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
 Output certificate file. Default: add to SSH agent.
 .TP
-.BR \-t ", " \-\-token " " \fITOKEN\fR
-Use an existing access token instead of Device Authorization flow.
+.BR \-t ", " \-\-token\-file " " \fIFILE\fR
+Read access token from file instead of Device Authorization flow. Use - for stdin.
 .TP
 .BR \-c ", " \-\-client\-id " " \fIID\fR
 OIDC client ID. Default: ssh-cert
 .TP
-.BR \-i ", " \-\-insecure
+.BR \-k ", " \-\-insecure
 Skip SSL certificate verification.
 .TP
 .BR \-d ", " \-\-debug

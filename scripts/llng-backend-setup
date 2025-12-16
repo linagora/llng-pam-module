@@ -41,12 +41,20 @@ PAM_LLNG_CONF="/etc/security/pam_llng.conf"
 PAM_LLNG_TOKEN="/etc/security/pam_llng.token"
 NSS_LLNG_CONF="/etc/nss_llng.conf"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Colors (only if terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 info() { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
@@ -280,17 +288,30 @@ configure_nss() {
     backup_file "$NSSWITCH_CONF"
 
     # Add llng to passwd and group lines if not already present
+    # Insert llng after 'files' (or 'compat') for proper resolution order
     if grep -q "^passwd:.*llng" "$NSSWITCH_CONF"; then
         info "NSS already configured for passwd"
     else
-        sed -i 's/^passwd:\(.*\)/passwd:\1 llng/' "$NSSWITCH_CONF"
+        if grep -q "^passwd:.*files" "$NSSWITCH_CONF"; then
+            sed -i 's/^\(passwd:.*files\)/\1 llng/' "$NSSWITCH_CONF"
+        elif grep -q "^passwd:.*compat" "$NSSWITCH_CONF"; then
+            sed -i 's/^\(passwd:.*compat\)/\1 llng/' "$NSSWITCH_CONF"
+        else
+            sed -i 's/^\(passwd:.*\)/\1 llng/' "$NSSWITCH_CONF"
+        fi
         info "Added llng to passwd in $NSSWITCH_CONF"
     fi
 
     if grep -q "^group:.*llng" "$NSSWITCH_CONF"; then
         info "NSS already configured for group"
     else
-        sed -i 's/^group:\(.*\)/group:\1 llng/' "$NSSWITCH_CONF"
+        if grep -q "^group:.*files" "$NSSWITCH_CONF"; then
+            sed -i 's/^\(group:.*files\)/\1 llng/' "$NSSWITCH_CONF"
+        elif grep -q "^group:.*compat" "$NSSWITCH_CONF"; then
+            sed -i 's/^\(group:.*compat\)/\1 llng/' "$NSSWITCH_CONF"
+        else
+            sed -i 's/^\(group:.*\)/\1 llng/' "$NSSWITCH_CONF"
+        fi
         info "Added llng to group in $NSSWITCH_CONF"
     fi
 
@@ -484,8 +505,8 @@ Required:
   -g, --server-group NAME Server group name (for authorization rules)
 
 Options:
-  -t, --token TOKEN       Server authentication token
-  -y, --yes               Non-interactive mode (requires --token)
+  -t, --token-file FILE   Read server token from file (use - for stdin)
+  -y, --yes               Non-interactive mode (requires --token-file)
   -k, --insecure          Skip SSL certificate verification
   --no-sudo               Don't configure sudo with LLNG
   --no-create-user        Don't enable automatic user creation
@@ -529,12 +550,19 @@ parse_args() {
                 SERVER_GROUP="$2"
                 shift 2
                 ;;
-            -t|--token)
+            -t|--token-file)
                 if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
                     error "Option $1 requires an argument"
                     exit 1
                 fi
-                SERVER_TOKEN="$2"
+                if [ "$2" = "-" ]; then
+                    SERVER_TOKEN=$(cat)
+                elif [ -f "$2" ]; then
+                    SERVER_TOKEN=$(cat "$2")
+                else
+                    error "Token file not found: $2"
+                    exit 1
+                fi
                 shift 2
                 ;;
             -y|--yes)

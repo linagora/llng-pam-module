@@ -27,8 +27,8 @@ LemonLDAP::NG portal URL (required).
 .BR \-g ", " \-\-server\-group " " \fINAME\fR
 Server group name for authorization rules. Default: default
 .TP
-.BR \-t ", " \-\-token " " \fITOKEN\fR
-Server authentication token (for non-interactive enrollment).
+.BR \-t ", " \-\-token\-file " " \fIFILE\fR
+Read server token from file (use - for stdin). For non-interactive enrollment.
 .TP
 .BR \-\-no\-create\-user
 Disable automatic user creation.
@@ -43,7 +43,7 @@ Disable NSS configuration.
 Allow password authentication (in addition to certificates).
 .TP
 .BR \-y ", " \-\-yes
-Non-interactive mode (requires \-\-token).
+Non-interactive mode (requires \-\-token\-file).
 .TP
 .BR \-k ", " \-\-insecure
 Skip SSL certificate verification.
