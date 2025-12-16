@@ -330,6 +330,7 @@ main() {
         ) &
         TIMEOUT_PID=$!
         # Kill timeout process on exit
+        # shellcheck disable=SC2064  # Intentional: capture TIMEOUT_PID now, not at signal time
         trap "kill $TIMEOUT_PID 2>/dev/null; cleanup" EXIT
     fi
 
