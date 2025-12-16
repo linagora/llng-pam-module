@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
 
 #include "../include/auth_cache.h"
 
@@ -48,13 +50,77 @@ static int setup_test_dir(void)
     return 0;
 }
 
-/* Remove test directory recursively */
+/*
+ * Safe recursive directory removal using directory file descriptors.
+ * This avoids TOCTOU race conditions that exist with system("rm -rf").
+ */
+static int safe_rmdir_recursive(int parent_fd, const char *name)
+{
+    int fd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) {
+        /* Not a directory or doesn't exist - try to unlink as file */
+        if (errno == ENOTDIR || errno == ENOENT) {
+            return unlinkat(parent_fd, name, 0);
+        }
+        return -1;
+    }
+
+    DIR *dir = fdopendir(fd);
+    if (!dir) {
+        close(fd);
+        return -1;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        struct stat st;
+        if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                safe_rmdir_recursive(fd, entry->d_name);
+            } else {
+                unlinkat(fd, entry->d_name, 0);
+            }
+        }
+    }
+
+    closedir(dir);  /* Also closes fd */
+    return unlinkat(parent_fd, name, AT_REMOVEDIR);
+}
+
+/* Remove test directory recursively using safe method */
 static void cleanup_test_dir(void)
 {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    int ret = system(cmd);
-    (void)ret;
+    /* Extract parent directory and basename from test_dir */
+    char *dir_copy = strdup(test_dir);
+    if (!dir_copy) return;
+
+    char *last_slash = strrchr(dir_copy, '/');
+    if (!last_slash || last_slash == dir_copy) {
+        /* Handle /tmp case or no slash */
+        int parent_fd = open("/tmp", O_RDONLY | O_DIRECTORY);
+        if (parent_fd >= 0) {
+            /* Get just the directory name */
+            const char *basename = last_slash ? last_slash + 1 : test_dir;
+            safe_rmdir_recursive(parent_fd, basename);
+            close(parent_fd);
+        }
+    } else {
+        *last_slash = '\0';
+        const char *parent_path = dir_copy;
+        const char *basename = last_slash + 1;
+
+        int parent_fd = open(parent_path, O_RDONLY | O_DIRECTORY);
+        if (parent_fd >= 0) {
+            safe_rmdir_recursive(parent_fd, basename);
+            close(parent_fd);
+        }
+    }
+
+    free(dir_copy);
 }
 
 /* Test: Initialize and destroy cache */

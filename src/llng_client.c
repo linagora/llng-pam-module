@@ -24,6 +24,21 @@
 /* Stack buffer size for HMAC signature message building */
 #define SIGNATURE_STACK_BUFFER_SIZE 512
 
+/* Safe strdup from JSON - returns NULL if json string is NULL */
+static inline char *safe_json_strdup(struct json_object *obj)
+{
+    const char *str = json_object_get_string(obj);
+    return str ? strdup(str) : NULL;
+}
+
+/* Forward declaration for internal authorize function */
+static int llng_authorize_user_internal(llng_client_t *client,
+                                         const char *user,
+                                         const char *host,
+                                         const char *service,
+                                         const llng_ssh_cert_info_t *ssh_cert,
+                                         llng_response_t *response);
+
 /* Thread-safe curl initialization */
 static pthread_once_t curl_init_once = PTHREAD_ONCE_INIT;
 static void curl_global_init_once(void)
@@ -518,11 +533,11 @@ int llng_verify_token(llng_client_t *client,
     }
 
     if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = strdup(json_object_get_string(val));
+        response->user = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "error", &val)) {
-        response->reason = strdup(json_object_get_string(val));
+        response->reason = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "groups", &val)) {
@@ -533,7 +548,9 @@ int llng_verify_token(llng_client_t *client,
                 response->groups_count = count;
                 for (size_t i = 0; i < count; i++) {
                     struct json_object *g = json_object_array_get_idx(val, i);
-                    response->groups[i] = strdup(json_object_get_string(g));
+                    if (g) {
+                        response->groups[i] = safe_json_strdup(g);
+                    }
                 }
             }
         }
@@ -544,13 +561,13 @@ int llng_verify_token(llng_client_t *client,
     if (json_object_object_get_ex(json, "attrs", &attrs_obj)) {
         if (json_object_is_type(attrs_obj, json_type_object)) {
             if (json_object_object_get_ex(attrs_obj, "gecos", &val)) {
-                response->gecos = strdup(json_object_get_string(val));
+                response->gecos = safe_json_strdup(val);
             }
             if (json_object_object_get_ex(attrs_obj, "shell", &val)) {
-                response->shell = strdup(json_object_get_string(val));
+                response->shell = safe_json_strdup(val);
             }
             if (json_object_object_get_ex(attrs_obj, "home", &val)) {
-                response->home = strdup(json_object_get_string(val));
+                response->home = safe_json_strdup(val);
             }
         }
     }
@@ -641,11 +658,11 @@ int llng_introspect_token(llng_client_t *client,
     }
 
     if (json_object_object_get_ex(json, "sub", &val)) {
-        response->user = strdup(json_object_get_string(val));
+        response->user = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "scope", &val)) {
-        response->scope = strdup(json_object_get_string(val));
+        response->scope = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "exp", &val)) {
@@ -666,164 +683,8 @@ int llng_authorize_user(llng_client_t *client,
                         const char *service,
                         llng_response_t *response)
 {
-    if (!client || !user || !response) {
-        if (client) snprintf(client->error, sizeof(client->error), "Invalid parameters");
-        return -1;
-    }
-
-    if (!client->server_token) {
-        snprintf(client->error, sizeof(client->error),
-                 "No server token configured. Server must be enrolled first.");
-        return -1;
-    }
-
-    memset(response, 0, sizeof(*response));
-    setup_curl(client);
-
-    /* Build URL */
-    char url[1024];
-    snprintf(url, sizeof(url), "%s/pam/authorize", client->portal_url);
-
-    /* Build JSON request body */
-    struct json_object *req_json = json_object_new_object();
-    json_object_object_add(req_json, "user", json_object_new_string(user));
-    if (host) {
-        json_object_object_add(req_json, "host", json_object_new_string(host));
-    }
-    if (service) {
-        json_object_object_add(req_json, "service", json_object_new_string(service));
-    }
-    if (client->server_group) {
-        json_object_object_add(req_json, "server_group",
-                               json_object_new_string(client->server_group));
-    }
-
-    const char *req_body = json_object_to_json_string(req_json);
-
-    /* Build headers with Bearer token */
-    struct curl_slist *headers = NULL;
-    char auth_header[4200];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s",
-             client->server_token);
-    headers = curl_slist_append(headers, auth_header);
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-
-    /* Add request signing headers if configured */
-    headers = add_signing_headers(headers, client->signing_secret,
-                                   "POST", "/pam/authorize", req_body);
-
-    response_buffer_t buf;
-    init_buffer(&buf);
-
-    curl_easy_setopt(client->curl, CURLOPT_URL, url);
-    curl_easy_setopt(client->curl, CURLOPT_POSTFIELDS, req_body);
-    curl_easy_setopt(client->curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(client->curl, CURLOPT_WRITEDATA, &buf);
-
-    CURLcode res = curl_easy_perform(client->curl);
-
-    json_object_put(req_json);
-    curl_slist_free_all(headers);
-    explicit_bzero(auth_header, sizeof(auth_header));
-
-    if (res != CURLE_OK) {
-        snprintf(client->error, sizeof(client->error),
-                 "Curl error: %s", curl_easy_strerror(res));
-        free_buffer(&buf);
-        return -1;
-    }
-
-    long http_code;
-    curl_easy_getinfo(client->curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    if (http_code == 401) {
-        snprintf(client->error, sizeof(client->error),
-                 "Server token invalid or expired. Re-enrollment required.");
-        free_buffer(&buf);
-        return -1;
-    }
-
-    if (http_code == 403) {
-        snprintf(client->error, sizeof(client->error),
-                 "Server not enrolled. Run enrollment first.");
-        free_buffer(&buf);
-        return -1;
-    }
-
-    if (http_code != 200) {
-        snprintf(client->error, sizeof(client->error),
-                 "HTTP error: %ld", http_code);
-        free_buffer(&buf);
-        return -1;
-    }
-
-    /* Parse JSON response */
-    struct json_object *json = json_tokener_parse(buf.data);
-    free_buffer(&buf);
-
-    if (!json) {
-        snprintf(client->error, sizeof(client->error), "Invalid JSON response");
-        return -1;
-    }
-
-    struct json_object *val;
-
-    if (json_object_object_get_ex(json, "authorized", &val)) {
-        response->authorized = json_object_get_boolean(val);
-    }
-
-    if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = strdup(json_object_get_string(val));
-    }
-
-    if (json_object_object_get_ex(json, "reason", &val)) {
-        response->reason = strdup(json_object_get_string(val));
-    }
-
-    if (json_object_object_get_ex(json, "groups", &val)) {
-        if (json_object_is_type(val, json_type_array)) {
-            size_t count = json_object_array_length(val);
-            response->groups = calloc(count + 1, sizeof(char *));
-            if (response->groups) {
-                response->groups_count = count;
-                for (size_t i = 0; i < count; i++) {
-                    struct json_object *g = json_object_array_get_idx(val, i);
-                    response->groups[i] = strdup(json_object_get_string(g));
-                }
-            }
-        }
-    }
-
-    /* Parse permissions object */
-    struct json_object *perms_obj;
-    if (json_object_object_get_ex(json, "permissions", &perms_obj)) {
-        if (json_object_is_type(perms_obj, json_type_object)) {
-            response->has_permissions = true;
-            if (json_object_object_get_ex(perms_obj, "sudo_allowed", &val)) {
-                response->permissions.sudo_allowed = json_object_get_boolean(val);
-            }
-            if (json_object_object_get_ex(perms_obj, "sudo_nopasswd", &val)) {
-                response->permissions.sudo_nopasswd = json_object_get_boolean(val);
-            }
-        }
-    }
-
-    /* Parse offline settings object */
-    struct json_object *offline_obj;
-    if (json_object_object_get_ex(json, "offline", &offline_obj)) {
-        if (json_object_is_type(offline_obj, json_type_object)) {
-            response->has_offline = true;
-            if (json_object_object_get_ex(offline_obj, "enabled", &val)) {
-                response->offline.enabled = json_object_get_boolean(val);
-            }
-            if (json_object_object_get_ex(offline_obj, "ttl", &val)) {
-                response->offline.ttl = json_object_get_int(val);
-            }
-        }
-    }
-
-    json_object_put(json);
-    return 0;
+    /* Delegate to internal function without SSH certificate info */
+    return llng_authorize_user_internal(client, user, host, service, NULL, response);
 }
 
 /*
@@ -965,11 +826,11 @@ static int llng_authorize_user_internal(llng_client_t *client,
     }
 
     if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = strdup(json_object_get_string(val));
+        response->user = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "reason", &val)) {
-        response->reason = strdup(json_object_get_string(val));
+        response->reason = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "groups", &val)) {
@@ -980,7 +841,9 @@ static int llng_authorize_user_internal(llng_client_t *client,
                 response->groups_count = count;
                 for (size_t i = 0; i < count; i++) {
                     struct json_object *g = json_object_array_get_idx(val, i);
-                    response->groups[i] = strdup(json_object_get_string(g));
+                    if (g) {
+                        response->groups[i] = safe_json_strdup(g);
+                    }
                 }
             }
         }
@@ -1036,6 +899,12 @@ void llng_ssh_cert_info_free(llng_ssh_cert_info_t *cert_info)
     free(cert_info->principals);
     free(cert_info->ca_fingerprint);
     memset(cert_info, 0, sizeof(*cert_info));
+}
+
+void llng_response_init(llng_response_t *response)
+{
+    if (!response) return;
+    memset(response, 0, sizeof(*response));
 }
 
 void llng_response_free(llng_response_t *response)

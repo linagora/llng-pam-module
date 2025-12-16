@@ -134,6 +134,11 @@ int llng_authorize_user_with_cert(llng_client_t *client,
 void llng_ssh_cert_info_free(llng_ssh_cert_info_t *cert_info);
 
 /*
+ * Initialize response structure to safe defaults (all zeros)
+ */
+void llng_response_init(llng_response_t *response);
+
+/*
  * Free response structure contents
  */
 void llng_response_free(llng_response_t *response);

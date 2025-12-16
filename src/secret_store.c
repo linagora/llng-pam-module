@@ -185,13 +185,13 @@ secret_store_t *secret_store_init(const secret_store_config_t *config)
     struct stat st;
     if (stat(store->config.store_dir, &st) != 0) {
         if (mkdir(store->config.store_dir, 0700) != 0 && errno != EEXIST) {
-            /* Try to create parent directories */
+            /* Try to create parent directories with restricted permissions */
             char *parent = strdup(store->config.store_dir);
             if (parent) {
                 char *last_slash = strrchr(parent, '/');
                 if (last_slash) {
                     *last_slash = '\0';
-                    mkdir(parent, 0755);
+                    mkdir(parent, 0700);
                 }
                 free(parent);
             }

@@ -46,6 +46,7 @@
 
 /* Time constants */
 #define SECONDS_PER_DAY 86400
+#define DEFAULT_OFFLINE_CACHE_TTL 86400  /* Default 24 hours for offline cache */
 
 /* Internal data structure */
 typedef struct {
@@ -460,24 +461,27 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
      */
     cert_info->valid = true;
 
+    /* Maximum length for SSH environment variables to prevent DoS */
+    #define MAX_SSH_ENV_LEN 4096
+
     /* Try to get certificate details from SSH_CERT_* environment vars */
     const char *key_id = pam_getenv(pamh, "SSH_CERT_KEY_ID");
-    if (key_id) {
+    if (key_id && strlen(key_id) < MAX_SSH_ENV_LEN) {
         cert_info->key_id = strdup(key_id);
     }
 
     const char *serial = pam_getenv(pamh, "SSH_CERT_SERIAL");
-    if (serial) {
+    if (serial && strlen(serial) < MAX_SSH_ENV_LEN) {
         cert_info->serial = strdup(serial);
     }
 
     const char *principals = pam_getenv(pamh, "SSH_CERT_PRINCIPALS");
-    if (principals) {
+    if (principals && strlen(principals) < MAX_SSH_ENV_LEN) {
         cert_info->principals = strdup(principals);
     }
 
     const char *ca_fp = pam_getenv(pamh, "SSH_CERT_CA_KEY_FP");
-    if (ca_fp) {
+    if (ca_fp && strlen(ca_fp) < MAX_SSH_ENV_LEN) {
         cert_info->ca_fingerprint = strdup(ca_fp);
     }
 
@@ -979,7 +983,7 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
      * - Cache is available
      */
     if (!from_cache && use_cache && response.has_offline && response.offline.enabled) {
-        int ttl = response.offline.ttl > 0 ? response.offline.ttl : 86400;  /* Default 24h */
+        int ttl = response.offline.ttl > 0 ? response.offline.ttl : DEFAULT_OFFLINE_CACHE_TTL;
         auth_cache_entry_t cache_entry = {
             .version = 3,
             .user = (char *)user,

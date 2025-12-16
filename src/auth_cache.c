@@ -29,6 +29,13 @@
 #define AUTH_CACHE_VERSION 3
 #define AUTH_CACHE_MAGIC "LLNGCACHE03"
 
+/* Safe strdup from JSON - returns NULL if json string is NULL */
+static inline char *safe_json_strdup(struct json_object *obj)
+{
+    const char *str = json_object_get_string(obj);
+    return str ? strdup(str) : NULL;
+}
+
 /* Encryption constants (same as token_cache) */
 #define MACHINE_ID_FILE "/etc/machine-id"
 #define KEY_SIZE 32
@@ -443,7 +450,9 @@ bool auth_cache_lookup(auth_cache_t *cache,
                 entry->groups_count = count;
                 for (size_t i = 0; i < count; i++) {
                     struct json_object *g = json_object_array_get_idx(val, i);
-                    entry->groups[i] = strdup(json_object_get_string(g));
+                    if (g) {
+                        entry->groups[i] = safe_json_strdup(g);
+                    }
                 }
             }
         }
@@ -458,15 +467,15 @@ bool auth_cache_lookup(auth_cache_t *cache,
     }
 
     if (json_object_object_get_ex(json, "gecos", &val)) {
-        entry->gecos = strdup(json_object_get_string(val));
+        entry->gecos = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "shell", &val)) {
-        entry->shell = strdup(json_object_get_string(val));
+        entry->shell = safe_json_strdup(val);
     }
 
     if (json_object_object_get_ex(json, "home", &val)) {
-        entry->home = strdup(json_object_get_string(val));
+        entry->home = safe_json_strdup(val);
     }
 
     entry->version = AUTH_CACHE_VERSION;
@@ -538,7 +547,7 @@ int auth_cache_store(auth_cache_t *cache,
     char temp_path[PATH_MAX + 8];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
 
-    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
     if (fd < 0) {
         explicit_bzero(encrypted, encrypted_len);
         free(encrypted);

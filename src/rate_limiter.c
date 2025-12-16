@@ -197,13 +197,13 @@ rate_limiter_t *rate_limiter_init(const rate_limiter_config_t *config)
     struct stat st;
     if (stat(rl->config.state_dir, &st) != 0) {
         if (mkdir(rl->config.state_dir, 0700) != 0 && errno != EEXIST) {
-            /* Try to create parent directory */
+            /* Try to create parent directory with restricted permissions */
             char *parent = strdup(rl->config.state_dir);
             if (parent) {
                 char *last_slash = strrchr(parent, '/');
                 if (last_slash) {
                     *last_slash = '\0';
-                    mkdir(parent, 0755);
+                    mkdir(parent, 0700);
                 }
                 free(parent);
             }

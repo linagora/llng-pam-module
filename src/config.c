@@ -582,12 +582,12 @@ static void ensure_parent_dir(const char *filepath)
         if (stat(parent, &st) != 0) {
             /* Try to create the parent directory with secure permissions */
             if (mkdir(parent, 0750) != 0 && errno != EEXIST) {
-                /* Try creating grandparent first */
+                /* Try creating grandparent first with restricted permissions */
                 char *parent_copy = strdup(parent);
                 if (parent_copy) {
                     char *grandparent = dirname(parent_copy);
                     if (grandparent && strcmp(grandparent, ".") != 0) {
-                        mkdir(grandparent, 0755);
+                        mkdir(grandparent, 0750);
                     }
                     free(parent_copy);
                 }
