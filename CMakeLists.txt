@@ -109,6 +109,16 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-heartbeat
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+# Install session recorder script
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-session-recorder
+    DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
+# Install session recorder config example
+install(FILES ${CMAKE_SOURCE_DIR}/scripts/session-recorder.conf.example
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/llng
+)
+
 # Install man pages
 install(FILES
     ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8

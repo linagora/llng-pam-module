@@ -1,0 +1,373 @@
+#!/bin/bash
+#
+# llng-session-recorder - Record SSH sessions for audit purposes
+#
+# This script is designed to be used as ForceCommand in sshd_config
+# to record all SSH sessions passing through a bastion host.
+#
+# Supports recording formats:
+# - script: Plain typescript (default, always available)
+# - asciinema: Using asciinema tool if installed
+# - ttyrec: Using ttyrec tool if installed
+#
+# Copyright (C) 2025 Linagora
+# License: AGPL-3.0
+
+set -euo pipefail
+
+VERSION="1.0.0"
+PROG_NAME=$(basename "$0")
+
+# Default configuration
+CONFIG_FILE="${LLNG_RECORDER_CONFIG:-/etc/llng/session-recorder.conf}"
+SESSIONS_DIR="${LLNG_SESSIONS_DIR:-/var/lib/llng-sessions}"
+FORMAT="${LLNG_RECORDER_FORMAT:-script}"
+MAX_SESSION_DURATION="${LLNG_MAX_SESSION:-86400}"  # 24 hours default
+
+# Metadata
+SESSION_ID=""
+SESSION_USER="${USER:-unknown}"
+SESSION_START=""
+SESSION_FILE=""
+METADATA_FILE=""
+ORIGINAL_COMMAND="${SSH_ORIGINAL_COMMAND:-}"
+CLIENT_IP="${SSH_CLIENT%% *}"
+TTY_NAME="${SSH_TTY:-notty}"
+
+# Process management
+TIMEOUT_PID=""
+RECORDING_PID=""
+
+# Logging to syslog
+log_info() {
+    logger -t "$PROG_NAME" -p auth.info "$*"
+}
+
+log_warn() {
+    logger -t "$PROG_NAME" -p auth.warning "$*"
+}
+
+log_err() {
+    logger -t "$PROG_NAME" -p auth.err "$*"
+}
+
+# Generate unique session ID (UUID v4)
+generate_session_id() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen
+    elif [ -r /proc/sys/kernel/random/uuid ]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        # Fallback: timestamp + random
+        printf '%s-%s' "$(date +%Y%m%d%H%M%S)" "$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+}
+
+# Load configuration file
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        while IFS= read -r line; do
+            # Skip comments and empty lines
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+
+            # Parse key=value, handling inline comments
+            if [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local value="${BASH_REMATCH[2]}"
+
+                # Remove inline comments and trailing whitespace
+                value="${value%%#*}"
+                value="${value%"${value##*[![:space:]]}"}"
+
+                # Remove surrounding quotes
+                value="${value#[\"\']}"
+                value="${value%[\"\']}"
+
+                case "$key" in
+                    sessions_dir) SESSIONS_DIR="$value" ;;
+                    format) FORMAT="$value" ;;
+                    max_duration) MAX_SESSION_DURATION="$value" ;;
+                esac
+            fi
+        done < "$CONFIG_FILE"
+    fi
+}
+
+# Create sessions directory with proper permissions
+ensure_sessions_dir() {
+    if [ ! -d "$SESSIONS_DIR" ]; then
+        mkdir -p "$SESSIONS_DIR"
+        chmod 0755 "$SESSIONS_DIR"
+    fi
+
+    # Create user subdirectory (owned by user, mode 0700)
+    local user_dir="$SESSIONS_DIR/$SESSION_USER"
+    if [ ! -d "$user_dir" ]; then
+        mkdir -p "$user_dir"
+        chmod 0700 "$user_dir"
+    fi
+}
+
+# Write session metadata
+write_metadata() {
+    local status="$1"
+    local end_time
+    end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Escape original command for JSON
+    local escaped_command
+    if command -v jq >/dev/null 2>&1; then
+        escaped_command=$(printf '%s' "$ORIGINAL_COMMAND" | jq -Rs .)
+    else
+        # Simple escaping fallback
+        escaped_command="\"${ORIGINAL_COMMAND//\"/\\\"}\""
+    fi
+
+    cat > "$METADATA_FILE" <<EOF
+{
+    "session_id": "$SESSION_ID",
+    "user": "$SESSION_USER",
+    "client_ip": "$CLIENT_IP",
+    "tty": "$TTY_NAME",
+    "start_time": "$SESSION_START",
+    "end_time": "$end_time",
+    "status": "$status",
+    "original_command": $escaped_command,
+    "format": "$FORMAT",
+    "recording_file": "$(basename "$SESSION_FILE")",
+    "hostname": "$(hostname -f 2>/dev/null || hostname)",
+    "version": "$VERSION"
+}
+EOF
+    chmod 0600 "$METADATA_FILE"
+}
+
+# Cleanup on exit
+cleanup() {
+    local exit_code=$?
+    local status="completed"
+
+    # Kill timeout process if running
+    if [ -n "$TIMEOUT_PID" ]; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+        wait "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+
+    if [ $exit_code -ne 0 ]; then
+        status="error:$exit_code"
+    fi
+
+    # Update metadata with end time and status
+    if [ -n "$METADATA_FILE" ] && [ -d "$(dirname "$METADATA_FILE")" ]; then
+        write_metadata "$status"
+    fi
+
+    log_info "Session $SESSION_ID ended for user $SESSION_USER (status: $status)"
+}
+
+# Handle session timeout
+handle_timeout() {
+    log_warn "Session $SESSION_ID timed out after $MAX_SESSION_DURATION seconds"
+    echo "Session timed out after $MAX_SESSION_DURATION seconds" >&2
+
+    # Kill the recording process if running
+    if [ -n "$RECORDING_PID" ]; then
+        kill -TERM "$RECORDING_PID" 2>/dev/null || true
+    fi
+
+    exit 124  # Standard timeout exit code
+}
+
+# Record session using script command (always available)
+record_script() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        script -q -c "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        script -q -c "$shell" "$SESSION_FILE"
+    fi
+}
+
+# Record session using asciinema (if available)
+record_asciinema() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if ! command -v asciinema >/dev/null 2>&1; then
+        log_warn "asciinema not installed, falling back to script"
+        FORMAT="script"
+        SESSION_FILE="${SESSION_FILE%.cast}.typescript"
+        record_script
+        return
+    fi
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        asciinema rec -c "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        asciinema rec -c "$shell" "$SESSION_FILE"
+    fi
+}
+
+# Record session using ttyrec (if available)
+record_ttyrec() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if ! command -v ttyrec >/dev/null 2>&1; then
+        log_warn "ttyrec not installed, falling back to script"
+        FORMAT="script"
+        SESSION_FILE="${SESSION_FILE%.ttyrec}.typescript"
+        record_script
+        return
+    fi
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        ttyrec -e "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        ttyrec -e "$shell" "$SESSION_FILE"
+    fi
+}
+
+# Print usage
+usage() {
+    cat <<EOF
+Usage: $PROG_NAME [OPTIONS]
+
+Record SSH sessions for audit purposes.
+Designed to be used as ForceCommand in sshd_config.
+
+Options:
+    -h, --help          Show this help message
+    -v, --version       Show version
+    -c, --config FILE   Configuration file (default: $CONFIG_FILE)
+    -d, --dir DIR       Sessions directory (default: $SESSIONS_DIR)
+    -f, --format FMT    Recording format: script, asciinema, ttyrec
+                        (default: $FORMAT)
+
+Configuration file format:
+    sessions_dir = /var/lib/llng-sessions
+    format = script
+    max_duration = 86400
+
+sshd_config example:
+    Match Group recorded-users
+        ForceCommand /usr/sbin/llng-session-recorder
+
+Environment variables:
+    LLNG_RECORDER_CONFIG    Config file path
+    LLNG_SESSIONS_DIR       Sessions directory
+    LLNG_RECORDER_FORMAT    Recording format
+    LLNG_MAX_SESSION        Max session duration in seconds
+
+EOF
+}
+
+# Parse command line arguments
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--version)
+                echo "$PROG_NAME version $VERSION"
+                exit 0
+                ;;
+            -c|--config)
+                if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            -d|--dir)
+                if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
+                SESSIONS_DIR="$2"
+                shift 2
+                ;;
+            -f|--format)
+                if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
+                FORMAT="$2"
+                shift 2
+                ;;
+            *)
+                log_err "Unknown option: $1"
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Main
+main() {
+    parse_args "$@"
+    load_config
+
+    # Generate session ID and timestamps
+    SESSION_ID=$(generate_session_id)
+    SESSION_START=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Setup paths
+    ensure_sessions_dir
+    local user_dir="$SESSIONS_DIR/$SESSION_USER"
+    local date_prefix
+    date_prefix=$(date +%Y%m%d-%H%M%S)
+
+    case "$FORMAT" in
+        asciinema)
+            SESSION_FILE="$user_dir/${date_prefix}_${SESSION_ID}.cast"
+            ;;
+        ttyrec)
+            SESSION_FILE="$user_dir/${date_prefix}_${SESSION_ID}.ttyrec"
+            ;;
+        *)
+            FORMAT="script"
+            SESSION_FILE="$user_dir/${date_prefix}_${SESSION_ID}.typescript"
+            ;;
+    esac
+
+    METADATA_FILE="$user_dir/${date_prefix}_${SESSION_ID}.json"
+
+    # Write initial metadata
+    write_metadata "active"
+
+    log_info "Session $SESSION_ID started for user $SESSION_USER from $CLIENT_IP"
+
+    # Setup cleanup trap
+    trap cleanup EXIT
+    trap handle_timeout ALRM
+
+    # Set session timeout (in background)
+    if [ "$MAX_SESSION_DURATION" -gt 0 ]; then
+        local parent_pid=$$
+        (
+            sleep "$MAX_SESSION_DURATION"
+            kill -ALRM "$parent_pid" 2>/dev/null || true
+        ) &
+        TIMEOUT_PID=$!
+    fi
+
+    # Start recording based on format (runs in foreground, allows cleanup)
+    case "$FORMAT" in
+        asciinema)
+            record_asciinema
+            ;;
+        ttyrec)
+            record_ttyrec
+            ;;
+        *)
+            record_script
+            ;;
+    esac
+}
+
+main "$@"
