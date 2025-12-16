@@ -108,6 +108,11 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-heartbeat
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+# Install man page
+install(FILES ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8
+    DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
+)
+
 # Install systemd units
 install(FILES
     ${CMAKE_SOURCE_DIR}/systemd/pam-llng-heartbeat.timer
@@ -115,10 +120,8 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system
 )
 
-# Install man page
-install(FILES ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8
-    DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
-)
+# Build NSS module
+add_subdirectory(nss)
 
 # Tests
 if(BUILD_TESTING)

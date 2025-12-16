@@ -1,13 +1,5 @@
 # CMakeLists.txt for libnss_llng
 
-cmake_minimum_required(VERSION 3.10)
-project(libnss_llng VERSION 1.0.0 LANGUAGES C)
-
-# Find required packages
-find_package(CURL REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JSON_C REQUIRED json-c)
-
 # NSS library
 add_library(nss_llng SHARED libnss_llng.c)
 
@@ -37,25 +29,12 @@ target_compile_options(nss_llng PRIVATE
     -D_GNU_SOURCE
 )
 
-# Install to /lib/x86_64-linux-gnu (or equivalent)
-include(GNUInstallDirs)
-
-# Determine NSS library path
-if(EXISTS "/lib/x86_64-linux-gnu")
-    set(NSS_LIB_DIR "/lib/x86_64-linux-gnu")
-elseif(EXISTS "/lib64")
-    set(NSS_LIB_DIR "/lib64")
-else()
-    set(NSS_LIB_DIR "/lib")
-endif()
-
+# Install NSS module to the same libdir as PAM module
 install(TARGETS nss_llng
-    LIBRARY DESTINATION ${NSS_LIB_DIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 # Install config file template
 install(FILES nss_llng.conf.example
     DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}
-    RENAME nss_llng.conf
-    COMPONENT config
 )
