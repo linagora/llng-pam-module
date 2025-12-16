@@ -33,6 +33,7 @@
 #include "llng_client.h"
 #include "audit_log.h"
 #include "rate_limiter.h"
+#include "auth_cache.h"
 #ifdef ENABLE_CACHE
 #include "token_cache.h"
 #endif
@@ -52,6 +53,7 @@ typedef struct {
     llng_client_t *client;
     audit_context_t *audit;
     rate_limiter_t *rate_limiter;
+    auth_cache_t *auth_cache;  /* Authorization cache for offline mode */
 #ifdef ENABLE_CACHE
     token_cache_t *cache;
 #endif
@@ -200,6 +202,9 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status)
             cache_destroy(llng_data->cache);
         }
 #endif
+        if (llng_data->auth_cache) {
+            auth_cache_destroy(llng_data->auth_cache);
+        }
         if (llng_data->client) {
             llng_client_destroy(llng_data->client);
         }
@@ -366,6 +371,14 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         data->rate_limiter = rate_limiter_init(&rl_cfg);
         if (!data->rate_limiter) {
             LLNG_LOG_WARN(pamh, "Failed to initialize rate limiter, continuing without");
+        }
+    }
+
+    /* Initialize authorization cache (for offline mode) */
+    if (data->config.auth_cache_enabled) {
+        data->auth_cache = auth_cache_init(data->config.auth_cache_dir);
+        if (!data->auth_cache) {
+            LLNG_LOG_WARN(pamh, "Failed to initialize auth cache, offline mode disabled");
         }
     }
 
@@ -859,9 +872,22 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_initialized = true;
     }
 
+    /*
+     * Check if force-online is requested for this user.
+     * If the force-online file exists and user is listed, skip cache.
+     */
+    bool use_cache = (data->auth_cache != NULL);
+    if (use_cache && data->config.auth_cache_force_online) {
+        if (auth_cache_force_online(data->config.auth_cache_force_online, user)) {
+            LLNG_LOG_INFO(pamh, "Force-online requested for user %s, skipping cache", user);
+            use_cache = false;
+        }
+    }
+
     /* Call authorization endpoint (with or without SSH cert info) */
     llng_response_t response = {0};
     int auth_result;
+    bool from_cache = false;
 
     if (has_ssh_cert) {
         LLNG_LOG_DEBUG(pamh, "Authorizing with SSH certificate info");
@@ -873,23 +899,66 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     }
 
     if (auth_result != 0) {
-        LLNG_LOG_ERR(pamh, "Authorization check failed: %s",
-                llng_client_error(data->client));
+        /*
+         * Server unreachable - try offline cache if available.
+         * This is the core of the offline mode feature (#36).
+         */
+        if (use_cache) {
+            auth_cache_entry_t cache_entry = {0};
+            if (auth_cache_lookup(data->auth_cache, user,
+                                  data->config.server_group, hostname, &cache_entry)) {
+                LLNG_LOG_INFO(pamh, "Server unavailable, using cached authorization for %s", user);
 
-        if (audit_initialized) {
-            audit_event.event_type = AUDIT_SERVER_ERROR;
-            audit_event.result_code = PAM_AUTHINFO_UNAVAIL;
-            audit_event.reason = llng_client_error(data->client);
-            audit_event_set_end_time(&audit_event);
-            audit_log_event(data->audit, &audit_event);
+                /* Populate response from cache */
+                response.authorized = cache_entry.authorized;
+                response.user = cache_entry.user ? strdup(cache_entry.user) : NULL;
+                cache_entry.user = NULL;  /* Ownership transferred */
+
+                response.has_permissions = true;
+                response.permissions.sudo_allowed = cache_entry.sudo_allowed;
+                response.permissions.sudo_nopasswd = cache_entry.sudo_nopasswd;
+
+                /* Copy groups */
+                if (cache_entry.groups && cache_entry.groups_count > 0) {
+                    response.groups = cache_entry.groups;
+                    response.groups_count = cache_entry.groups_count;
+                    cache_entry.groups = NULL;  /* Ownership transferred */
+                    cache_entry.groups_count = 0;
+                }
+
+                /* Copy user attributes */
+                response.gecos = cache_entry.gecos ? strdup(cache_entry.gecos) : NULL;
+                response.shell = cache_entry.shell ? strdup(cache_entry.shell) : NULL;
+                response.home = cache_entry.home ? strdup(cache_entry.home) : NULL;
+
+                auth_cache_entry_free(&cache_entry);
+                from_cache = true;
+                auth_result = 0;  /* Cache hit is success */
+            } else {
+                LLNG_LOG_WARN(pamh, "Server unavailable and no valid cache for %s", user);
+            }
         }
 
-        return PAM_AUTHINFO_UNAVAIL;
+        if (auth_result != 0) {
+            LLNG_LOG_ERR(pamh, "Authorization check failed: %s",
+                    llng_client_error(data->client));
+
+            if (audit_initialized) {
+                audit_event.event_type = AUDIT_SERVER_ERROR;
+                audit_event.result_code = PAM_AUTHINFO_UNAVAIL;
+                audit_event.reason = llng_client_error(data->client);
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_AUTHINFO_UNAVAIL;
+        }
     }
 
     /* Check result */
     if (!response.authorized) {
-        LLNG_LOG_INFO(pamh, "User %s not authorized: %s", user,
+        LLNG_LOG_INFO(pamh, "User %s not authorized%s: %s", user,
+                 from_cache ? " (from cache)" : "",
                  response.reason ? response.reason : "no reason given");
 
         if (audit_initialized) {
@@ -904,13 +973,43 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     }
 
     /*
+     * Store authorization in cache if:
+     * - Not already from cache
+     * - Server indicates offline mode is allowed for this user
+     * - Cache is available
+     */
+    if (!from_cache && use_cache && response.has_offline && response.offline.enabled) {
+        int ttl = response.offline.ttl > 0 ? response.offline.ttl : 86400;  /* Default 24h */
+        auth_cache_entry_t cache_entry = {
+            .version = 3,
+            .user = (char *)user,
+            .authorized = response.authorized,
+            .groups = response.groups,
+            .groups_count = response.groups_count,
+            .sudo_allowed = response.has_permissions ? response.permissions.sudo_allowed : false,
+            .sudo_nopasswd = response.has_permissions ? response.permissions.sudo_nopasswd : false,
+            .gecos = response.gecos,
+            .shell = response.shell,
+            .home = response.home
+        };
+
+        if (auth_cache_store(data->auth_cache, user, data->config.server_group,
+                             hostname, &cache_entry, ttl) == 0) {
+            LLNG_LOG_DEBUG(pamh, "Cached authorization for %s (TTL: %d seconds)", user, ttl);
+        } else {
+            LLNG_LOG_WARN(pamh, "Failed to cache authorization for %s", user);
+        }
+    }
+
+    /*
      * Handle sudo authorization.
      * For sudo service, check if the user has sudo_allowed permission.
      * Store the result in PAM environment for sudo to use.
      */
     if (strcmp(service, "sudo") == 0) {
         if (response.has_permissions && !response.permissions.sudo_allowed) {
-            LLNG_LOG_INFO(pamh, "User %s authorized for SSH but not for sudo", user);
+            LLNG_LOG_INFO(pamh, "User %s authorized for SSH but not for sudo%s", user,
+                     from_cache ? " (from cache)" : "");
 
             if (audit_initialized) {
                 audit_event.result_code = PAM_PERM_DENIED;
@@ -945,9 +1044,10 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_log_event(data->audit, &audit_event);
     }
 
-    LLNG_LOG_INFO(pamh, "User %s authorized for access%s", user,
+    LLNG_LOG_INFO(pamh, "User %s authorized for access%s%s", user,
                   (response.has_permissions && response.permissions.sudo_allowed) ?
-                  " (sudo allowed)" : "");
+                  " (sudo allowed)" : "",
+                  from_cache ? " (from cache)" : "");
     llng_response_free(&response);
     return PAM_SUCCESS;
 }

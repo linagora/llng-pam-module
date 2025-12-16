@@ -70,5 +70,18 @@ target_link_libraries(test_llng_client
 )
 add_test(NAME test_llng_client COMMAND test_llng_client)
 
+# Test authorization cache
+add_executable(test_auth_cache test_auth_cache.c ../src/auth_cache.c)
+target_include_directories(test_auth_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${JSON_C_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_link_libraries(test_auth_cache
+    ${JSON_C_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+)
+add_test(NAME test_auth_cache COMMAND test_auth_cache)
+
 # Note: Integration tests require a running LLNG instance
 # and are meant to be run manually

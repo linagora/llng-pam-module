@@ -44,6 +44,8 @@ static int check_file_permissions(const char *filename)
 #define DEFAULT_CACHE_TTL               300
 #define DEFAULT_CACHE_TTL_HIGH_RISK     60
 #define DEFAULT_CACHE_DIR               "/var/cache/pam_llng"
+#define DEFAULT_AUTH_CACHE_DIR          "/var/cache/pam_llng/auth"
+#define DEFAULT_AUTH_CACHE_FORCE_ONLINE "/etc/security/pam_llng.force_online"
 #define DEFAULT_SERVER_GROUP            "default"
 #define DEFAULT_AUDIT_LOG_FILE          "/var/log/pam_llng/audit.json"
 #define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/pam_llng/ratelimit"
@@ -70,6 +72,11 @@ void config_init(pam_llng_config_t *config)
     config->cache_dir = strdup(DEFAULT_CACHE_DIR);
     config->cache_encrypted = true;  /* Encrypted by default */
     config->cache_invalidate_on_logout = true;  /* Invalidate on logout by default */
+
+    /* Authorization cache settings (for offline mode) */
+    config->auth_cache_enabled = true;
+    config->auth_cache_dir = strdup(DEFAULT_AUTH_CACHE_DIR);
+    config->auth_cache_force_online = strdup(DEFAULT_AUTH_CACHE_FORCE_ONLINE);
 
     /* Server settings */
     config->server_group = strdup(DEFAULT_SERVER_GROUP);
@@ -137,6 +144,10 @@ void config_free(pam_llng_config_t *config)
     /* Cache settings */
     free(config->cache_dir);
     free(config->high_risk_services);
+
+    /* Authorization cache settings */
+    free(config->auth_cache_dir);
+    free(config->auth_cache_force_online);
 
     /* Audit settings */
     free(config->audit_log_file);
@@ -273,6 +284,18 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     }
     else if (strcmp(key, "cache_invalidate_on_logout") == 0) {
         config->cache_invalidate_on_logout = parse_bool(value);
+    }
+    /* Authorization cache settings (offline mode) */
+    else if (strcmp(key, "auth_cache_enabled") == 0 || strcmp(key, "auth_cache") == 0) {
+        config->auth_cache_enabled = parse_bool(value);
+    }
+    else if (strcmp(key, "auth_cache_dir") == 0) {
+        free(config->auth_cache_dir);
+        config->auth_cache_dir = strdup(value);
+    }
+    else if (strcmp(key, "auth_cache_force_online") == 0 || strcmp(key, "force_online_file") == 0) {
+        free(config->auth_cache_force_online);
+        config->auth_cache_force_online = strdup(value);
     }
     /* Authorization mode */
     else if (strcmp(key, "authorize_only") == 0) {
@@ -495,6 +518,9 @@ int config_parse_args(int argc, const char **argv, pam_llng_config_t *config)
         }
         else if (strcmp(arg, "no_cache_encrypt") == 0 || strcmp(arg, "nocacheencrypt") == 0) {
             config->cache_encrypted = false;
+        }
+        else if (strcmp(arg, "no_auth_cache") == 0 || strcmp(arg, "noauthcache") == 0) {
+            config->auth_cache_enabled = false;
         }
         else if (strcmp(arg, "no_verify_ssl") == 0 || strcmp(arg, "insecure") == 0) {
             config->verify_ssl = false;

@@ -17,6 +17,12 @@ typedef struct {
     bool sudo_nopasswd;     /* Sudo without password (future use) */
 } llng_permissions_t;
 
+/* Offline settings from /pam/authorize response */
+typedef struct {
+    bool enabled;           /* Offline mode allowed for this user */
+    int ttl;                /* Cache TTL in seconds (0 = no caching) */
+} llng_offline_settings_t;
+
 /* SSH certificate info extracted from environment */
 typedef struct {
     char *key_id;           /* Certificate key ID */
@@ -45,6 +51,10 @@ typedef struct {
     /* Permissions from /pam/authorize */
     llng_permissions_t permissions;
     bool has_permissions;   /* True if permissions object was present */
+
+    /* Offline settings from /pam/authorize */
+    llng_offline_settings_t offline;
+    bool has_offline;       /* True if offline object was present */
 } llng_response_t;
 
 /* Client configuration */

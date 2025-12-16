@@ -808,6 +808,20 @@ int llng_authorize_user(llng_client_t *client,
         }
     }
 
+    /* Parse offline settings object */
+    struct json_object *offline_obj;
+    if (json_object_object_get_ex(json, "offline", &offline_obj)) {
+        if (json_object_is_type(offline_obj, json_type_object)) {
+            response->has_offline = true;
+            if (json_object_object_get_ex(offline_obj, "enabled", &val)) {
+                response->offline.enabled = json_object_get_boolean(val);
+            }
+            if (json_object_object_get_ex(offline_obj, "ttl", &val)) {
+                response->offline.ttl = json_object_get_int(val);
+            }
+        }
+    }
+
     json_object_put(json);
     return 0;
 }
@@ -982,6 +996,20 @@ static int llng_authorize_user_internal(llng_client_t *client,
             }
             if (json_object_object_get_ex(perms_obj, "sudo_nopasswd", &val)) {
                 response->permissions.sudo_nopasswd = json_object_get_boolean(val);
+            }
+        }
+    }
+
+    /* Parse offline settings object */
+    struct json_object *offline_obj;
+    if (json_object_object_get_ex(json, "offline", &offline_obj)) {
+        if (json_object_is_type(offline_obj, json_type_object)) {
+            response->has_offline = true;
+            if (json_object_object_get_ex(offline_obj, "enabled", &val)) {
+                response->offline.enabled = json_object_get_boolean(val);
+            }
+            if (json_object_object_get_ex(offline_obj, "ttl", &val)) {
+                response->offline.ttl = json_object_get_int(val);
             }
         }
     }
