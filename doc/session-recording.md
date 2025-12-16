@@ -136,12 +136,12 @@ Each recording has an accompanying JSON metadata file (`.json`):
     "user": "dwho",
     "client_ip": "192.168.1.100",
     "tty": "/dev/pts/0",
-    "start_time": "2024-12-16T10:30:00Z",
-    "end_time": "2024-12-16T11:45:23Z",
+    "start_time": "2025-12-16T10:30:00Z",
+    "end_time": "2025-12-16T11:45:23Z",
     "status": "completed",
     "original_command": "",
     "format": "asciinema",
-    "recording_file": "20241216-103000_550e8400-e29b-41d4-a716-446655440000.cast",
+    "recording_file": "20251216-103000_550e8400-e29b-41d4-a716-446655440000.cast",
     "hostname": "bastion.example.com",
     "version": "1.0.0"
 }
@@ -169,10 +169,10 @@ Each recording has an accompanying JSON metadata file (`.json`):
 ```
 /var/lib/llng-sessions/
 ├── dwho/
-│   ├── 20241216-103000_550e8400-...-440000.cast
-│   ├── 20241216-103000_550e8400-...-440000.json
-│   ├── 20241216-143052_661f9511-...-551111.cast
-│   └── 20241216-143052_661f9511-...-551111.json
+│   ├── 20251216-103000_550e8400-...-440000.cast
+│   ├── 20251216-103000_550e8400-...-440000.json
+│   ├── 20251216-143052_661f9511-...-551111.cast
+│   └── 20251216-143052_661f9511-...-551111.json
 ├── rtyler/
 │   └── ...
 └── jsmith/
@@ -189,7 +189,7 @@ Each recording has an accompanying JSON metadata file (`.json`):
 
 ```bash
 # Terminal replay
-asciinema play /var/lib/llng-sessions/dwho/20241216-103000_*.cast
+asciinema play /var/lib/llng-sessions/dwho/20251216-103000_*.cast
 
 # Or use the web player (future LLNG integration)
 ```
@@ -197,14 +197,14 @@ asciinema play /var/lib/llng-sessions/dwho/20241216-103000_*.cast
 ### ttyrec format
 
 ```bash
-ttyplay /var/lib/llng-sessions/dwho/20241216-103000_*.ttyrec
+ttyplay /var/lib/llng-sessions/dwho/20251216-103000_*.ttyrec
 ```
 
 ### Script format
 
 ```bash
 # View the raw typescript
-cat /var/lib/llng-sessions/dwho/20241216-103000_*.typescript
+cat /var/lib/llng-sessions/dwho/20251216-103000_*.typescript
 
 # Replay with timing (if timing file exists)
 scriptreplay timing.txt recording.typescript

@@ -224,8 +224,8 @@ All sessions through bastions are recorded:
 ```
 /var/lib/llng-sessions/
 ├── dwho/
-│   ├── 20241216-103000_<uuid>.cast      # Recording
-│   └── 20241216-103000_<uuid>.json      # Metadata
+│   ├── 20251216-103000_<uuid>.cast      # Recording
+│   └── 20251216-103000_<uuid>.json      # Metadata
 └── rtyler/
     └── ...
 ```

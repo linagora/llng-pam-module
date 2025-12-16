@@ -5,9 +5,10 @@
 # This script is designed to be used as ForceCommand in sshd_config
 # to record all SSH sessions passing through a bastion host.
 #
-# Supports two recording formats:
-# - ttyrec: Binary format, compact, standard tools (ttyrec/ttyplay)
-# - asciinema: JSON format, web-friendly, modern (asciinema.org)
+# Supports recording formats:
+# - script: Plain typescript (default, always available)
+# - asciinema: Using asciinema tool if installed
+# - ttyrec: Using ttyrec tool if installed
 #
 # Copyright (C) 2025 Linagora
 # License: AGPL-3.0
@@ -20,7 +21,7 @@ PROG_NAME=$(basename "$0")
 # Default configuration
 CONFIG_FILE="${LLNG_RECORDER_CONFIG:-/etc/llng/session-recorder.conf}"
 SESSIONS_DIR="${LLNG_SESSIONS_DIR:-/var/lib/llng-sessions}"
-FORMAT="${LLNG_RECORDER_FORMAT:-asciinema}"
+FORMAT="${LLNG_RECORDER_FORMAT:-script}"
 MAX_SESSION_DURATION="${LLNG_MAX_SESSION:-86400}"  # 24 hours default
 
 # Metadata
@@ -32,6 +33,10 @@ METADATA_FILE=""
 ORIGINAL_COMMAND="${SSH_ORIGINAL_COMMAND:-}"
 CLIENT_IP="${SSH_CLIENT%% *}"
 TTY_NAME="${SSH_TTY:-notty}"
+
+# Process management
+TIMEOUT_PID=""
+RECORDING_PID=""
 
 # Logging to syslog
 log_info() {
@@ -54,28 +59,37 @@ generate_session_id() {
         cat /proc/sys/kernel/random/uuid
     else
         # Fallback: timestamp + random
-        echo "$(date +%Y%m%d%H%M%S)-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        printf '%s-%s' "$(date +%Y%m%d%H%M%S)" "$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     fi
 }
 
 # Load configuration file
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
-        # Source config file safely (only specific variables)
-        while IFS='=' read -r key value; do
+        while IFS= read -r line; do
             # Skip comments and empty lines
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
 
-            # Remove quotes and whitespace
-            key=$(echo "$key" | tr -d '[:space:]')
-            value=$(echo "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
+            # Parse key=value, handling inline comments
+            if [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local value="${BASH_REMATCH[2]}"
 
-            case "$key" in
-                sessions_dir) SESSIONS_DIR="$value" ;;
-                format) FORMAT="$value" ;;
-                max_duration) MAX_SESSION_DURATION="$value" ;;
-            esac
+                # Remove inline comments and trailing whitespace
+                value="${value%%#*}"
+                value="${value%"${value##*[![:space:]]}"}"
+
+                # Remove surrounding quotes
+                value="${value#[\"\']}"
+                value="${value%[\"\']}"
+
+                case "$key" in
+                    sessions_dir) SESSIONS_DIR="$value" ;;
+                    format) FORMAT="$value" ;;
+                    max_duration) MAX_SESSION_DURATION="$value" ;;
+                esac
+            fi
         done < "$CONFIG_FILE"
     fi
 }
@@ -84,10 +98,10 @@ load_config() {
 ensure_sessions_dir() {
     if [ ! -d "$SESSIONS_DIR" ]; then
         mkdir -p "$SESSIONS_DIR"
-        chmod 0700 "$SESSIONS_DIR"
+        chmod 0755 "$SESSIONS_DIR"
     fi
 
-    # Create user subdirectory
+    # Create user subdirectory (owned by user, mode 0700)
     local user_dir="$SESSIONS_DIR/$SESSION_USER"
     if [ ! -d "$user_dir" ]; then
         mkdir -p "$user_dir"
@@ -101,6 +115,15 @@ write_metadata() {
     local end_time
     end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # Escape original command for JSON
+    local escaped_command
+    if command -v jq >/dev/null 2>&1; then
+        escaped_command=$(printf '%s' "$ORIGINAL_COMMAND" | jq -Rs .)
+    else
+        # Simple escaping fallback
+        escaped_command="\"${ORIGINAL_COMMAND//\"/\\\"}\""
+    fi
+
     cat > "$METADATA_FILE" <<EOF
 {
     "session_id": "$SESSION_ID",
@@ -110,7 +133,7 @@ write_metadata() {
     "start_time": "$SESSION_START",
     "end_time": "$end_time",
     "status": "$status",
-    "original_command": $(printf '%s' "$ORIGINAL_COMMAND" | jq -Rs .),
+    "original_command": $escaped_command,
     "format": "$FORMAT",
     "recording_file": "$(basename "$SESSION_FILE")",
     "hostname": "$(hostname -f 2>/dev/null || hostname)",
@@ -120,90 +143,23 @@ EOF
     chmod 0600 "$METADATA_FILE"
 }
 
-# Record session using asciinema format
-record_asciinema() {
-    local shell="${SHELL:-/bin/bash}"
-    local cols
-    local lines
-
-    # Get terminal size
-    cols=$(tput cols 2>/dev/null || echo 80)
-    lines=$(tput lines 2>/dev/null || echo 24)
-
-    # Write asciinema v2 header
-    cat > "$SESSION_FILE" <<EOF
-{"version": 2, "width": $cols, "height": $lines, "timestamp": $(date +%s), "env": {"SHELL": "$shell", "TERM": "${TERM:-xterm}"}}
-EOF
-
-    if [ -n "$ORIGINAL_COMMAND" ]; then
-        # Non-interactive: execute command and record output
-        exec script -q -c "$ORIGINAL_COMMAND" -f >(
-            start_time=$(date +%s.%N)
-            while IFS= read -r -n1 char; do
-                now=$(date +%s.%N)
-                elapsed=$(echo "$now - $start_time" | bc)
-                printf '[%s, "o", %s]\n' "$elapsed" "$(printf '%s' "$char" | jq -Rs .)" >> "$SESSION_FILE"
-            done
-        )
-    else
-        # Interactive shell with script
-        exec script -q -f >(
-            start_time=$(date +%s.%N)
-            while IFS= read -r -n1 char; do
-                now=$(date +%s.%N)
-                elapsed=$(echo "$now - $start_time" | bc)
-                printf '[%s, "o", %s]\n' "$elapsed" "$(printf '%s' "$char" | jq -Rs .)" >> "$SESSION_FILE"
-            done
-        ) -c "$shell"
-    fi
-}
-
-# Record session using ttyrec format
-record_ttyrec() {
-    local shell="${SHELL:-/bin/bash}"
-
-    if ! command -v ttyrec >/dev/null 2>&1; then
-        log_err "ttyrec not installed, falling back to script"
-        record_script
-        return
-    fi
-
-    if [ -n "$ORIGINAL_COMMAND" ]; then
-        # Non-interactive command
-        exec ttyrec -e "$ORIGINAL_COMMAND" "$SESSION_FILE"
-    else
-        # Interactive shell
-        exec ttyrec -e "$shell" "$SESSION_FILE"
-    fi
-}
-
-# Fallback: record using script command
-record_script() {
-    local shell="${SHELL:-/bin/bash}"
-
-    # Change format to indicate script was used
-    FORMAT="script"
-    SESSION_FILE="${SESSION_FILE%.cast}"
-    SESSION_FILE="${SESSION_FILE%.ttyrec}.typescript"
-
-    if [ -n "$ORIGINAL_COMMAND" ]; then
-        exec script -q -c "$ORIGINAL_COMMAND" "$SESSION_FILE"
-    else
-        exec script -q -c "$shell" "$SESSION_FILE"
-    fi
-}
-
 # Cleanup on exit
 cleanup() {
     local exit_code=$?
     local status="completed"
+
+    # Kill timeout process if running
+    if [ -n "$TIMEOUT_PID" ]; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+        wait "$TIMEOUT_PID" 2>/dev/null || true
+    fi
 
     if [ $exit_code -ne 0 ]; then
         status="error:$exit_code"
     fi
 
     # Update metadata with end time and status
-    if [ -n "$METADATA_FILE" ] && [ -f "$METADATA_FILE" ]; then
+    if [ -n "$METADATA_FILE" ] && [ -d "$(dirname "$METADATA_FILE")" ]; then
         write_metadata "$status"
     fi
 
@@ -214,7 +170,62 @@ cleanup() {
 handle_timeout() {
     log_warn "Session $SESSION_ID timed out after $MAX_SESSION_DURATION seconds"
     echo "Session timed out after $MAX_SESSION_DURATION seconds" >&2
-    kill -TERM 0
+
+    # Kill the recording process if running
+    if [ -n "$RECORDING_PID" ]; then
+        kill -TERM "$RECORDING_PID" 2>/dev/null || true
+    fi
+
+    exit 124  # Standard timeout exit code
+}
+
+# Record session using script command (always available)
+record_script() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        script -q -c "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        script -q -c "$shell" "$SESSION_FILE"
+    fi
+}
+
+# Record session using asciinema (if available)
+record_asciinema() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if ! command -v asciinema >/dev/null 2>&1; then
+        log_warn "asciinema not installed, falling back to script"
+        FORMAT="script"
+        SESSION_FILE="${SESSION_FILE%.cast}.typescript"
+        record_script
+        return
+    fi
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        asciinema rec -c "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        asciinema rec -c "$shell" "$SESSION_FILE"
+    fi
+}
+
+# Record session using ttyrec (if available)
+record_ttyrec() {
+    local shell="${SHELL:-/bin/bash}"
+
+    if ! command -v ttyrec >/dev/null 2>&1; then
+        log_warn "ttyrec not installed, falling back to script"
+        FORMAT="script"
+        SESSION_FILE="${SESSION_FILE%.ttyrec}.typescript"
+        record_script
+        return
+    fi
+
+    if [ -n "$ORIGINAL_COMMAND" ]; then
+        ttyrec -e "$ORIGINAL_COMMAND" "$SESSION_FILE"
+    else
+        ttyrec -e "$shell" "$SESSION_FILE"
+    fi
 }
 
 # Print usage
@@ -230,12 +241,12 @@ Options:
     -v, --version       Show version
     -c, --config FILE   Configuration file (default: $CONFIG_FILE)
     -d, --dir DIR       Sessions directory (default: $SESSIONS_DIR)
-    -f, --format FMT    Recording format: asciinema, ttyrec, script
+    -f, --format FMT    Recording format: script, asciinema, ttyrec
                         (default: $FORMAT)
 
 Configuration file format:
     sessions_dir = /var/lib/llng-sessions
-    format = asciinema
+    format = script
     max_duration = 86400
 
 sshd_config example:
@@ -264,14 +275,26 @@ parse_args() {
                 exit 0
                 ;;
             -c|--config)
+                if [ -z "${2:-}" ]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
                 CONFIG_FILE="$2"
                 shift 2
                 ;;
             -d|--dir)
+                if [ -z "${2:-}" ]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
                 SESSIONS_DIR="$2"
                 shift 2
                 ;;
             -f|--format)
+                if [ -z "${2:-}" ]; then
+                    log_err "Option $1 requires an argument"
+                    exit 1
+                fi
                 FORMAT="$2"
                 shift 2
                 ;;
@@ -307,6 +330,7 @@ main() {
             SESSION_FILE="$user_dir/${date_prefix}_${SESSION_ID}.ttyrec"
             ;;
         *)
+            FORMAT="script"
             SESSION_FILE="$user_dir/${date_prefix}_${SESSION_ID}.typescript"
             ;;
     esac
@@ -324,17 +348,15 @@ main() {
 
     # Set session timeout (in background)
     if [ "$MAX_SESSION_DURATION" -gt 0 ]; then
+        local parent_pid=$$
         (
             sleep "$MAX_SESSION_DURATION"
-            kill -ALRM $$ 2>/dev/null
+            kill -ALRM "$parent_pid" 2>/dev/null || true
         ) &
         TIMEOUT_PID=$!
-        # Kill timeout process on exit
-        # shellcheck disable=SC2064  # Intentional: capture TIMEOUT_PID now, not at signal time
-        trap "kill $TIMEOUT_PID 2>/dev/null; cleanup" EXIT
     fi
 
-    # Start recording based on format
+    # Start recording based on format (runs in foreground, allows cleanup)
     case "$FORMAT" in
         asciinema)
             record_asciinema
