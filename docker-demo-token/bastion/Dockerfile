@@ -50,10 +50,10 @@ RUN mkdir -p build && cd build && \
     ldconfig && \
     cd / && rm -rf /src/llng-pam-module/build
 
-# Configure PAM for SSH (bastion mode)
+# Configure PAM for SSH (bastion mode with token authentication)
 RUN echo '# PAM configuration for SSH Bastion with LemonLDAP::NG\n\
-# Authentication via SSH certificates (not PAM)\n\
-auth       required     pam_permit.so\n\
+# Authentication via LLNG tokens (user pastes token as password)\n\
+auth       required     pam_llng.so\n\
 \n\
 # Authorization - check with LLNG\n\
 account    required     pam_llng.so\n\

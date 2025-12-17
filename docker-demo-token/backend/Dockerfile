@@ -45,10 +45,10 @@ RUN mkdir -p build && cd build && \
     ldconfig && \
     cd / && rm -rf /src/llng-pam-module/build
 
-# Configure PAM for SSH (backend mode with user creation)
+# Configure PAM for SSH (backend mode with user creation and token auth)
 RUN echo '# PAM configuration for SSH Backend with LemonLDAP::NG\n\
-# Authentication via SSH certificates (not PAM)\n\
-auth       required     pam_permit.so\n\
+# Authentication via LLNG tokens (user pastes token as password)\n\
+auth       required     pam_llng.so\n\
 \n\
 # Authorization - check with LLNG\n\
 account    required     pam_llng.so\n\

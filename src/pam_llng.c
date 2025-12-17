@@ -377,8 +377,8 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             && token_info.access_token) {
             client_config.server_token = token_info.access_token;
             token_info.access_token = NULL;  /* Transfer ownership */
-            /* Free other fields we don't need */
-            free(token_info.refresh_token);
+            /* Securely free remaining sensitive fields */
+            token_info_free(&token_info);
         } else {
             LLNG_LOG_WARN(pamh, "Failed to read server token file: %s",
                      data->config.server_token_file);
