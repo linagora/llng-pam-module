@@ -20,7 +20,7 @@ services:
     image: llng-cert-sso
     container_name: llng-cert-sso
     ports:
-      - "80:80"
+      - "80:8080"
     volumes:
       # Custom plugins (individual files to not override existing plugins)
       - ../llng-plugin/usr/share/perl5/Lemonldap/NG/Portal/Plugins/PamAccess.pm:/usr/share/perl5/Lemonldap/NG/Portal/Plugins/PamAccess.pm:ro
@@ -40,7 +40,7 @@ services:
       - SSODOMAIN=example.com
       - PORTAL=http://localhost
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -62,7 +62,7 @@ services:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=bastion
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
@@ -88,7 +88,7 @@ services:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=backend
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
@@ -113,7 +113,7 @@ services:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=backend-new
       # No LLNG_SERVER_TOKEN - must be enrolled manually
     networks:
