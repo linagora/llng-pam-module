@@ -520,13 +520,27 @@ int llng_verify_token(llng_client_t *client,
 
     struct json_object *val;
 
-    /* Check 'valid' field (maps to 'active' for compatibility) */
-    if (json_object_object_get_ex(json, "valid", &val)) {
-        response->active = json_object_get_boolean(val);
+    /* Security: Validate required fields are present (fixes #44) */
+    if (!json_object_object_get_ex(json, "valid", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'valid' field in response");
+        json_object_put(json);
+        return -1;
     }
+    response->active = json_object_get_boolean(val);
 
-    if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = safe_json_strdup(val);
+    if (!json_object_object_get_ex(json, "user", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'user' field in response");
+        json_object_put(json);
+        return -1;
+    }
+    response->user = safe_json_strdup(val);
+    if (!response->user) {
+        snprintf(client->error, sizeof(client->error),
+                 "Invalid 'user' field in response");
+        json_object_put(json);
+        return -1;
     }
 
     if (json_object_object_get_ex(json, "error", &val)) {
@@ -814,12 +828,27 @@ static int llng_authorize_user_internal(llng_client_t *client,
 
     struct json_object *val;
 
-    if (json_object_object_get_ex(json, "authorized", &val)) {
-        response->authorized = json_object_get_boolean(val);
+    /* Security: Validate required fields are present (fixes #44) */
+    if (!json_object_object_get_ex(json, "authorized", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'authorized' field in response");
+        json_object_put(json);
+        return -1;
     }
+    response->authorized = json_object_get_boolean(val);
 
-    if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = safe_json_strdup(val);
+    if (!json_object_object_get_ex(json, "user", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'user' field in response");
+        json_object_put(json);
+        return -1;
+    }
+    response->user = safe_json_strdup(val);
+    if (!response->user) {
+        snprintf(client->error, sizeof(client->error),
+                 "Invalid 'user' field in response");
+        json_object_put(json);
+        return -1;
     }
 
     if (json_object_object_get_ex(json, "reason", &val)) {
