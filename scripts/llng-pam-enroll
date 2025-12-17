@@ -101,7 +101,7 @@ show_version() {
 check_requirements() {
     local missing=()
 
-    for cmd in curl jq; do
+    for cmd in curl jq openssl; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
@@ -112,6 +112,45 @@ check_requirements() {
         log_info "Install them with: apt-get install ${missing[*]}"
         exit 1
     fi
+}
+
+# Generate a JWT for client_secret_jwt authentication (RFC 7523)
+# This avoids sending the client_secret in plaintext over the network
+generate_client_jwt() {
+    local client_id="$1"
+    local client_secret="$2"
+    local token_endpoint="$3"
+
+    local now
+    now=$(date +%s)
+    local exp=$((now + 300))  # 5 minutes validity
+
+    # Generate unique JWT ID (jti) for replay protection
+    local jti
+    if command -v uuidgen &> /dev/null; then
+        jti=$(uuidgen)
+    elif [ -f /proc/sys/kernel/random/uuid ]; then
+        jti=$(cat /proc/sys/kernel/random/uuid)
+    else
+        jti="$(hostname)-${now}-$$"
+    fi
+
+    # Header: {"alg":"HS256","typ":"JWT"}
+    local header
+    header=$(echo -n '{"alg":"HS256","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+    # Payload with standard claims per RFC 7523
+    local payload_json
+    payload_json=$(printf '{"iss":"%s","sub":"%s","aud":"%s","exp":%d,"iat":%d,"jti":"%s"}' \
+        "$client_id" "$client_id" "$token_endpoint" "$exp" "$now" "$jti")
+    local payload
+    payload=$(echo -n "$payload_json" | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+    # Signature: HMAC-SHA256(secret, header.payload)
+    local signature
+    signature=$(echo -n "${header}.${payload}" | openssl dgst -sha256 -hmac "$client_secret" -binary | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+    echo "${header}.${payload}.${signature}"
 }
 
 # Read value from config file
@@ -347,12 +386,20 @@ poll_for_token() {
 
         local curl_options
         curl_options=$(curl_opts)
+
+        # Generate JWT for client_secret_jwt authentication (RFC 7523)
+        # This avoids sending client_secret in plaintext over the network
+        local token_endpoint="${PORTAL_URL}/oauth2/token"
+        local client_jwt
+        client_jwt=$(generate_client_jwt "$CLIENT_ID" "$CLIENT_SECRET" "$token_endpoint")
+
         response=$(curl $curl_options \
-            -X POST "${PORTAL_URL}/oauth2/token" \
+            -X POST "$token_endpoint" \
             -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
             -d "device_code=${DEVICE_CODE}" \
             -d "client_id=${CLIENT_ID}" \
-            -d "client_secret=${CLIENT_SECRET}" 2>&1) || true
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            -d "client_assertion=${client_jwt}" 2>&1) || true
 
         # Check for access token
         access_token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null)

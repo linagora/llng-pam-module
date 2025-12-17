@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpam0g-dev \
     curl \
     jq \
+    openssl \
     cmake \
     gcc \
     make \
