@@ -73,11 +73,28 @@ typedef struct {
 
 #define INITIAL_BUFFER_SIZE 4096
 
+/*
+ * Security: Maximum response size to prevent DoS via memory exhaustion (fixes #48)
+ * 1 MB should be more than enough for any legitimate LLNG API response
+ */
+#define MAX_RESPONSE_SIZE (1 * 1024 * 1024)
+
 /* Curl write callback with exponential buffer growth */
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 {
-    size_t realsize = size * nmemb;
     response_buffer_t *buf = (response_buffer_t *)userp;
+
+    /* Security: Check for integer overflow in size calculation */
+    if (nmemb > 0 && size > SIZE_MAX / nmemb) {
+        return 0;  /* Overflow - abort transfer */
+    }
+    size_t realsize = size * nmemb;
+
+    /* Security: Check maximum response size limit (fixes #48) */
+    if (buf->size + realsize > MAX_RESPONSE_SIZE) {
+        /* Response too large - return 0 to abort transfer */
+        return 0;
+    }
 
     /* Check if we need to grow the buffer */
     size_t needed = buf->size + realsize + 1;
@@ -86,6 +103,10 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
         size_t new_capacity = buf->capacity + (buf->capacity >> 1);
         if (new_capacity < needed) {
             new_capacity = needed;
+        }
+        /* Cap capacity at max response size */
+        if (new_capacity > MAX_RESPONSE_SIZE + 1) {
+            new_capacity = MAX_RESPONSE_SIZE + 1;
         }
         char *ptr = realloc(buf->data, new_capacity);
         if (!ptr) {
@@ -287,6 +308,90 @@ static struct curl_slist *add_signing_headers(struct curl_slist *headers,
     return headers;
 }
 
+/*
+ * Security: Validate certificate pin format (fixes #47)
+ * Valid formats:
+ * - sha256//base64hash (44 chars of base64 after sha256//)
+ * - Path to DER or PEM file (starts with / or .)
+ * Multiple pins can be separated by ';'
+ * Returns 1 if valid, 0 if invalid
+ */
+static int validate_cert_pin_format(const char *pin)
+{
+    if (!pin || !*pin) {
+        return 0;
+    }
+
+    /* Work on a copy to handle multiple pins */
+    char *pin_copy = strdup(pin);
+    if (!pin_copy) {
+        return 0;
+    }
+
+    int valid = 1;
+    char *saveptr = NULL;
+    char *token = strtok_r(pin_copy, ";", &saveptr);
+
+    while (token && valid) {
+        /* Skip leading whitespace */
+        while (*token == ' ') token++;
+
+        /* Strip trailing whitespace */
+        size_t token_len = strlen(token);
+        while (token_len > 0 && token[token_len - 1] == ' ') {
+            token[token_len - 1] = '\0';
+            token_len--;
+        }
+
+        if (strncmp(token, "sha256//", 8) == 0) {
+            /* SHA256 hash format: "sha256//" followed by base64 of 32 bytes
+             * Standard base64 encoding of 32 bytes is 44 characters (with padding);
+             * we also accept 43-character encodings when the trailing padding is omitted.
+             */
+            const char *hash = token + 8;
+            size_t len = strlen(hash);
+            /* Accept standard base64 length for 32 bytes (44 chars) and the
+             * no-padding variant (43 chars). Only the standard base64 alphabet
+             * (+ and /, not - or _) is allowed by the character check below.
+             */
+            if (len < 43 || len > 44) {
+                valid = 0;
+            } else {
+                /* Validate base64 characters */
+                for (size_t i = 0; i < len && valid; i++) {
+                    char c = hash[i];
+                    if (!((c >= 'A' && c <= 'Z') ||
+                          (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') ||
+                          c == '+' || c == '/' || c == '=')) {
+                        valid = 0;
+                    }
+                }
+            }
+        } else if (token[0] == '/' || token[0] == '.') {
+            /* File path - check if it looks like a valid path */
+            /* Basic check: not empty after prefix, no control characters */
+            if (strlen(token) < 2) {
+                valid = 0;
+            } else {
+                for (const char *p = token; *p && valid; p++) {
+                    if ((unsigned char)*p < 32) {
+                        valid = 0;
+                    }
+                }
+            }
+        } else {
+            /* Unknown format */
+            valid = 0;
+        }
+
+        token = strtok_r(NULL, ";", &saveptr);
+    }
+
+    free(pin_copy);
+    return valid;
+}
+
 /* Base64 encode for Basic auth */
 static char *base64_encode(const char *input, size_t len)
 {
@@ -344,7 +449,17 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
     client->ca_cert = strdup_or_null(config->ca_cert);
     client->signing_secret = strdup_or_null(config->signing_secret);
     client->min_tls_version = config->min_tls_version > 0 ? config->min_tls_version : TLS_VERSION_1_3;
-    client->cert_pin = strdup_or_null(config->cert_pin);
+
+    /* Security: Validate certificate pin format before use (fixes #47) */
+    if (config->cert_pin) {
+        if (!validate_cert_pin_format(config->cert_pin)) {
+            snprintf(client->error, sizeof(client->error),
+                     "Invalid certificate pin format. Expected sha256//base64 or file path");
+            llng_client_destroy(client);
+            return NULL;
+        }
+        client->cert_pin = strdup(config->cert_pin);
+    }
 
     return client;
 }
@@ -520,13 +635,34 @@ int llng_verify_token(llng_client_t *client,
 
     struct json_object *val;
 
-    /* Check 'valid' field (maps to 'active' for compatibility) */
-    if (json_object_object_get_ex(json, "valid", &val)) {
-        response->active = json_object_get_boolean(val);
+    /* Security: Validate required fields are present (fixes #44) */
+    if (!json_object_object_get_ex(json, "valid", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'valid' field in response");
+        json_object_put(json);
+        return -1;
     }
+    response->active = json_object_get_boolean(val);
 
-    if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = safe_json_strdup(val);
+    if (!json_object_object_get_ex(json, "user", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'user' field in response");
+        json_object_put(json);
+        return -1;
+    }
+    const char *user_str = json_object_get_string(val);
+    if (!user_str) {
+        snprintf(client->error, sizeof(client->error),
+                 "Invalid 'user' field type in response");
+        json_object_put(json);
+        return -1;
+    }
+    response->user = strdup(user_str);
+    if (!response->user) {
+        snprintf(client->error, sizeof(client->error),
+                 "Out of memory copying 'user' field");
+        json_object_put(json);
+        return -1;
     }
 
     if (json_object_object_get_ex(json, "error", &val)) {
@@ -814,12 +950,34 @@ static int llng_authorize_user_internal(llng_client_t *client,
 
     struct json_object *val;
 
-    if (json_object_object_get_ex(json, "authorized", &val)) {
-        response->authorized = json_object_get_boolean(val);
+    /* Security: Validate required fields are present (fixes #44) */
+    if (!json_object_object_get_ex(json, "authorized", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'authorized' field in response");
+        json_object_put(json);
+        return -1;
     }
+    response->authorized = json_object_get_boolean(val);
 
-    if (json_object_object_get_ex(json, "user", &val)) {
-        response->user = safe_json_strdup(val);
+    if (!json_object_object_get_ex(json, "user", &val)) {
+        snprintf(client->error, sizeof(client->error),
+                 "Missing required 'user' field in response");
+        json_object_put(json);
+        return -1;
+    }
+    const char *authz_user_str = json_object_get_string(val);
+    if (!authz_user_str) {
+        snprintf(client->error, sizeof(client->error),
+                 "Invalid 'user' field type in response");
+        json_object_put(json);
+        return -1;
+    }
+    response->user = strdup(authz_user_str);
+    if (!response->user) {
+        snprintf(client->error, sizeof(client->error),
+                 "Out of memory copying 'user' field");
+        json_object_put(json);
+        return -1;
     }
 
     if (json_object_object_get_ex(json, "reason", &val)) {

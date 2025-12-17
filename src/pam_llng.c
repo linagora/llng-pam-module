@@ -59,7 +59,14 @@ typedef struct {
 #ifdef ENABLE_CACHE
     token_cache_t *cache;
 #endif
+    /* Security: Store token file metadata for periodic re-verification (#46) */
+    ino_t token_file_inode;
+    time_t token_file_mtime;
+    time_t last_token_check;
 } pam_llng_data_t;
+
+/* How often to re-verify token file permissions (in seconds) */
+#define TOKEN_RECHECK_INTERVAL 300  /* 5 minutes */
 
 /* Logging macros - prefixed to avoid conflict with syslog constants */
 #define LLNG_LOG_ERR(handle, fmt, ...) \
@@ -73,6 +80,80 @@ typedef struct {
 
 /* Forward declaration */
 static void cleanup_data(pam_handle_t *pamh, void *data, int error_status);
+
+/*
+ * Security: Re-verify token file permissions periodically (fixes #46)
+ * Returns 0 if OK, -1 if security violation detected
+ */
+static int verify_token_file_security(pam_handle_t *pamh, pam_llng_data_t *data)
+{
+    if (!data || !data->config.server_token_file) {
+        return 0;  /* No token file configured, nothing to verify */
+    }
+
+    time_t now = time(NULL);
+
+    /* Only check periodically to avoid performance impact.
+     * Handle clock adjustments: if time() fails or clock moved backward,
+     * force a recheck to be safe. */
+    if (data->last_token_check > 0 &&
+        now != (time_t)-1 &&
+        now >= data->last_token_check &&
+        (now - data->last_token_check) < TOKEN_RECHECK_INTERVAL) {
+        return 0;  /* Recently checked, skip */
+    }
+
+    /* Re-verify token file security */
+    int token_fd = open(data->config.server_token_file, O_RDONLY | O_NOFOLLOW);
+    if (token_fd < 0) {
+        LLNG_LOG_ERR(pamh, "Security: token file %s no longer accessible",
+                data->config.server_token_file);
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(token_fd, &st) != 0) {
+        LLNG_LOG_ERR(pamh, "Security: cannot stat token file %s",
+                data->config.server_token_file);
+        close(token_fd);
+        return -1;
+    }
+    close(token_fd);
+
+    /* Check if file was replaced (different inode) */
+    if (data->token_file_inode != 0 && st.st_ino != data->token_file_inode) {
+        LLNG_LOG_ERR(pamh, "Security: token file %s was replaced (inode changed)",
+                data->config.server_token_file);
+        return -1;
+    }
+
+    /* Check if file was modified */
+    if (data->token_file_mtime != 0 && st.st_mtime != data->token_file_mtime) {
+        LLNG_LOG_WARN(pamh, "Security: token file %s was modified since startup",
+                data->config.server_token_file);
+        /* Update mtime but continue - modification alone is not a security violation */
+        data->token_file_mtime = st.st_mtime;
+    }
+
+    /* Re-verify ownership */
+    if (st.st_uid != 0) {
+        LLNG_LOG_ERR(pamh, "Security: token file %s ownership changed (not root)",
+                data->config.server_token_file);
+        return -1;
+    }
+
+    /* Re-verify permissions */
+    if (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
+        LLNG_LOG_ERR(pamh, "Security: token file %s permissions changed (too permissive)",
+                data->config.server_token_file);
+        return -1;
+    }
+
+    /* Update last check time */
+    data->last_token_check = now;
+
+    return 0;
+}
 
 /*
  * Check if a group exists by reading /etc/group directly.
@@ -368,7 +449,11 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             goto error;
         }
 
-        /* Security checks passed, close fd and use token_manager to load */
+        /* Security checks passed - store metadata for periodic re-verification (#46) */
+        data->token_file_inode = st.st_ino;
+        data->token_file_mtime = st.st_mtime;
+        data->last_token_check = time(NULL);
+
         close(token_fd);
 
         /* Use token_manager_load_file which supports both JSON and plain text */
@@ -499,6 +584,14 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
         return 0;
     }
 
+    /* Security: Check length before processing (fixes #45) */
+    #define MAX_SSH_AUTH_LEN 8192
+    if (strlen(ssh_auth) >= MAX_SSH_AUTH_LEN) {
+        LLNG_LOG_WARN(pamh, "SSH_USER_AUTH too long, ignoring");
+        return 0;
+    }
+    #undef MAX_SSH_AUTH_LEN
+
     LLNG_LOG_DEBUG(pamh, "SSH_USER_AUTH: %s", ssh_auth);
 
     /*
@@ -549,7 +642,23 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
         /*
          * Try parsing format: "publickey algo fingerprint:keyid:serial:principals"
          * This is a simplified parser - real format may vary.
+         *
+         * Security: Apply length limits to all extracted fields (fixes #45)
          */
+        #define MAX_SSH_FIELD_LEN 1024  /* Max length for individual parsed fields */
+
+        /* Helper macro to safely duplicate a field with length check.
+         * Note: strdup failure results in NULL dest, which is handled gracefully
+         * by the rest of the code (fields are optional). */
+        #define SAFE_FIELD_DUP(dest, src) do { \
+            if ((src) && *(src) && strlen(src) < MAX_SSH_FIELD_LEN) { \
+                (dest) = strdup(src); \
+                if (!(dest)) { \
+                    LLNG_LOG_DEBUG(pamh, "strdup failed for SSH cert field"); \
+                } \
+            } \
+        } while(0)
+
         char *auth_copy = strdup(ssh_auth);
         if (auth_copy) {
             /* Skip "publickey " prefix */
@@ -566,33 +675,35 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
                 if (colon) {
                     /* Extract fingerprint */
                     *colon = '\0';
-                    cert_info->ca_fingerprint = strdup(p);
+                    SAFE_FIELD_DUP(cert_info->ca_fingerprint, p);
                     p = colon + 1;
 
                     /* Try to extract key_id */
                     colon = strchr(p, ':');
                     if (colon) {
                         *colon = '\0';
-                        if (*p) cert_info->key_id = strdup(p);
+                        SAFE_FIELD_DUP(cert_info->key_id, p);
                         p = colon + 1;
 
                         /* Try to extract serial */
                         colon = strchr(p, ':');
                         if (colon) {
                             *colon = '\0';
-                            if (*p) cert_info->serial = strdup(p);
+                            SAFE_FIELD_DUP(cert_info->serial, p);
                             p = colon + 1;
-                            if (*p) cert_info->principals = strdup(p);
-                        } else if (*p) {
-                            cert_info->serial = strdup(p);
+                            SAFE_FIELD_DUP(cert_info->principals, p);
+                        } else {
+                            SAFE_FIELD_DUP(cert_info->serial, p);
                         }
-                    } else if (*p) {
-                        cert_info->key_id = strdup(p);
+                    } else {
+                        SAFE_FIELD_DUP(cert_info->key_id, p);
                     }
                 }
             }
             free(auth_copy);
         }
+        #undef SAFE_FIELD_DUP
+        #undef MAX_SSH_FIELD_LEN
     }
 
     LLNG_LOG_DEBUG(pamh, "SSH cert info: key_id=%s serial=%s principals=%s",
@@ -670,6 +781,12 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
     /* Initialize module */
     pam_llng_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
+        return PAM_SERVICE_ERR;
+    }
+
+    /* Security: Periodically re-verify token file permissions (#46) */
+    if (verify_token_file_security(pamh, data) != 0) {
+        LLNG_LOG_ERR(pamh, "Token file security verification failed, refusing authentication");
         return PAM_SERVICE_ERR;
     }
 
@@ -914,6 +1031,12 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     /* Initialize module */
     pam_llng_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
+        return PAM_SERVICE_ERR;
+    }
+
+    /* Security: Periodically re-verify token file permissions (#46) */
+    if (verify_token_file_security(pamh, data) != 0) {
+        LLNG_LOG_ERR(pamh, "Token file security verification failed, refusing authorization");
         return PAM_SERVICE_ERR;
     }
 
@@ -1391,6 +1514,19 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
         return PAM_SESSION_ERR;
     }
 
+    /*
+     * Security: Store authenticated user for close_session verification (#49)
+     * This prevents cache invalidation attacks where an attacker could
+     * invalidate another user's cache by calling close_session with a
+     * different username.
+     */
+    char *session_user = strdup(user);
+    if (!session_user) {
+        LLNG_LOG_ERR(pamh, "Out of memory storing session user");
+        return PAM_BUF_ERR;
+    }
+    pam_set_data(pamh, "llng_session_user", session_user, cleanup_string);
+
     /* Initialize module */
     pam_llng_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
@@ -1465,6 +1601,7 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
     (void)flags;
 
     const char *user = NULL;
+    const char *session_user = NULL;
     int ret;
 
     /* Get username */
@@ -1472,6 +1609,22 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
     if (ret != PAM_SUCCESS || !user || !*user) {
         /* Can't get user, nothing to invalidate */
         return PAM_SUCCESS;
+    }
+
+    /*
+     * Security: Verify this is the same user from open_session (#49)
+     * This prevents cache invalidation attacks where close_session could
+     * be called with a different username to invalidate another user's cache.
+     */
+    if (pam_get_data(pamh, "llng_session_user", (const void **)&session_user) == PAM_SUCCESS
+        && session_user) {
+        if (strcmp(user, session_user) != 0) {
+            LLNG_LOG_WARN(pamh,
+                "Security: close_session user mismatch (session=%s, request=%s), "
+                "refusing cache invalidation",
+                session_user, user);
+            return PAM_SUCCESS;  /* Don't fail, just skip invalidation */
+        }
     }
 
     /* Initialize module to access cache */
