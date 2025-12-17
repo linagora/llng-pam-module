@@ -603,8 +603,9 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         return -1;
     }
 
-    /* UID */
-    if (json_object_object_get_ex(json, "uid", &val)) {
+    /* UID - only use if it's actually an integer, not a string like "username" */
+    if (json_object_object_get_ex(json, "uid", &val) &&
+        json_object_is_type(val, json_type_int)) {
         pw->pw_uid = (uid_t)json_object_get_int(val);
         /* Validate server-provided UID is in acceptable range */
         if (pw->pw_uid < g_config.min_uid || pw->pw_uid > g_config.max_uid ||
@@ -623,8 +624,9 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         }
     }
 
-    /* GID */
-    if (json_object_object_get_ex(json, "gid", &val)) {
+    /* GID - only use if it's actually an integer */
+    if (json_object_object_get_ex(json, "gid", &val) &&
+        json_object_is_type(val, json_type_int)) {
         pw->pw_gid = (gid_t)json_object_get_int(val);
     } else {
         pw->pw_gid = g_config.default_gid;
