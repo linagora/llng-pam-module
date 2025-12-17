@@ -20,6 +20,7 @@ Depends: ${misc:Depends}
  , ${shlibs:Depends}
  , curl
  , jq
+ , nscd
  , debconf (>= 0.5) | debconf-2.0
 Description: PAM module for LemonLDAP::NG authentication
  This PAM module enables Linux servers to authenticate users via

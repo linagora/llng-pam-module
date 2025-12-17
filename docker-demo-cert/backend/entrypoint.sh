@@ -248,6 +248,14 @@ sed -i 's/^passwd:.*/passwd:         files llng/' /etc/nsswitch.conf
 sed -i 's/^group:.*/group:          files llng/' /etc/nsswitch.conf
 echo "NSS configured to use LLNG"
 
+# Start nscd for caching NSS lookups (runs as root, can read server token)
+if command -v nscd >/dev/null 2>&1; then
+    mkdir -p /var/run/nscd
+    nscd -i passwd 2>/dev/null || true
+    nscd 2>/dev/null &
+    echo "nscd started for NSS caching"
+fi
+
 # Configure PAM to create home directories on first login
 cat > /etc/pam.d/sshd << EOF
 # PAM configuration for SSH with LemonLDAP::NG

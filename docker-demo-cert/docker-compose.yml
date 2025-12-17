@@ -17,9 +17,10 @@ services:
     build:
       context: ./sso
       dockerfile: Dockerfile
-    container_name: llng-sso
+    image: llng-cert-sso
+    container_name: llng-cert-sso
     ports:
-      - "80:80"
+      - "80:8080"
     volumes:
       # Custom plugins (individual files to not override existing plugins)
       - ../llng-plugin/usr/share/perl5/Lemonldap/NG/Portal/Plugins/PamAccess.pm:/usr/share/perl5/Lemonldap/NG/Portal/Plugins/PamAccess.pm:ro
@@ -39,12 +40,12 @@ services:
       - SSODOMAIN=example.com
       - PORTAL=http://localhost
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
       interval: 10s
       timeout: 5s
       retries: 3
     networks:
-      llng-net:
+      llng-cert-net:
         aliases:
           - sso
           - auth.example.com
@@ -52,15 +53,16 @@ services:
   bastion:
     build:
       context: ..
-      dockerfile: docker/bastion/Dockerfile
-    container_name: llng-bastion
+      dockerfile: docker-demo-cert/bastion/Dockerfile
+    image: llng-cert-bastion
+    container_name: llng-cert-bastion
     ports:
       - "2222:22"
     depends_on:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=bastion
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
@@ -71,13 +73,14 @@ services:
       - ..:/src/llng-pam-module:ro
       # No persistent volumes - fresh start for each demo
     networks:
-      - llng-net
+      - llng-cert-net
 
   backend:
     build:
       context: ..
-      dockerfile: docker/backend/Dockerfile
-    container_name: llng-backend
+      dockerfile: docker-demo-cert/backend/Dockerfile
+    image: llng-cert-backend
+    container_name: llng-cert-backend
     # No external port - only accessible via bastion
     expose:
       - "22"
@@ -85,7 +88,7 @@ services:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=backend
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
@@ -95,26 +98,27 @@ services:
       # PAM module sources for build
       - ..:/src/llng-pam-module:ro
     networks:
-      - llng-net
+      - llng-cert-net
 
   # Unconfigured backend for enrollment demo
   backend-new:
     build:
       context: ..
-      dockerfile: docker/backend-new/Dockerfile
-    container_name: llng-backend-new
+      dockerfile: docker-demo-cert/backend-new/Dockerfile
+    image: llng-cert-backend-new
+    container_name: llng-cert-backend-new
     expose:
       - "22"
     depends_on:
       sso:
         condition: service_healthy
     environment:
-      - LLNG_PORTAL_URL=http://sso
+      - LLNG_PORTAL_URL=http://sso:8080
       - LLNG_SERVER_GROUP=backend-new
       # No LLNG_SERVER_TOKEN - must be enrolled manually
     networks:
-      - llng-net
+      - llng-cert-net
 
 networks:
-  llng-net:
+  llng-cert-net:
     driver: bridge

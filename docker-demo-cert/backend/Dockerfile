@@ -11,6 +11,7 @@ FROM debian:13-slim
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
+    nscd \
     sudo \
     libcurl4-gnutls-dev \
     libjson-c-dev \
@@ -79,7 +80,7 @@ RUN sed -i 's/session\s*required\s*pam_loginuid.so/session optional pam_loginuid
 RUN ssh-keygen -A
 
 # Startup script
-COPY docker/backend/entrypoint.sh /entrypoint.sh
+COPY docker-demo-cert/backend/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 22

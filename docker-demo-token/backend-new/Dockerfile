@@ -8,6 +8,7 @@ FROM debian:13-slim
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
+    nscd \
     sudo \
     libcurl4-gnutls-dev \
     libjson-c-dev \
@@ -51,7 +52,7 @@ RUN mkdir -p build && cd build && \
 RUN sed -i 's/session\s*required\s*pam_loginuid.so/session optional pam_loginuid.so/' /etc/pam.d/sshd 2>/dev/null || true
 
 # Startup script (minimal - no token configuration)
-COPY docker/backend-new/entrypoint.sh /entrypoint.sh
+COPY docker-demo-token/backend-new/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 22

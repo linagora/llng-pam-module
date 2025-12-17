@@ -23,6 +23,7 @@ Requires:       json-c
 Requires:       openssl-libs
 Requires:       curl
 Requires:       jq
+Requires:       nscd
 Requires:       systemd
 Requires:       util-linux
 
