@@ -1155,24 +1155,38 @@ sub _getNextSerial {
         File::Path::make_path($dir);
     }
 
-    # Read current serial, increment, and write back
-    my $serial = 1;
-    if ( -f $serialPath ) {
-        if ( open my $fh, '<', $serialPath ) {
-            $serial = <$fh>;
-            chomp $serial;
-            $serial = int($serial) + 1;
-            close $fh;
-        }
-    }
+    # Read current serial, increment, and write back atomically using flock
+    use Fcntl qw(:flock);
 
-    # Write new serial
-    if ( open my $fh, '>', $serialPath ) {
+    my $serial = 1;
+
+    # Open file for read+write, creating if needed
+    if ( open my $fh, '+>>', $serialPath ) {
+        # Acquire exclusive lock to prevent race conditions
+        flock( $fh, LOCK_EX ) or do {
+            $self->logger->warn("SSH CA: Cannot lock serial file: $!");
+            close $fh;
+            return $serial;
+        };
+
+        # Seek to beginning to read current value
+        seek( $fh, 0, 0 );
+        my $current = <$fh>;
+        if ( defined $current ) {
+            chomp $current;
+            $serial = int($current) + 1 if $current =~ /^\d+$/;
+        }
+
+        # Truncate and write new serial
+        seek( $fh, 0, 0 );
+        truncate( $fh, 0 );
         print $fh "$serial\n";
+
+        # Lock is released when file handle is closed
         close $fh;
     }
     else {
-        $self->logger->warn("SSH CA: Cannot write serial file: $!");
+        $self->logger->warn("SSH CA: Cannot open serial file: $!");
     }
 
     return $serial;

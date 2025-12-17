@@ -411,9 +411,13 @@ sub _generateUserCode {
     my $length =
       $self->conf->{oidcServiceDeviceAuthorizationUserCodeLength} || 8;
     my $chars = USER_CODE_CHARS;
+    my $chars_len = length($chars);
     my $code  = '';
-    for ( 1 .. $length ) {
-        $code .= substr( $chars, int( rand( length($chars) ) ), 1 );
+
+    # Use cryptographically secure random bytes
+    my $random_bytes = Crypt::URandom::urandom($length);
+    for my $byte ( unpack( 'C*', $random_bytes ) ) {
+        $code .= substr( $chars, $byte % $chars_len, 1 );
     }
     return $code;
 }
