@@ -20,6 +20,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -33,6 +34,7 @@
 #define CACHE_TTL 300           /* 5 minutes */
 #define CACHE_MAX_ENTRIES 1000
 #define CACHE_FILE "/var/cache/nss_llng/users.cache"
+#define CACHE_DIR "/var/cache/nss_llng"
 
 /* Default values for user creation */
 #define DEFAULT_SHELL "/bin/bash"
@@ -378,7 +380,7 @@ static int init_cache(void)
     return 0;
 }
 
-/* Find cache entry */
+/* Find cache entry by username */
 static cache_entry_t *cache_find(const char *username)
 {
     /* Guard against uninitialized cache */
@@ -405,6 +407,141 @@ static cache_entry_t *cache_find(const char *username)
         }
     }
     return NULL;
+}
+
+/* Find cache entry by UID */
+static cache_entry_t *cache_find_by_uid(uid_t uid)
+{
+    /* Guard against uninitialized cache */
+    if (!g_cache.entries || g_cache.capacity == 0) {
+        return NULL;
+    }
+
+    time_t now = time(NULL);
+
+    for (size_t i = 0; i < g_cache.count; i++) {
+        if (g_cache.entries[i].username && g_cache.entries[i].valid &&
+            g_cache.entries[i].pw.pw_uid == uid) {
+
+            /* Check TTL */
+            if (now - g_cache.entries[i].timestamp < g_config.cache_ttl) {
+                return &g_cache.entries[i];
+            }
+
+            /* Expired - remove */
+            free(g_cache.entries[i].username);
+            free(g_cache.entries[i].pw_buffer);
+            g_cache.entries[i].username = NULL;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * File-based cache for cross-process persistence.
+ * Format: username:uid:gid:gecos:home:shell:timestamp
+ * One file per UID: /var/cache/nss_llng/<uid>
+ */
+
+/* Save user info to file cache */
+static void file_cache_save(const struct passwd *pw)
+{
+    if (!pw || !pw->pw_name) return;
+
+    /* Ensure cache directory exists and is accessible by all */
+    mkdir(CACHE_DIR, 0755);
+    /* Also chmod in case directory already existed with wrong permissions */
+    chmod(CACHE_DIR, 0755);
+
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)pw->pw_uid);
+
+    FILE *f = fopen(filepath, "w");
+    if (!f) return;
+
+    /* Write in format: username:uid:gid:gecos:home:shell:timestamp */
+    fprintf(f, "%s:%u:%u:%s:%s:%s:%ld\n",
+            pw->pw_name,
+            (unsigned)pw->pw_uid,
+            (unsigned)pw->pw_gid,
+            pw->pw_gecos ? pw->pw_gecos : "",
+            pw->pw_dir ? pw->pw_dir : "",
+            pw->pw_shell ? pw->pw_shell : "",
+            (long)time(NULL));
+
+    fclose(f);
+    /* Make cache file world-readable so all users can do UID lookups */
+    chmod(filepath, 0644);
+}
+
+/* Load user info from file cache by UID */
+static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer, size_t buflen)
+{
+    char filepath[256];
+    snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)uid);
+
+    FILE *f = fopen(filepath, "r");
+    if (!f) return -1;
+
+    char line[1024];
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    /* Parse: username:uid:gid:gecos:home:shell:timestamp */
+    char *saveptr;
+    char *username_str = strtok_r(line, ":", &saveptr);
+    char *uid_str = strtok_r(NULL, ":", &saveptr);
+    char *gid_str = strtok_r(NULL, ":", &saveptr);
+    char *gecos_str = strtok_r(NULL, ":", &saveptr);
+    char *home_str = strtok_r(NULL, ":", &saveptr);
+    char *shell_str = strtok_r(NULL, ":", &saveptr);
+    char *timestamp_str = strtok_r(NULL, ":", &saveptr);
+
+    if (!username_str || !uid_str || !gid_str || !timestamp_str) {
+        return -1;
+    }
+
+    /* Check TTL */
+    long timestamp = atol(timestamp_str);
+    if (time(NULL) - timestamp > g_config.cache_ttl) {
+        /* Expired - remove file */
+        unlink(filepath);
+        return -1;
+    }
+
+    /* Check UID matches */
+    uid_t file_uid = (uid_t)atoi(uid_str);
+    if (file_uid != uid) {
+        return -1;
+    }
+
+    /* Copy data to buffer with safe bounds checking */
+    char *p = buffer;
+    size_t remaining = buflen;
+
+    pw->pw_name = p;
+    if (safe_strcpy(&p, &remaining, username_str) != 0) return -1;
+
+    pw->pw_passwd = p;
+    if (safe_strcpy(&p, &remaining, "x") != 0) return -1;
+
+    pw->pw_uid = file_uid;
+    pw->pw_gid = (gid_t)atoi(gid_str);
+
+    pw->pw_gecos = p;
+    if (safe_strcpy(&p, &remaining, gecos_str ? gecos_str : "") != 0) return -1;
+
+    pw->pw_dir = p;
+    if (safe_strcpy(&p, &remaining, home_str ? home_str : "") != 0) return -1;
+
+    pw->pw_shell = p;
+    if (safe_strcpy(&p, &remaining, shell_str ? shell_str : "") != 0) return -1;
+
+    return 0;
 }
 
 /* Add to cache */
@@ -799,8 +936,10 @@ enum nss_status _nss_llng_getpwnam_r(const char *name,
 
     /* Query LLNG server */
     if (query_llng_userinfo(name, result, buffer, buflen) == 0) {
-        /* Add to cache */
+        /* Add to memory cache */
         cache_add(name, result, 1);
+        /* Also save to file cache for cross-process UID lookups */
+        file_cache_save(result);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }
@@ -819,11 +958,85 @@ enum nss_status _nss_llng_getpwuid_r(uid_t uid,
                                       size_t buflen,
                                       int *errnop)
 {
-    /* We don't support UID lookup - only username lookup */
-    (void)uid;
-    (void)result;
-    (void)buffer;
-    (void)buflen;
+    if (!result || !buffer) {
+        *errnop = EINVAL;
+        return NSS_STATUS_UNAVAIL;
+    }
+
+    /* Recursion guard: if we're already in a lookup, don't recurse */
+    if (g_in_nss_lookup) {
+        *errnop = ENOENT;
+        return NSS_STATUS_NOTFOUND;
+    }
+
+    g_in_nss_lookup = 1;
+
+    ensure_initialized();
+
+    /*
+     * UID lookup is done from cache only.
+     * Users must be looked up by name first (via getpwnam) before
+     * UID lookup will work. This happens automatically during PAM
+     * authentication when the user logs in.
+     */
+    pthread_mutex_lock(&g_cache.lock);
+    cache_entry_t *cached = cache_find_by_uid(uid);
+    if (cached && cached->valid) {
+        /* Copy from cache with safe bounds checking */
+        size_t needed = strlen(cached->pw.pw_name) + strlen(cached->pw.pw_passwd) +
+                       strlen(cached->pw.pw_gecos) + strlen(cached->pw.pw_dir) +
+                       strlen(cached->pw.pw_shell) + 16;
+
+        if (buflen < needed) {
+            pthread_mutex_unlock(&g_cache.lock);
+            g_in_nss_lookup = 0;
+            *errnop = ERANGE;
+            return NSS_STATUS_TRYAGAIN;
+        }
+
+        char *p = buffer;
+        size_t remaining = buflen;
+
+        result->pw_name = p;
+        if (safe_strcpy(&p, &remaining, cached->pw.pw_name) != 0) goto uid_cache_overflow;
+
+        result->pw_passwd = p;
+        if (safe_strcpy(&p, &remaining, cached->pw.pw_passwd) != 0) goto uid_cache_overflow;
+
+        result->pw_uid = cached->pw.pw_uid;
+        result->pw_gid = cached->pw.pw_gid;
+
+        result->pw_gecos = p;
+        if (safe_strcpy(&p, &remaining, cached->pw.pw_gecos) != 0) goto uid_cache_overflow;
+
+        result->pw_dir = p;
+        if (safe_strcpy(&p, &remaining, cached->pw.pw_dir) != 0) goto uid_cache_overflow;
+
+        result->pw_shell = p;
+        if (safe_strcpy(&p, &remaining, cached->pw.pw_shell) != 0) goto uid_cache_overflow;
+
+        pthread_mutex_unlock(&g_cache.lock);
+        g_in_nss_lookup = 0;
+        return NSS_STATUS_SUCCESS;
+
+    uid_cache_overflow:
+        pthread_mutex_unlock(&g_cache.lock);
+        g_in_nss_lookup = 0;
+        *errnop = ERANGE;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    pthread_mutex_unlock(&g_cache.lock);
+
+    /* Try file-based cache (shared across processes) */
+    if (file_cache_load_by_uid(uid, result, buffer, buflen) == 0) {
+        /* Also add to memory cache for future lookups in this process */
+        cache_add(result->pw_name, result, 1);
+        g_in_nss_lookup = 0;
+        return NSS_STATUS_SUCCESS;
+    }
+
+    /* UID not found in cache - cannot query LLNG by UID */
+    g_in_nss_lookup = 0;
     *errnop = ENOENT;
     return NSS_STATUS_NOTFOUND;
 }

@@ -8,7 +8,8 @@ PORTAL_URL="${LLNG_PORTAL_URL:-http://sso}"
 SERVER_GROUP="${LLNG_SERVER_GROUP:-bastion}"
 CLIENT_ID="${LLNG_CLIENT_ID:-pam-access}"
 CLIENT_SECRET="${LLNG_CLIENT_SECRET:-pamsecret}"
-SERVER_TOKEN="${LLNG_SERVER_TOKEN:-}"
+ADMIN_USER="${LLNG_ADMIN_USER:-dwho}"
+ADMIN_PASSWORD="${LLNG_ADMIN_PASSWORD:-dwho}"
 SSH_CA_FILE="/etc/ssh/llng_ca.pub"
 TOKEN_FILE="/etc/security/llng_server_token"
 
@@ -112,14 +113,110 @@ X11Forwarding no
 PermitRootLogin no
 EOF
 
-# Create server token file if token provided
-if [ -n "$SERVER_TOKEN" ]; then
-    echo "$SERVER_TOKEN" > "$TOKEN_FILE"
-    chmod 600 "$TOKEN_FILE"
-    echo "Server token configured"
+# Enroll server via Device Authorization Grant
+echo "=== Server Enrollment via Device Authorization ==="
+COOKIE_FILE="/tmp/admin_cookies"
+touch "$COOKIE_FILE"
+
+# Step 1: Get login token
+echo "Getting login token..."
+LOGIN_TOKEN=$(curl -s "$PORTAL_URL/" | grep -oP 'name="token" value="\K[^"]+' | head -1)
+echo "  Token: $LOGIN_TOKEN"
+
+# Step 2: Login as admin (don't follow redirect, cookie is set on 302 response)
+echo "Logging in as $ADMIN_USER..."
+LOGIN_RESP=$(curl -s -c "$COOKIE_FILE" \
+    -d "user=$ADMIN_USER" \
+    -d "password=$ADMIN_PASSWORD" \
+    -d "token=$LOGIN_TOKEN" \
+    "$PORTAL_URL/")
+
+# Verify login succeeded by checking cookie file
+if grep -q "lemonldap" "$COOKIE_FILE"; then
+    echo "Admin login successful"
 else
-    echo "WARNING: No LLNG_SERVER_TOKEN provided, PAM authorization will fail"
+    echo "ERROR: Failed to login as admin"
+    echo "Cookie file contents:"
+    cat "$COOKIE_FILE" || true
+    exit 1
 fi
+
+# Step 3: Initiate Device Authorization Grant
+echo "Initiating Device Authorization Grant..."
+DEVICE_RESP=$(curl -s -X POST "$PORTAL_URL/oauth2/device" \
+    -d "client_id=$CLIENT_ID" \
+    -d "client_secret=$CLIENT_SECRET" \
+    -d "scope=pam pam:server")
+echo "  Device response: $DEVICE_RESP"
+
+DEVICE_CODE=$(echo "$DEVICE_RESP" | jq -r '.device_code // empty')
+USER_CODE=$(echo "$DEVICE_RESP" | jq -r '.user_code // empty')
+
+if [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ]; then
+    echo "ERROR: Failed to get device code"
+    echo "Response: $DEVICE_RESP"
+    exit 1
+fi
+
+echo "Device code obtained, user code: $USER_CODE"
+
+# Step 4: Approve the device code as admin
+# Remove dashes from user_code for URL
+USER_CODE_CLEAN=$(echo "$USER_CODE" | tr -d '-')
+
+echo "Approving device code..."
+# First GET the device page to get the form token
+DEVICE_PAGE=$(curl -s -b "$COOKIE_FILE" "$PORTAL_URL/device?user_code=$USER_CODE_CLEAN")
+FORM_TOKEN=$(echo "$DEVICE_PAGE" | grep -oP 'name="token" value="\K[^"]+' | head -1)
+
+# POST approval
+APPROVE_RESP=$(curl -s -b "$COOKIE_FILE" -X POST "$PORTAL_URL/device" \
+    -d "user_code=$USER_CODE_CLEAN" \
+    -d "action=approve" \
+    -d "token=$FORM_TOKEN")
+
+if echo "$APPROVE_RESP" | grep -q "approved\|success\|authorized"; then
+    echo "Device code approved"
+else
+    # Check if approval worked by trying to get token
+    echo "Checking approval status..."
+fi
+
+# Step 5: Poll for access token
+echo "Polling for access token..."
+for i in {1..30}; do
+    TOKEN_RESP=$(curl -s -X POST "$PORTAL_URL/oauth2/token" \
+        -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+        -d "device_code=$DEVICE_CODE" \
+        -d "client_id=$CLIENT_ID" \
+        -d "client_secret=$CLIENT_SECRET")
+
+    ACCESS_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.access_token // empty')
+
+    if [ -n "$ACCESS_TOKEN" ]; then
+        echo "Access token obtained!"
+        echo "$ACCESS_TOKEN" > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        break
+    fi
+
+    ERROR=$(echo "$TOKEN_RESP" | jq -r '.error // empty')
+    if [ "$ERROR" = "authorization_pending" ] || [ "$ERROR" = "slow_down" ]; then
+        sleep 2
+    elif [ -n "$ERROR" ]; then
+        echo "ERROR: Token request failed: $ERROR"
+        echo "Response: $TOKEN_RESP"
+        exit 1
+    fi
+done
+
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "ERROR: Failed to obtain access token after polling"
+    exit 1
+fi
+
+echo "Server enrollment complete"
+rm -f "$COOKIE_FILE"
 
 # Create PAM LLNG configuration
 cat > /etc/security/pam_llng.conf << EOF

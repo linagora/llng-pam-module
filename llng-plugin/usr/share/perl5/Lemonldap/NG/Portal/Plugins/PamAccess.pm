@@ -1037,24 +1037,30 @@ sub sshCaSign {
     my $maxValidity = $self->conf->{sshCaCertMaxValidity} || 60;
     $validityMinutes = $maxValidity if $validityMinutes > $maxValidity;
 
-    # Get principals from request or derive from session
+    # SECURITY: Always derive principals from the authenticated user's session
+    # Never trust principals from the request body to prevent impersonation attacks
     my @principals;
+
+    # Evaluate principal sources from config (e.g., '$uid' or '$uid $mail')
+    my $principalSources = $self->conf->{sshCaPrincipalSources} || '$uid';
+
+    # Simple variable substitution from session (try userData first, then sessionInfo)
+    my $principal = $principalSources;
+    $principal =~ s/\$(\w+)/
+        $req->userData->{$1} || $req->sessionInfo->{$1} || ''
+    /ge;
+    $principal =~ s/^\s+|\s+$//g;  # trim
+
+    # Split on whitespace if multiple principals
+    @principals = grep { $_ ne '' } split /\s+/, $principal;
+
+    # Log warning if client tried to specify principals (potential attack attempt)
     if ( $body->{principals} && ref $body->{principals} eq 'ARRAY' ) {
-        @principals = @{ $body->{principals} };
-    }
-    else {
-        # Evaluate principal sources from config (e.g., '$uid' or '$uid $mail')
-        my $principalSources = $self->conf->{sshCaPrincipalSources} || '$uid';
-
-        # Simple variable substitution from session (try userData first, then sessionInfo)
-        my $principal = $principalSources;
-        $principal =~ s/\$(\w+)/
-            $req->userData->{$1} || $req->sessionInfo->{$1} || ''
-        /ge;
-        $principal =~ s/^\s+|\s+$//g;  # trim
-
-        # Split on whitespace if multiple principals
-        @principals = grep { $_ ne '' } split /\s+/, $principal;
+        $self->logger->warn(
+            "SSH CA sign: Ignoring 'principals' parameter from request "
+            . "(user: " . ($req->user || 'unknown') . "). "
+            . "Principals are always derived from session for security."
+        );
     }
 
     unless (@principals) {

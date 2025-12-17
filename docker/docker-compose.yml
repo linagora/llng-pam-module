@@ -61,7 +61,8 @@ services:
       - LLNG_SERVER_GROUP=bastion
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
-      - LLNG_SERVER_TOKEN=5f3284b425bbd083e1c47dc737acbffb0f04ecdbecd942486f2e13220b03abfa
+      - LLNG_ADMIN_USER=dwho
+      - LLNG_ADMIN_PASSWORD=dwho
     volumes:
       # PAM module sources for build
       - ..:/src/llng-pam-module:ro
@@ -85,7 +86,8 @@ services:
       - LLNG_SERVER_GROUP=backend
       - LLNG_CLIENT_ID=pam-access
       - LLNG_CLIENT_SECRET=pamsecret
-      - LLNG_SERVER_TOKEN=5f3284b425bbd083e1c47dc737acbffb0f04ecdbecd942486f2e13220b03abfa
+      - LLNG_ADMIN_USER=dwho
+      - LLNG_ADMIN_PASSWORD=dwho
     volumes:
       # PAM module sources for build
       - ..:/src/llng-pam-module:ro

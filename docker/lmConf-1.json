@@ -141,9 +141,9 @@
 
   "pamAccessSshRules": {
     "default": "1",
-    "bastion": "$uid eq 'dwho' or $uid eq 'rtyler'",
-    "backend": "$uid eq 'dwho' or $uid eq 'rtyler'",
-    "backend-new": "$uid eq 'dwho' or $uid eq 'rtyler'"
+    "bastion": "$uid eq 'dwho' or $uid eq 'rtyler' or $uid eq 'msmith'",
+    "backend": "$uid eq 'dwho' or $uid eq 'rtyler' or $uid eq 'msmith'",
+    "backend-new": "$uid eq 'dwho' or $uid eq 'rtyler' or $uid eq 'msmith'"
   },
 
   "pamAccessSudoRules": {
