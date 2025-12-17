@@ -210,8 +210,11 @@ sub sshCaSign {
         return $self->_badRequest( $req, 'public_key parameter required' );
     }
 
-    # Validate SSH public key format
-    unless ( $userPubKey =~ /^(ssh-\w+|ecdsa-sha2-\w+)\s+[A-Za-z0-9+\/=]+/ ) {
+   # Validate SSH public key format: type, base64, optional comment, single line
+   # Strict validation to prevent injection attacks
+    unless ( $userPubKey =~
+        /\A(ssh-\w+|ecdsa-sha2-\w+)\s+[A-Za-z0-9+\/]+={0,2}(?:\s+[^\r\n]*)?\z/ )
+    {
         return $self->_badRequest( $req, 'Invalid SSH public key format' );
     }
 
@@ -232,11 +235,30 @@ sub sshCaSign {
     # Evaluate principal sources from config (e.g., '$uid' or '$uid $mail')
     my $principalSources = $self->conf->{sshCaPrincipalSources} || '$uid';
 
-# Simple variable substitution from session (try userData first, then sessionInfo)
-    my $principal = $principalSources;
-    $principal =~ s/\$(\w+)/
-        $req->userData->{$1} || $req->sessionInfo->{$1} || ''
-    /ge;
+    # Safe variable substitution without using /e to avoid eval-like behavior
+    my $principal = '';
+    my $template  = $principalSources;
+    my $pos       = 0;
+
+    while ( $template =~ /\$(\w+)/g ) {
+        my $match_start = $-[0];
+        my $match_end   = $+[0];
+
+        # Append text before the match
+        $principal .= substr( $template, $pos, $match_start - $pos );
+
+        # Get value from userData or sessionInfo
+        my $key = $1;
+        my $val = $req->userData->{$key};
+        $val = $req->sessionInfo->{$key} if !defined $val || $val eq '';
+        $val = ''                        if !defined $val;
+
+        $principal .= $val;
+        $pos = $match_end;
+    }
+
+    # Append remaining text after last match
+    $principal .= substr( $template, $pos ) if $pos < length($template);
     $principal =~ s/^\s+|\s+$//g;    # trim
 
     # Split on whitespace if multiple principals

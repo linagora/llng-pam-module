@@ -450,13 +450,22 @@ static void file_cache_save(const struct passwd *pw)
 {
     if (!pw || !pw->pw_name) return;
 
-    /* Ensure cache directory exists and is accessible by all */
-    mkdir(CACHE_DIR, 0755);
-    /* Also chmod in case directory already existed with wrong permissions */
-    chmod(CACHE_DIR, 0755);
+    /* Ensure cache directory exists with world-readable permissions.
+     * Use mkdir with correct mode; if it already exists (EEXIST), proceed.
+     * The directory needs to be world-readable (0755) so all users can do UID lookups. */
+    if (mkdir(CACHE_DIR, 0755) == -1 && errno != EEXIST) {
+        syslog(LOG_WARNING, "libnss_llng: cannot create cache directory %s: %s",
+               CACHE_DIR, strerror(errno));
+        return;
+    }
 
     char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)pw->pw_uid);
+    int len = snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)pw->pw_uid);
+    if (len < 0 || (size_t)len >= sizeof(filepath)) {
+        syslog(LOG_ERR, "libnss_llng: cache filepath truncated for uid %u",
+               (unsigned)pw->pw_uid);
+        return;
+    }
 
     FILE *f = fopen(filepath, "w");
     if (!f) return;
