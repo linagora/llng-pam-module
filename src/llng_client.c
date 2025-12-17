@@ -344,10 +344,16 @@ static int validate_cert_pin_format(const char *pin)
         }
 
         if (strncmp(token, "sha256//", 8) == 0) {
-            /* SHA256 hash format: sha256// followed by base64 (44 chars for SHA256) */
+            /* SHA256 hash format: "sha256//" followed by base64 of 32 bytes
+             * Standard base64 encoding of 32 bytes is 44 characters (with padding);
+             * we also accept 43-character encodings when the trailing padding is omitted.
+             */
             const char *hash = token + 8;
             size_t len = strlen(hash);
-            /* Base64 of 32 bytes = 44 chars (or 43 with no padding) */
+            /* Accept standard base64 length for 32 bytes (44 chars) and the
+             * no-padding variant (43 chars). Only the standard base64 alphabet
+             * (+ and /, not - or _) is allowed by the character check below.
+             */
             if (len < 43 || len > 44) {
                 valid = 0;
             } else {
