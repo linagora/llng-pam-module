@@ -1,5 +1,23 @@
 Analyse des Risques - État Après Remédiations
 
+## Vue Globale
+
+### Matrice des Risques Après Remédiation (avec clients OIDC distincts)
+
+| Impact ↓ / Probabilité → |        1 - Très improbable       | 2 - Peu probable |
+|--------------------------|----------------------------------|------------------|
+| **4 - Critique**         | R5, R-S1, R-S4                   |                  |
+| **3 - Important**        | R1, R3, R8, R12, R-S5            | R-S6             |
+| **2 - Limité**           | R4, R7, R9, R10, R11, R-S3, R-S7 | R6, R-S8         |
+| **1 - Négligeable**      | R0, R13                          |                  |
+
+**Zones de risque :**
+- Score ≥ 6 : Zone rouge (aucun risque dans cette zone après remédiation)
+- Score 4-5 : Zone jaune → R5, R-S1, R-S4 (P=1, I=4), R6, R-S8 (P=2, I=2), R-S6 (P=2, I=3)
+- Score ≤ 3 : Zone verte → Tous les autres risques
+
+---
+
 ## Risques Enrôlement
 
 ### Avec segmentation `server_group` seul
