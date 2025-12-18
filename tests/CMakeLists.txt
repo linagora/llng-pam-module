@@ -58,7 +58,7 @@ target_include_directories(test_username_validator PRIVATE ${CMAKE_SOURCE_DIR}/i
 add_test(NAME test_username_validator COMMAND test_username_validator)
 
 # Test llng_client structures and functions
-add_executable(test_llng_client test_llng_client.c ../src/llng_client.c)
+add_executable(test_llng_client test_llng_client.c ../src/llng_client.c ../src/jwt_utils.c)
 target_include_directories(test_llng_client PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
@@ -86,17 +86,15 @@ target_link_libraries(test_auth_cache
 )
 add_test(NAME test_auth_cache COMMAND test_auth_cache)
 
-# Test token manager JWT functions
-add_executable(test_token_manager test_token_manager.c ../src/token_manager.c)
-target_compile_definitions(test_token_manager PRIVATE TOKEN_MANAGER_TEST)
+# Test JWT utility functions
+add_executable(test_token_manager test_token_manager.c ../src/jwt_utils.c)
+target_compile_definitions(test_token_manager PRIVATE JWT_UTILS_TEST)
 target_include_directories(test_token_manager PRIVATE
     ${CMAKE_SOURCE_DIR}/include
-    ${CURL_INCLUDE_DIRS}
     ${JSON_C_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIRS}
 )
 target_link_libraries(test_token_manager
-    ${CURL_LIBRARIES}
     ${JSON_C_LIBRARIES}
     ${OPENSSL_LIBRARIES}
 )

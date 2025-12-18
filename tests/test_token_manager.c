@@ -1,5 +1,5 @@
 /*
- * test_token_manager.c - Tests for token_manager JWT functions
+ * test_token_manager.c - Tests for JWT utility functions
  *
  * Tests the JWT generation functions:
  * - base64url_encode()
@@ -18,13 +18,11 @@
 #include <openssl/evp.h>
 #include <json-c/json.h>
 
-#include "token_manager.h"
+#include "jwt_utils.h"
 
-/* Declare test-exposed functions */
+/* Declare test-exposed internal functions from jwt_utils.c */
 extern char *base64url_encode(const unsigned char *data, size_t len);
 extern char *generate_uuid(void);
-extern char *generate_client_jwt(const char *client_id, const char *client_secret,
-                                  const char *token_endpoint);
 
 /* Test counter */
 static int tests_run = 0;
@@ -104,16 +102,32 @@ static void test_base64url_encode_basic(void)
 
 static void test_base64url_encode_empty(void)
 {
-    TEST("base64url_encode empty");
+    TEST("base64url_encode empty (security: should reject)");
 
     char *result = base64url_encode((const unsigned char *)"", 0);
 
-    if (result && strlen(result) == 0) {
+    /* Security: empty input should be rejected */
+    if (result == NULL) {
         PASS();
     } else {
-        FAIL("Expected empty string");
+        FAIL("Expected NULL for empty input (security check)");
+        free(result);
     }
-    free(result);
+}
+
+static void test_base64url_encode_null(void)
+{
+    TEST("base64url_encode NULL (security: should reject)");
+
+    char *result = base64url_encode(NULL, 10);
+
+    /* Security: NULL pointer should be rejected */
+    if (result == NULL) {
+        PASS();
+    } else {
+        FAIL("Expected NULL for NULL input (security check)");
+        free(result);
+    }
 }
 
 static void test_base64url_encode_binary(void)
@@ -558,6 +572,7 @@ int main(void)
     printf("base64url_encode tests:\n");
     test_base64url_encode_basic();
     test_base64url_encode_empty();
+    test_base64url_encode_null();
     test_base64url_encode_binary();
     test_base64url_encode_no_padding();
 

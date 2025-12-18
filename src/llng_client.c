@@ -17,6 +17,7 @@
 #include <openssl/rand.h>
 
 #include "llng_client.h"
+#include "jwt_utils.h"
 
 /* TLS version constants for min_tls_version configuration */
 #define TLS_VERSION_1_2 12
@@ -27,9 +28,6 @@
 
 /* Security: Maximum user groups to prevent DoS via memory exhaustion */
 #define MAX_USER_GROUPS 256
-
-/* Security: Maximum base64 input size to prevent integer overflow (64KB) */
-#define MAX_BASE64_INPUT_SIZE (64 * 1024)
 
 /* Safe strdup from JSON - returns NULL if json string is NULL */
 static inline char *safe_json_strdup(struct json_object *obj)
@@ -399,39 +397,6 @@ static int validate_cert_pin_format(const char *pin)
     return valid;
 }
 
-/* Base64 encode for Basic auth */
-static char *base64_encode(const char *input, size_t len)
-{
-    /* Security: Validate input parameters */
-    if (!input || len == 0) return NULL;
-
-    /* Security: Prevent integer overflow and excessive allocation */
-    if (len > MAX_BASE64_INPUT_SIZE) return NULL;
-
-    static const char b64_table[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    size_t output_len = 4 * ((len + 2) / 3);
-    char *output = malloc(output_len + 1);
-    if (!output) return NULL;
-
-    size_t i, j;
-    for (i = 0, j = 0; i < len; i += 3, j += 4) {
-        uint32_t octet_a = i < len ? (unsigned char)input[i] : 0;
-        uint32_t octet_b = i + 1 < len ? (unsigned char)input[i + 1] : 0;
-        uint32_t octet_c = i + 2 < len ? (unsigned char)input[i + 2] : 0;
-
-        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
-
-        output[j] = b64_table[(triple >> 18) & 0x3F];
-        output[j + 1] = b64_table[(triple >> 12) & 0x3F];
-        output[j + 2] = (i + 1 < len) ? b64_table[(triple >> 6) & 0x3F] : '=';
-        output[j + 3] = (i + 2 < len) ? b64_table[triple & 0x3F] : '=';
-    }
-    output[output_len] = '\0';
-    return output;
-}
-
 llng_client_t *llng_client_init(const llng_client_config_t *config)
 {
     if (!config || !config->portal_url) {
@@ -752,25 +717,49 @@ int llng_introspect_token(llng_client_t *client,
     char url[1024];
     snprintf(url, sizeof(url), "%s/oauth2/introspect", client->portal_url);
 
-    /* Build POST data */
+    /* Build POST data with JWT client assertion (RFC 7523) */
     char *escaped_token = curl_easy_escape(client->curl, token, 0);
-    char postdata[4096];
-    snprintf(postdata, sizeof(postdata), "token=%s", escaped_token);
+    char postdata[8192];
+    int len = snprintf(postdata, sizeof(postdata), "token=%s", escaped_token);
     curl_free(escaped_token);
 
-    /* Build Basic auth header */
+    /* Add JWT client assertion for authentication */
     struct curl_slist *headers = NULL;
     if (client->client_id && client->client_secret) {
-        char auth_str[512];
-        snprintf(auth_str, sizeof(auth_str), "%s:%s",
-                 client->client_id, client->client_secret);
-        char *b64 = base64_encode(auth_str, strlen(auth_str));
-        if (b64) {
-            char auth_header[600];
-            snprintf(auth_header, sizeof(auth_header), "Authorization: Basic %s", b64);
-            headers = curl_slist_append(headers, auth_header);
-            free(b64);
+        char *client_jwt = generate_client_jwt(client->client_id,
+                                                client->client_secret,
+                                                url);
+        if (!client_jwt) {
+            snprintf(client->error, sizeof(client->error),
+                     "Failed to generate JWT for introspection");
+            return -1;
         }
+
+        char *encoded_jwt = curl_easy_escape(client->curl, client_jwt, 0);
+        /* Security: wipe JWT before freeing */
+        explicit_bzero(client_jwt, strlen(client_jwt));
+        free(client_jwt);
+
+        if (!encoded_jwt) {
+            snprintf(client->error, sizeof(client->error),
+                     "Failed to URL-encode JWT for introspection");
+            return -1;
+        }
+
+        int written = snprintf(postdata + len, sizeof(postdata) - len,
+            "&client_id=%s"
+            "&client_assertion_type=urn%%3Aietf%%3Aparams%%3Aoauth%%3A"
+            "client-assertion-type%%3Ajwt-bearer"
+            "&client_assertion=%s", client->client_id, encoded_jwt);
+        curl_free(encoded_jwt);
+
+        /* Check for buffer overflow */
+        if (written < 0 || (size_t)written >= sizeof(postdata) - len) {
+            snprintf(client->error, sizeof(client->error),
+                     "POST data buffer overflow in introspection");
+            return -1;
+        }
+        len += written;
     }
     headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
 
@@ -784,6 +773,9 @@ int llng_introspect_token(llng_client_t *client,
 
     CURLcode res = curl_easy_perform(client->curl);
     curl_slist_free_all(headers);
+
+    /* Security: wipe postdata containing JWT client assertion */
+    explicit_bzero(postdata, sizeof(postdata));
 
     if (res != CURLE_OK) {
         snprintf(client->error, sizeof(client->error),
