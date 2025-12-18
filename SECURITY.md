@@ -61,6 +61,16 @@ The PAM module authenticates to the LLNG server using:
 
 The server token should be stored in a file with restricted permissions (0600) owned by root.
 
+### OAuth2 Client Authentication
+
+For OAuth2 token introspection and refresh operations, the module uses **JWT Client Assertion**
+(RFC 7523) instead of HTTP Basic Authentication. This provides enhanced security:
+
+- The `client_secret` is never transmitted over the network
+- Each request includes a unique JWT signed with HMAC-SHA256
+- JWT contains: `iss`, `sub`, `aud`, `exp`, `iat`, and unique `jti` (UUID v4)
+- JWT validity is 5 minutes to prevent replay attacks
+
 ### Automatic Token Rotation
 
 When `token_rotate_refresh = true` (default), the module automatically rotates the refresh token after each successful token refresh. This limits the window of opportunity if a token is compromised, as stolen tokens become invalid after the next legitimate use.
@@ -244,6 +254,7 @@ Recommended permissions:
 | Memory exhaustion DoS | Response size limits (256KB), group limits (256 max) |
 | Integer overflow | Input validation in base64 encoding, backoff calculations |
 | Malformed JSON | Type validation for critical response fields |
+| Client secret exposure | JWT Client Assertion (RFC 7523) - secret never transmitted |
 
 ## Security Reporting
 

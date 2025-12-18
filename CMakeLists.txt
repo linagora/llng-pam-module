@@ -35,6 +35,7 @@ set(PAM_MODULE_SOURCES
     src/rate_limiter.c
     src/client_context.c
     src/token_manager.c
+    src/jwt_utils.c
     src/notify.c
     src/secret_store.c
     src/auth_cache.c

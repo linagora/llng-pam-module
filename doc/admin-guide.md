@@ -495,7 +495,8 @@ journalctl -u sshd | grep pam_llng
 # In /etc/security/pam_llng.conf:
 log_level = debug
 
-# Test token introspection
+# Test token introspection (using Basic Auth for simplicity)
+# Note: The PAM module uses JWT Client Assertion (RFC 7523) for enhanced security
 curl -X POST https://auth.example.com/oauth2/introspect \
   -u "pam-access:secret" \
   -d "token=<user_token>"
