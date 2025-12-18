@@ -1,13 +1,14 @@
-Analyse des Risques - État Actuel
+Analyse des Risques - État Après Remédiations
 
-| Risque                       | Score actuel (P×I) | Zone                            |
-|------------------------------|--------------------|---------------------------------|
-| R5                           | 1×4 = 4            | Critique (seul dans cette zone) |
-| R2                           | 2×3 = 6            | Jaune (P=2, I=3)                |
-| R6                           | 2×2 = 4            | Jaune (P=2, I=2)                |
-| R1, R3, R4, R7, R8, R11, R12 | 1×3 = 3            | Vert/Important                  |
-| R0, R9, R10                  | 1×2 = 2            | Vert/Limité                     |
-| R13                          | 1×1 = 1            | Négligeable                     |
+| Risque                            | Score (P×I) | Zone             | Remédiation                        |
+|-----------------------------------|-------------|------------------|------------------------------------|
+| R5                                | 1×4 = 4     | Critique         | Certificate pinning recommandé     |
+| R6                                | 2×2 = 4     | Jaune (P=2, I=2) | TTL 10 min par défaut              |
+| R1, R2, R3, R4, R7, R8, R11, R12  | 1×3 = 3     | Vert/Important   | Voir détails ci-dessous            |
+| R0, R9, R10                       | 1×2 = 2     | Vert/Limité      | -                                  |
+| R13                               | 1×1 = 1     | Négligeable      | PKCE implémenté                    |
+
+**Changement notable :** R2 passe de P=2 à P=1 grâce à l'intégration CrowdSec (rate-limiting IP).
 
 Pistes d'Amélioration par Risque
 
@@ -20,7 +21,7 @@ Pistes pour réduire la probabilité à quasi-zéro :
 2. mTLS : Le serveur PAM présente aussi un certificat client
 3. DANE (DNSSEC + TLSA) : Validation du certificat via DNS signé
 
-R2 (P=2, I=3) - Brute-force du user_code
+R2 (P=1, I=3) - Brute-force du user_code (avec CrowdSec)
 
 **Recommandations RFC 8628 :**
 
