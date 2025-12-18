@@ -22,10 +22,49 @@ Pistes pour réduire la probabilité à quasi-zéro :
 
 R2 (P=2, I=3) - Brute-force du user_code
 
-Pistes pour réduire P à 1 :
-1. Augmenter l'entropie du user_code (plus de caractères, ou base 36 → base 62)
-2. Lockout IP après N échecs (ex: 3 échecs = blocage 15 min)
-3. Vérification out-of-band : Admin reçoit notification avec IP/hostname du serveur avant d'approuver
+**Recommandations RFC 8628 :**
+
+La RFC est claire : la protection repose sur la **combinaison entropie + rate-limiting**, pas sur un seul facteur.
+
+| Format | Tentatives autorisées | Probabilité de succès |
+|--------|----------------------|----------------------|
+| 8 caractères base-20 | 5 tentatives max | 2^-32 (négligeable) |
+
+**Format recommandé par la RFC :**
+- **Base-20 sans voyelles** : `BCDFGHJKLMNPQRSTVWXZ`
+  - Évite de former des mots embarrassants/offensants
+  - Facile à saisir sur mobile (pas de shift, pas de chiffres)
+  - Format typique : `BDFC-GHJK` (avec tiret pour lisibilité)
+- **Alternative numérique** : 9+ chiffres pour entropie équivalente
+
+**Implémentation LLNG :**
+
+Le plugin `OIDCDeviceAuthorization.pm` implémente les recommandations RFC 8628 :
+
+1. **Format user_code conforme** : Base-20 sans voyelles (`BCDFGHJKLMNPQRSTVWXZ`)
+   - Évite les mots offensants
+   - Format `XXXX-XXXX` pour la lisibilité
+   - Configurable via `oidcServiceDeviceAuthorizationUserCodeLength` (défaut: 8)
+
+2. **Intégration CrowdSec** : Rate-limiting IP délégué à CrowdSec
+   - Scénario : `llng/device-auth-bruteforce`
+   - Chaque tentative invalide est signalée via `_reportInvalidUserCode()`
+   - Lockout automatique après N échecs (configurable dans CrowdSec)
+   - Warning affiché si CrowdSec n'est pas configuré
+
+3. **Expiration courte** : 10 min par défaut (`oidcServiceDeviceAuthorizationExpiration`)
+
+**Configuration recommandée (côté LLNG) :**
+```yaml
+# Activer CrowdSec pour le rate-limiting (FORTEMENT RECOMMANDÉ)
+crowdsec: 1
+crowdsecAgent: 1
+
+# Optionnel : réduire le TTL du device_code
+oidcServiceDeviceAuthorizationExpiration: 300  # 5 min au lieu de 10
+```
+
+Avec CrowdSec activé, P passe à 1 car le brute-force devient "infeasible" (RFC 8628)
 
 R6 (P=2, I=2) - Expiration device_code
 

@@ -557,17 +557,25 @@ Ce mécanisme SSH natif rend l'attaque très visible et nécessite que l'utilisa
 - Attaque automatisée sur `/device` avec différents codes
 - Tentatives multiples avant expiration
 
-**Calcul :** Avec un code de 8 caractères alphanumériques (base 36) : 36^8 ≈ 2.8 × 10^12 combinaisons. Avec 5 minutes et rate limiting, c'est impraticable.
+**Calcul RFC 8628 :** Avec un code de 8 caractères base-20 et max 5 tentatives : probabilité de succès = 2^-32 (négligeable).
 
-**Remédiation embarquée :**
-- Expiration courte (5 minutes)
-- Format incluant des caractères variés
+**Remédiation embarquée (LLNG) :**
+- Format `user_code` conforme RFC 8628 §6.1 : base-20 sans voyelles (`BCDFGHJKLMNPQRSTVWXZ`)
+- Expiration courte (10 minutes par défaut, configurable)
+- Intégration CrowdSec : chaque tentative invalide est signalée (scénario `llng/device-auth-bruteforce`)
 
 **Remédiation configuration (côté LLNG) :**
-- Rate limiting sur l'endpoint `/device`
-- Verrouillage après N tentatives échouées
-- Monitoring des tentatives de brute-force
-- Augmenter la longueur du `user_code` si nécessaire
+```yaml
+# FORTEMENT RECOMMANDÉ : Activer CrowdSec pour le rate-limiting IP
+crowdsec: 1
+crowdsecAgent: 1
+
+# Optionnel : ajuster les paramètres
+oidcServiceDeviceAuthorizationExpiration: 300      # TTL en secondes (défaut: 600)
+oidcServiceDeviceAuthorizationUserCodeLength: 8    # Longueur du code (défaut: 8)
+```
+
+**Note :** Sans CrowdSec activé, LLNG affiche un warning au démarrage. Le rate-limiting IP est délégué à CrowdSec qui gère le lockout automatique après N échecs
 
 |                 | Score résiduel |
 | --------------- | :------------: |
@@ -1260,6 +1268,7 @@ timedatectl set-ntp true
 ### Avant l'enrôlement
 
 - [ ] LLNG configuré avec Device Authorization Grant activé
+- [ ] Plugin CrowdSec activé pour le rate-limiting (R2)
 - [ ] Client OIDC `pam-access` créé avec scope `pam:server`
 - [ ] `client_secret` stocké dans `/etc/security/pam_llng.conf` (pas en CLI)
 - [ ] Fichier de config en permissions 0600
