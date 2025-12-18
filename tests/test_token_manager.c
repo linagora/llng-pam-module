@@ -62,7 +62,7 @@ static unsigned char *base64url_decode(const char *input, size_t *out_len)
     };
 
     size_t len = strlen(input);
-    size_t out_size = (len * 3) / 4 + 3;
+    size_t out_size = (len * 3) / 4 + 4;  /* +4 for safety and null terminator */
     unsigned char *out = malloc(out_size);
     if (!out) return NULL;
 
@@ -78,6 +78,7 @@ static unsigned char *base64url_decode(const char *input, size_t *out_len)
         if (i + 3 < len) out[j++] = n & 0xFF;
     }
 
+    out[j] = '\0';  /* Null-terminate for safe use with string functions */
     *out_len = j;
     return out;
 }
