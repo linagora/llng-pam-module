@@ -837,14 +837,14 @@ cryptsetup luksFormat /dev/swap_partition
 
 ---
 
-### R10 - Expiration du access_token non détectée
+### R10 - Expiration de l'access_token non détectée
 
 |                 | Score |
 | --------------- | :---: |
 | **Probabilité** |   2   |
 | **Impact**      |   3   |
 
-**Description :** Le `access_token` du serveur a une durée de vie limitée (ex: 1 heure). S'il expire sans être rafraîchi, les authentifications échouent.
+**Description :** L'`access_token` du serveur a une durée de vie limitée (ex: 1 heure). S'il expire sans être rafraîchi, les authentifications échouent.
 
 **Vecteurs d'attaque :**
 - Serveur LLNG indisponible au moment du refresh
