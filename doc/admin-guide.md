@@ -472,6 +472,46 @@ Example configuration:
 | `database` | `$hGroup->{dba}` | Only DBAs |
 | `default` | `0` | Deny by default |
 
+## LLNG OIDC Client Security Settings
+
+Configure security options for the `pam-access` OIDC client in LLNG Manager:
+
+```
+LLNG Manager → OIDC → Relying Parties → pam-access → Options
+```
+
+### Refresh Token Inactivity Timeout
+
+Automatically revoke refresh tokens that haven't been used within a specified period:
+
+```yaml
+# Revoke refresh tokens after 30 days of inactivity (recommended)
+oidcRPMetaDataOptionsRtActivity: 2592000  # seconds (0 = disabled)
+```
+
+This setting protects against:
+- Stolen tokens from inactive/decommissioned servers
+- Dormant tokens in old backups
+- Forgotten enrolled servers
+
+**Important**: Ensure the PAM heartbeat timer is enabled to keep tokens active:
+```bash
+systemctl enable --now pam-llng-heartbeat.timer
+```
+
+### Other Recommended Security Settings
+
+```yaml
+# Require PKCE for device authorization flow
+oidcRPMetaDataOptionsRequirePKCE: 1
+
+# Use JWT client assertion (not basic auth)
+oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
+
+# Enable refresh token rotation
+oidcRPMetaDataOptionsRefreshTokenRotation: 1
+```
+
 ## Troubleshooting
 
 ### Server Enrollment Issues

@@ -997,26 +997,31 @@ timedatectl set-ntp true
 
 **Conséquence :** Un attaquant peut utiliser un token "dormant" des mois après sa compromission, sans qu'aucune activité suspecte ne soit détectée entre-temps.
 
-**Remédiation embarquée :**
-- Aucune actuellement (voir issue #52)
+**Remédiation embarquée (LLNG) :**
+- **Implémenté** : Paramètre `oidcRPMetaDataOptionsRtActivity` pour révoquer automatiquement les refresh tokens inactifs
+- Le timestamp `_oidcRtUpdate` est mis à jour à chaque utilisation du refresh token
+- La purge des sessions (WebCron ou cron) supprime les tokens inactifs
 
-**Remédiation configuration (côté LLNG - à implémenter) :**
-- Paramètre `max_refresh_inactivity` : révoquer automatiquement après N jours sans utilisation
-- Durée de vie limitée du `refresh_token`
+**Configuration LLNG recommandée :**
+```yaml
+# LLNG Manager → OIDC → Relying Parties → pam-access → Options
+oidcRPMetaDataOptionsRtActivity: 2592000  # 30 jours en secondes (0 = désactivé)
+```
+
+**Remédiation PAM :**
+- **Implémenté** : Heartbeat périodique via `pam-llng-heartbeat.timer` (toutes les 5 minutes)
+- Le heartbeat maintient le token actif et détecte les pertes de connectivité
+- Activation : `systemctl enable --now pam-llng-heartbeat.timer`
 
 **Remédiation procédurale :**
 - Procédure de dé-enrôlement lors du décommissionnement d'un serveur
 - Inventaire régulier des serveurs enrôlés vs serveurs actifs
-- Révocation manuelle des tokens des serveurs inactifs
+- Révocation manuelle des tokens des serveurs inactifs (si timeout non configuré)
 
-**Remédiation PAM (à implémenter - issue #52) :**
-- Heartbeat périodique pour maintenir le token actif
-- Détection de perte de connectivité
-
-|                 | Score résiduel                      |
-| --------------- | :---------------------------------: |
-| **Probabilité** | 2 (avec procédure de dé-enrôlement) |
-| **Impact**      |                  3                  |
+|                 | Score résiduel                                    |
+| --------------- | :-----------------------------------------------: |
+| **Probabilité** | 1 (avec `oidcRPMetaDataOptionsRtActivity` activé) |
+| **Impact**      |                         3                         |
 
 ---
 
@@ -1119,7 +1124,7 @@ Serveur légitime                          Attaquant
    │    4     │   R4 R5 R7     │                │                │                │
  I │ Critique │      R11       │                │                │                │
  M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │  R1 R3 R8      │   R2  R12      │                │                │
+ P │    3     │ R1 R3 R8 R12   │      R2        │                │                │
  A │Important │                │                │                │                │
  C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
  T │    2     │   R0  R9  R10  │      R6        │                │                │
@@ -1145,8 +1150,8 @@ Serveur légitime                          Attaquant
    │    4     │      R5        │                │                │                │
  I │ Critique │                │                │                │                │
  M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │ R1 R3 R4 R7 R8 │   R2  R12      │                │                │
- A │Important │     R11        │                │                │                │
+ P │    3     │ R1 R3 R4 R7 R8 │      R2        │                │                │
+ A │Important │   R11  R12     │                │                │                │
  C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
  T │    2     │   R0  R9  R10  │      R6        │                │                │
    │  Limité  │                │                │                │                │
@@ -1162,7 +1167,7 @@ Serveur légitime                          Attaquant
 
 **Bénéfice de PKCE :** R13 passe d'Impact 4 à Impact 1 (négligeable) car sans le `code_verifier`, l'interception du `device_code` est inutile.
 
-**Note sur R12 :** Ce risque reste en P=2/I=3 avec les procédures de dé-enrôlement. L'implémentation de l'issue #52 (révocation automatique après inactivité) permettrait de réduire davantage la probabilité.
+**Note sur R12 :** Avec `oidcRPMetaDataOptionsRtActivity` activé (30 jours recommandé), la probabilité passe de P=2 à P=1 car les tokens inactifs sont automatiquement révoqués. Le heartbeat PAM (`pam-llng-heartbeat.timer`) maintient les tokens actifs sur les serveurs légitimes.
 
 **Légende :**
 - Zone verte (P≤1, I≤2) : Risque acceptable
