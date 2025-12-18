@@ -83,96 +83,34 @@ Dans ce cas, le secret est obtenu par l'opérateur via un canal sécurisé (gest
 
 ### Flux détaillé (Phase 1 : Device Authorization Grant avec PKCE)
 
-```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│  Opérateur  │         │   Serveur   │         │ Portail LLNG│
-│  (console)  │         │   cible     │         │             │
-└──────┬──────┘         └──────┬──────┘         └──────┬──────┘
-       │                       │                       │
-       │ 1. sudo llng-pam-enroll                       │
-       │──────────────────────>│                       │
-       │                       │                       │
-       │                       │ 1b. Génère PKCE:      │
-       │                       │   code_verifier=random│
-       │                       │   code_challenge=     │
-       │                       │     SHA256(verifier)  │
-       │                       │                       │
-       │                       │ 2. POST /oauth2/device│
-       │                       │   client_id=pam-access│
-       │                       │   scope=pam:server    │
-       │                       │   code_challenge=XXX  │
-       │                       │   code_challenge_     │
-       │                       │     method=S256       │
-       │                       │──────────────────────>│
-       │                       │                       │
-       │                       │ 3. device_code,       │
-       │                       │    user_code,         │
-       │                       │    verification_uri   │
-       │                       │<──────────────────────│
-       │                       │                       │
-       │ 4. Affiche user_code  │                       │
-       │   et verification_uri │                       │
-       │<──────────────────────│                       │
-       │                       │                       │
-       │ 5. L'opérateur communique le user_code        │
-       │    à l'administrateur LLNG (email, téléphone, │
-       │    Slack, en personne...)                     │
-       │                       │                       │
-       ├───────────────────────┼───────────────────────┤
-       │                       │                       │
-       │        ┌──────────────┴──────────────┐        │
-       │        │    Administrateur LLNG      │        │
-       │        └──────────────┬──────────────┘        │
-       │                       │                       │
-       │                       │ 6. Ouvre verification_uri
-       │                       │    dans son navigateur│
-       │                       │──────────────────────>│
-       │                       │                       │
-       │                       │ 7. S'authentifie      │
-       │                       │    (login/password,   │
-       │                       │     MFA, etc.)        │
-       │                       │<─────────────────────>│
-       │                       │                       │
-       │                       │ 8. Saisit le user_code│
-       │                       │    (ex: ABCD-1234)    │
-       │                       │──────────────────────>│
-       │                       │                       │
-       │                       │ 9. Approuve           │
-       │                       │    l'enrôlement       │
-       │                       │──────────────────────>│
-       │                       │                       │
-       ├───────────────────────┼───────────────────────┤
-       │                       │                       │
-       │                       │ 10. Poll toutes les 5s│
-       │                       │  POST /oauth2/token   │
-       │                       │  grant_type=device_code
-       │                       │  device_code=XXX      │
-       │                       │  client_id=pam-access │
-       │                       │  client_assertion=JWT │
-       │                       │  code_verifier=YYY    │
-       │                       │──────────────────────>│
-       │                       │                       │
-       │                       │ 10b. LLNG vérifie:    │
-       │                       │  SHA256(code_verifier)│
-       │                       │    == code_challenge  │
-       │                       │                       │
-       │                       │ 11. access_token,     │
-       │                       │     refresh_token,    │
-       │                       │     expires_in        │
-       │                       │<──────────────────────│
-       │                       │                       │
-       │                       │ 12. Sauvegarde token  │
-       │                       │  /etc/security/       │
-       │                       │   pam_llng.token      │
-       │                       │                       │
-       │                       │ 13. POST /pam/authorize
-       │                       │  (vérification)       │
-       │                       │──────────────────────>│
-       │                       │                       │
-       │ 14. "Enrollment       │                       │
-       │      complete"        │                       │
-       │<──────────────────────│                       │
-       │                       │                       │
+```mermaid
+sequenceDiagram
+    participant Op as Opérateur<br/>(console)
+    participant Srv as Serveur cible
+    participant LLNG as Portail LLNG
+    participant Admin as Administrateur LLNG
+
+    Op->>Srv: 1. sudo llng-pam-enroll
+    Note over Srv: 1b. Génère PKCE:<br/>code_verifier=random<br/>code_challenge=SHA256(verifier)
+    Srv->>LLNG: 2. POST /oauth2/device<br/>client_id, scope, code_challenge
+    LLNG-->>Srv: 3. device_code, user_code,<br/>verification_uri
+    Srv-->>Op: 4. Affiche user_code<br/>et verification_uri
+
+    Note over Op,Admin: 5. L'opérateur communique le user_code<br/>à l'administrateur (email, téléphone, Slack...)
+
+    Admin->>LLNG: 6. Ouvre verification_uri
+    Admin->>LLNG: 7. S'authentifie (MFA)
+    Admin->>LLNG: 8. Saisit user_code (ABCD-1234)
+    Admin->>LLNG: 9. Approuve l'enrôlement
+
+    loop Polling toutes les 5s
+        Srv->>LLNG: 10. POST /oauth2/token<br/>device_code, client_assertion, code_verifier
+    end
+    Note over LLNG: 10b. Vérifie PKCE:<br/>SHA256(code_verifier) == code_challenge
+    LLNG-->>Srv: 11. access_token, refresh_token
+    Note over Srv: 12. Sauvegarde token<br/>/etc/security/pam_llng.token
+    Srv->>LLNG: 13. POST /pam/authorize (vérification)
+    Srv-->>Op: 14. "Enrollment complete"
 ```
 
 **Rôle de PKCE (RFC 7636) dans ce flux :**
@@ -393,32 +331,28 @@ auth required pam_llng.so no_rotate_refresh  # Pour désactiver (non recommandé
 
 #### Diagramme du cycle de renouvellement
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Cycle de vie du token                           │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Srv as Serveur SSH
+    participant Token as /etc/security/<br/>pam_llng.token
+    participant LLNG as Portail LLNG
 
-    Enrôlement                   Utilisation                Renouvellement
-        │                            │                            │
-        ▼                            ▼                            ▼
-   ┌─────────┐                 ┌──────────┐                 ┌──────────┐
-   │ Device  │                 │ Authent. │                 │ Refresh  │
-   │ Grant   │────────────────>│ PAM      │────────────────>│ Token    │
-   │         │                 │          │                 │          │
-   └─────────┘                 └──────────┘                 └──────────┘
-        │                            │                            │
-        │ access_token (1h)          │ Vérifie                    │ Nouveau access_token
-        │ refresh_token              │ expiration                 │ Nouveau refresh_token
-        │                            │                            │
-        ▼                            ▼                            ▼
-   ┌─────────────────────────────────────────────────────────────────┐
-   │                  /etc/security/pam_llng.token                   │
-   │  {                                                              │
-   │    "access_token": "eyJ...",                                    │
-   │    "refresh_token": "dGh...",  ←── Mis à jour à chaque refresh  │
-   │    "expires_at": 1734567890                                     │
-   │  }                                                              │
-   └─────────────────────────────────────────────────────────────────┘
+    Note over Srv,LLNG: Phase initiale : Enrôlement (Device Grant)
+    Srv->>LLNG: Device Authorization Grant
+    LLNG-->>Token: access_token (1h) + refresh_token
+
+    Note over Srv,LLNG: Utilisation normale
+    Srv->>Token: Lecture token
+    Token-->>Srv: access_token valide
+    Srv->>LLNG: /pam/authorize (avec access_token)
+    LLNG-->>Srv: {authorized: true}
+
+    Note over Srv,LLNG: Renouvellement (access_token expiré)
+    Srv->>Token: Lecture token
+    Token-->>Srv: access_token expiré
+    Srv->>LLNG: POST /oauth2/token<br/>grant_type=refresh_token
+    LLNG-->>Srv: Nouveau access_token +<br/>Nouveau refresh_token
+    Srv->>Token: Mise à jour fichier
 ```
 
 **Points de sécurité :**
@@ -1064,30 +998,23 @@ oidcRPMetaDataOptionsRequirePKCE: 1
 Avec cette option activée, LLNG rejette les requêtes d'enrôlement sans `code_challenge`.
 
 **Flux sécurisé avec PKCE :**
-```
-Serveur légitime                           Attaquant
-      │                                        │
-      │ POST /oauth2/device                    │
-      │   code_challenge=SHA256(secret)        │
-      │───────────────────────────────────────>│ (intercepte)
-      │                                        │
-      │ device_code=XXX (volé par attaquant)   │
-      │<───────────────────────────────────────│
-      │                                        │
-      │                POST /oauth2/token      │
-      │                  device_code=XXX       │
-      │                  (sans code_verifier)  │
-      │                                        │
-      │                ❌ ERREUR: invalid_grant│
-      │                "PKCE validation failed"│
-      │                                        │
-      │ POST /oauth2/token                     │
-      │   device_code=XXX                      │
-      │   code_verifier=secret                 │
-      │───────────────────────────────────────>│
-      │                                        │
-      │ ✅ access_token                        │
-      │<───────────────────────────────────────│
+
+```mermaid
+sequenceDiagram
+    participant Srv as Serveur légitime
+    participant LLNG as Portail LLNG
+    participant Att as Attaquant
+
+    Srv->>LLNG: POST /oauth2/device<br/>code_challenge=SHA256(secret)
+    Note over Att: Intercepte la réponse
+    LLNG-->>Srv: device_code=XXX
+    Note over Att: Vole device_code=XXX
+
+    Att->>LLNG: POST /oauth2/token<br/>device_code=XXX<br/>(sans code_verifier)
+    LLNG--xAtt: ❌ ERREUR: invalid_grant<br/>"PKCE validation failed"
+
+    Srv->>LLNG: POST /oauth2/token<br/>device_code=XXX<br/>code_verifier=secret
+    LLNG-->>Srv: ✅ access_token
 ```
 
 |                 | Score résiduel (avec PKCE) |
@@ -1101,81 +1028,43 @@ Serveur légitime                           Attaquant
 
 ### Avant remédiation
 
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │                │ R3 R5 R7 R11   │      R4        │                │
- I │ Critique │                │     R13        │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │    R8  R10     │  R1  R2  R12   │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │                │   R0  R6  R9   │                │                │
-   │  Limité  │                │                │                │                │
-   ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    1     │                │                │                │                │
-   │Négligeable                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         |                     | R3 R5 R7 R11 R13 | R4           |                   |
+| **3 - Important**        |                     | R8 R10           | R1 R2 R12    |                   |
+| **2 - Limité**           |                     | R0 R6 R9         |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
-### Après remédiation (avec PKCE, sans segmentation server_group)
+### Après remédiation
 
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │   R4 R5 R7     │                │                │                │
- I │ Critique │      R11       │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │ R1 R3 R8 R12   │      R2        │                │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │   R0  R9  R10  │      R6        │                │                │
-   │  Limité  │                │                │                │                │
-   ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    1     │      R13       │                │                │                │
-   │Négligeable                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R5                  |                  |              |                   |
+| **3 - Important**        | R1 R3 R8 R12        | R2               |              |                   |
+| **2 - Limité**           | R4 R7 R9 R10 R11    | R6               |              |                   |
+| **1 - Négligeable**      | R0 R13              |                  |              |                   |
 
-**Note sur R3 :** Grâce à l'authentification `client_secret_jwt`, l'impact est réduit de 4 à 3 car un JWT intercepté est à usage unique (le `jti` empêche le rejeu).
+**Remédiations appliquées :**
 
-**Note sur R13 :** Avec PKCE activé (`oidcRPMetaDataOptionsRequirePKCE: 1`), l'interception du `device_code` devient inutile car l'attaquant ne possède pas le `code_verifier`. Le risque passe à P=1/I=1 (négligeable).
+| Remédiation | Risques impactés | Effet |
+|-------------|------------------|-------|
+| **PKCE obligatoire** | R13 | I=4 → I=1 : Sans `code_verifier`, l'interception du `device_code` est inutile |
+| **`client_secret_jwt`** | R3 | I=4 → I=3 : JWT à usage unique (anti-rejeu via `jti`) |
+| **Segmentation `server_group`** | R4 R7 R11 | I=4 → I=3 : Blast radius limité au groupe |
+| **Clients OIDC distincts** | R0 R4 R7 R11 | I supplémentaire −1 : Isolation complète par zone |
+| **CrowdSec** | R2 | P=3 → P=2 : Rate-limiting IP sur brute-force `user_code` |
+| **`RtActivity`** | R12 | P=3 → P=1 : Révocation automatique des tokens inactifs |
 
-### Après remédiation (avec PKCE et segmentation server_group)
+**Détail des améliorations avec clients OIDC distincts (voir section 5.2) :**
 
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │      R5        │                │                │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │ R1 R3 R4 R7 R8 │      R2        │                │                │
- A │Important │   R11  R12     │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │   R0  R9  R10  │      R6        │                │                │
-   │  Limité  │                │                │                │                │
-   ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    1     │      R13       │                │                │                │
-   │Négligeable                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+| Risque | Sans clients distincts | Avec clients distincts | Amélioration |
+|--------|------------------------|------------------------|--------------|
+| **R0** | P=1, I=2               | **P=1, I=1**           | Le secret compromis ne peut initier d'enrôlements que dans sa zone |
+| **R4** | P=1, I=3               | **P=1, I=2**           | Le token volé n'est valide que pour le scope de sa zone |
+| **R7** | P=1, I=3               | **P=1, I=2**           | Le serveur malveillant ne peut usurper que sa zone |
+| **R11**| P=1, I=3               | **P=1, I=2**           | Le refresh_token compromis est limité à sa zone |
 
-**Bénéfice de la segmentation :** R4, R7 et R11 passent d'Impact 4 (Critique) à Impact 3 (Important) car le blast radius est limité au `server_group` compromis.
-
-**Bénéfice de `client_secret_jwt` :** R3 passe d'Impact 4 à Impact 3 car le JWT intercepté est à usage unique (protection anti-rejeu via `jti`).
-
-**Bénéfice de PKCE :** R13 passe d'Impact 4 à Impact 1 (négligeable) car sans le `code_verifier`, l'interception du `device_code` est inutile.
-
-**Note sur R12 :** Avec `oidcRPMetaDataOptionsRtActivity` activé (30 jours recommandé), la probabilité passe de P=2 à P=1 car les tokens inactifs sont automatiquement révoqués. Le heartbeat PAM (`pam-llng-heartbeat.timer`) maintient les tokens actifs sur les serveurs légitimes.
+**Résultat :** Seul R5 (usurpation du serveur LLNG) reste critique - c'est le point unique de défaillance irréductible.
 
 **Légende :**
 - Zone verte (P≤1, I≤2) : Risque acceptable
@@ -1263,7 +1152,197 @@ timedatectl set-ntp true
 
 ---
 
-## 5. Checklist de Déploiement
+## 5. Stratégies de Segmentation
+
+La segmentation permet de limiter le "blast radius" en cas de compromission. Deux niveaux de segmentation sont possibles : par `server_group` (même client OIDC) ou par client OIDC distinct.
+
+### 5.1 Segmentation par `server_group` (niveau 1)
+
+Un seul client OIDC partagé entre tous les serveurs, différenciés par leur `server_group` :
+
+```mermaid
+flowchart TB
+    subgraph Client["Client OIDC unique : pam-access<br/>client_secret : S3CR3T-PARTAGE"]
+        subgraph Prod["server_group=prod"]
+            P1[serveurs prod]
+        end
+        subgraph Staging["server_group=staging"]
+            S1[serveurs staging]
+        end
+        subgraph Dev["server_group=dev"]
+            D1[serveurs dev]
+        end
+    end
+```
+
+**Avantages :**
+- Configuration simple côté LLNG (un seul client)
+- Gestion centralisée des autorisations
+
+**Limites :**
+- Le `client_secret` est partagé entre tous les environnements
+- Si le secret est compromis sur un serveur dev, un attaquant peut initier un enrôlement pour n'importe quel `server_group`
+- Rotation du secret = mise à jour de TOUS les serveurs
+
+**Impact sur les risques :**
+- R4, R7, R11 : Le token compromis ne permet d'usurper que les serveurs du même `server_group` → Impact 4 → 3
+- R0 : Le `client_secret` compromis permet d'initier des enrôlements pour TOUS les `server_group` → pas de réduction
+
+### 5.2 Segmentation par client OIDC (niveau 2 - RECOMMANDÉ)
+
+Chaque environnement ou zone de sécurité dispose de son propre client OIDC avec un `client_secret` distinct :
+
+```mermaid
+flowchart TB
+    subgraph ProdClient["Client : pam-prod<br/>secret : PROD_S3CR3T<br/>scope : pam:prod"]
+        ProdGroup["server_group=prod"]
+    end
+
+    subgraph StagingClient["Client : pam-staging<br/>secret : STG_S3CR3T<br/>scope : pam:staging"]
+        StagingGroup["server_group=staging"]
+    end
+
+    subgraph DevClient["Client : pam-dev<br/>secret : DEV_S3CR3T<br/>scope : pam:dev"]
+        DevGroup["server_group=dev"]
+    end
+```
+
+**Avantages :**
+- **Isolation complète** : compromission d'un secret n'affecte qu'une zone
+- **Rotation indépendante** : renouveler le secret d'un environnement sans toucher aux autres
+- **Audit granulaire** : identifier quel client (donc quel environnement) a initié chaque action
+- **Désactivation ciblée** : désactiver un client sans impacter les autres environnements
+- **Principe du moindre privilège** : chaque serveur n'a accès qu'au scope de son environnement
+
+**Impact sur les risques :**
+
+| Risque | Sans segmentation | Avec `server_group` | Avec clients distincts |
+|--------|-------------------|---------------------|------------------------|
+| R0     | P=2, I=2          | P=2, I=2            | **P=2, I=1**           |
+| R4     | P=3, I=4          | P=1, I=3            | **P=1, I=2**           |
+| R7     | P=2, I=4          | P=1, I=3            | **P=1, I=2**           |
+| R11    | P=2, I=4          | P=1, I=3            | **P=1, I=2**           |
+
+**Explication :**
+- **R0 (compromission client_secret)** : Avec clients distincts, le secret compromis ne permet d'enrôler que dans sa zone → Impact 2 → 1
+- **R4, R7, R11** : Le blast radius est doublement limité (secret + server_group) → Impact 3 → 2
+
+### 5.3 Configuration LLNG multi-clients
+
+**Création des clients dans le Manager LLNG :**
+
+```yaml
+# OIDC → Relying Parties → Nouveau client pour chaque zone
+
+# Client Production
+oidcRPMetaDataOptions:
+  pam-prod:
+    oidcRPMetaDataOptionsClientID: pam-prod
+    oidcRPMetaDataOptionsClientSecret: <PROD_SECRET>
+    oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
+    oidcRPMetaDataOptionsRequirePKCE: 1
+    # Scope limité à la production
+    oidcRPMetaDataOptionsScopeRules:
+      pam:prod: 1
+
+# Client Staging
+  pam-staging:
+    oidcRPMetaDataOptionsClientID: pam-staging
+    oidcRPMetaDataOptionsClientSecret: <STAGING_SECRET>
+    oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
+    oidcRPMetaDataOptionsRequirePKCE: 1
+    oidcRPMetaDataOptionsScopeRules:
+      pam:staging: 1
+
+# Client Dev
+  pam-dev:
+    oidcRPMetaDataOptionsClientID: pam-dev
+    oidcRPMetaDataOptionsClientSecret: <DEV_SECRET>
+    oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
+    oidcRPMetaDataOptionsRequirePKCE: 1
+    oidcRPMetaDataOptionsScopeRules:
+      pam:dev: 1
+```
+
+**Configuration serveur (exemple production) :**
+
+```ini
+# /etc/security/pam_llng.conf (serveur de production)
+portal_url = https://auth.example.com
+client_id = pam-prod
+client_secret = <PROD_SECRET>
+server_group = prod
+```
+
+### 5.4 Matrice de décision
+
+| Critère                              | `server_group` seul | Clients OIDC distincts |
+|--------------------------------------|---------------------|------------------------|
+| Nombre de serveurs                   | < 20                | > 20                   |
+| Environnements critiques séparés     | Non                 | **Oui**                |
+| Exigences de conformité (ISO, SOC2)  | Basique             | **Élevées**            |
+| Équipes distinctes par environnement | Non                 | **Oui**                |
+| Rotation fréquente des secrets       | Contraignante       | **Facile**             |
+| Complexité de configuration LLNG     | Simple              | Moyenne                |
+
+**Recommandation :**
+- **Petite infrastructure** (< 20 serveurs, même équipe) : `server_group` suffisant
+- **Infrastructure moyenne à grande** : Clients OIDC distincts par environnement (prod/staging/dev)
+- **Haute sécurité** : Clients OIDC distincts + segmentation fine des `server_group` au sein de chaque client
+
+### 5.5 Exemple d'architecture segmentée
+
+```mermaid
+flowchart TB
+    subgraph LLNG["Portail LLNG"]
+        RP_Prod["prod RP"]
+        RP_Stg["stg RP"]
+        RP_Dev["dev RP"]
+    end
+
+    subgraph ZoneProd["Zone PROD"]
+        ClientProd["pam-prod<br/>client_id"]
+        srv1[srv1]
+        srv2[srv2]
+        GroupProd["server_group: prod"]
+    end
+
+    subgraph ZoneStaging["Zone STAGING"]
+        ClientStg["pam-staging<br/>client_id"]
+        stg1[stg1]
+        stg2[stg2]
+        GroupStg["server_group: staging"]
+    end
+
+    subgraph ZoneDev["Zone DEV"]
+        ClientDev["pam-dev<br/>client_id"]
+        dev1[dev1]
+        dev2[dev2]
+        GroupDev["server_group: dev"]
+    end
+
+    RP_Prod --> ZoneProd
+    RP_Stg --> ZoneStaging
+    RP_Dev --> ZoneDev
+```
+
+**Bénéfice :** Si `DEV_S3CR3T` est compromis, l'attaquant ne peut :
+- Ni enrôler un serveur prod (mauvais `client_id`/`client_secret`)
+- Ni usurper un token prod (scope `pam:dev` ≠ `pam:prod`)
+
+---
+
+## 6. Checklist de Déploiement
+
+### Avant l'enrôlement (client OIDC unique)
+
+- [ ] Stratégie de segmentation choisie (voir section 5)
+
+### Avant l'enrôlement (multi-clients OIDC - recommandé)
+
+- [ ] Clients OIDC créés par environnement (pam-prod, pam-staging, pam-dev)
+- [ ] Scopes distincts configurés par client
+- [ ] Secrets générés et distribués par canal sécurisé
 
 ### Avant l'enrôlement
 
@@ -1295,7 +1374,7 @@ timedatectl set-ntp true
 
 ---
 
-## 6. Conformité ANSSI - Recommandations OpenID Connect
+## 7. Conformité ANSSI - Recommandations OpenID Connect
 
 Cette section détaille la conformité du module PAM LLNG avec les [recommandations ANSSI pour la sécurisation du protocole OpenID Connect](https://cyber.gouv.fr/publications/recommandations-pour-la-securisation-de-la-mise-en-oeuvre-du-protocole-openid-connect).
 
@@ -1359,30 +1438,19 @@ Certaines recommandations ANSSI concernent le flux Authorization Code classique 
 
 Bien que le RFC 8628 ne mentionne pas PKCE, le module PAM l'implémente comme extension de sécurité :
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    PKCE dans le Device Flow                          │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Etape1["1. Enrôlement (llng-pam-enroll)"]
+        Gen["code_verifier = random(32 bytes) → base64url<br/>code_challenge = SHA256(code_verifier) → base64url"]
+        Req1["POST /oauth2/device<br/>• client_id=pam-access<br/>• scope=pam:server<br/>• code_challenge=E9Melhoa...<br/>• code_challenge_method=S256"]
+        Gen --> Req1
+    end
 
-1. Enrôlement (llng-pam-enroll) :
-   ┌─────────────────────────────────────────────────────────────────┐
-   │ code_verifier = random(32 bytes) → base64url                    │
-   │ code_challenge = SHA256(code_verifier) → base64url              │
-   └─────────────────────────────────────────────────────────────────┘
+    subgraph Etape2["2. Obtention du token"]
+        Req2["POST /oauth2/token<br/>• grant_type=device_code<br/>• device_code=XXX<br/>• client_id=pam-access<br/>• client_assertion=JWT<br/>• code_verifier=dBjftJeZ..."]
+    end
 
-   POST /oauth2/device
-   ├── client_id=pam-access
-   ├── scope=pam:server
-   ├── code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
-   └── code_challenge_method=S256
-
-2. Obtention du token :
-   POST /oauth2/token
-   ├── grant_type=device_code
-   ├── device_code=XXX
-   ├── client_id=pam-access
-   ├── client_assertion=<JWT>
-   └── code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
+    Etape1 --> Etape2
 ```
 
 **Avantages de PKCE pour le Device Flow :**
@@ -1402,4 +1470,5 @@ Bien que le RFC 8628 ne mentionne pas PKCE, le module PAM l'implémente comme ex
 | Token        | Confidentialité   | PKCE (`code_verifier` / `code_challenge`)                 |
 | Token        | Rotation          | Refresh token rotatif                                     |
 | Stockage     | Confidentialité   | Permissions 0600, hashage côté LLNG                       |
-| Segmentation | Blast radius      | `server_group`                                            |
+| Segmentation | Blast radius (niveau 1) | `server_group` par environnement                    |
+| Segmentation | Blast radius (niveau 2) | Clients OIDC distincts par zone (recommandé)        |

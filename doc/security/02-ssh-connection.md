@@ -31,26 +31,16 @@ Cette analyse couvre quatre architectures de déploiement SSH avec le module PAM
 
 Configuration la plus simple : un serveur SSH autonome avec PAM LLNG.
 
-```
-┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
-│   Client    │                    │  Serveur    │                    │   Portail   │
-│    SSH      │                    │    SSH      │                    │    LLNG     │
-└──────┬──────┘                    └──────┬──────┘                    └──────┬──────┘
-       │                                  │                                  │
-       │ 1. ssh user@server               │                                  │
-       │─────────────────────────────────>│                                  │
-       │                                  │                                  │
-       │                                  │ 2. PAM: /pam/authorize           │
-       │                                  │  user=X, host=server             │
-       │                                  │─────────────────────────────────>│
-       │                                  │                                  │
-       │                                  │ 3. {authorized: true/false,      │
-       │                                  │     groups: [...]}               │
-       │                                  │<─────────────────────────────────│
-       │                                  │                                  │
-       │ 4. Session établie (ou refusée)  │                                  │
-       │<─────────────────────────────────│                                  │
-       │                                  │                                  │
+```mermaid
+sequenceDiagram
+    participant Client as Client SSH
+    participant Srv as Serveur SSH
+    participant LLNG as Portail LLNG
+
+    Client->>Srv: 1. ssh user@server
+    Srv->>LLNG: 2. PAM: /pam/authorize<br/>user=X, host=server
+    LLNG-->>Srv: 3. {authorized: true/false,<br/>groups: [...]}
+    Srv-->>Client: 4. Session établie (ou refusée)
 ```
 
 ### Authentification
@@ -94,33 +84,17 @@ account    required     pam_llng.so
 
 Le serveur utilise des certificats SSH signés par une autorité de certification (SSH CA). Cette architecture améliore la traçabilité et permet une gestion centralisée des clés.
 
-```
-┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
-│   Client    │                    │  Serveur    │                    │   Portail   │
-│    SSH      │                    │    SSH      │                    │    LLNG     │
-│ (cert signé)│                    │ (TrustedCA) │                    │             │
-└──────┬──────┘                    └──────┬──────┘                    └──────┬──────┘
-       │                                  │                                  │
-       │ 1. ssh user@server               │                                  │
-       │    (présente certificat)         │                                  │
-       │─────────────────────────────────>│                                  │
-       │                                  │                                  │
-       │                                  │ 2. Vérifie signature CA          │
-       │                                  │    Extrait: key_id, serial,      │
-       │                                  │    principals, ca_fingerprint    │
-       │                                  │                                  │
-       │                                  │ 3. PAM: /pam/authorize           │
-       │                                  │  user=X, host=server,            │
-       │                                  │  ssh_cert={key_id, serial, ...}  │
-       │                                  │─────────────────────────────────>│
-       │                                  │                                  │
-       │                                  │ 4. Vérifie cert non révoqué      │
-       │                                  │    Vérifie autorisation          │
-       │                                  │<─────────────────────────────────│
-       │                                  │                                  │
-       │ 5. Session établie               │                                  │
-       │<─────────────────────────────────│                                  │
-       │                                  │                                  │
+```mermaid
+sequenceDiagram
+    participant Client as Client SSH<br/>(cert signé)
+    participant Srv as Serveur SSH<br/>(TrustedCA)
+    participant LLNG as Portail LLNG
+
+    Client->>Srv: 1. ssh user@server<br/>(présente certificat)
+    Note over Srv: 2. Vérifie signature CA<br/>Extrait: key_id, serial,<br/>principals, ca_fingerprint
+    Srv->>LLNG: 3. PAM: /pam/authorize<br/>user=X, host=server,<br/>ssh_cert={key_id, serial, ...}
+    LLNG-->>Srv: 4. Vérifie cert non révoqué<br/>Vérifie autorisation
+    Srv-->>Client: 5. Session établie
 ```
 
 ### Certificat SSH
@@ -177,35 +151,26 @@ Les serveurs backends ne sont accessibles que via un bastion. Cette architecture
 - Réduction de la surface d'attaque des backends
 - Possibilité de segmentation réseau
 
-```
-                                       ┌─────────────────────────────────────────┐
-                                       │           Zone sécurisée                │
-┌─────────────┐      ┌─────────────┐   │   ┌─────────────┐   ┌─────────────┐     │
-│   Client    │      │   Bastion   │   │   │  Backend 1  │   │  Backend 2  │     │
-│    SSH      │      │  (PAM LLNG) │   │   │ (PAM LLNG)  │   │ (PAM LLNG)  │     │
-└──────┬──────┘      └──────┬──────┘   │   └──────┬──────┘   └──────┬──────┘     │
-       │                    │          │          │                  │           │
-       │ 1. ssh bastion     │          │          │                  │           │
-       │───────────────────>│          │          │                  │           │
-       │                    │          │          │                  │           │
-       │    2. PAM vérifie  │          │          │                  │           │
-       │       sur LLNG     │          │          │                  │           │
-       │                    │          │          │                  │           │
-       │ 3. Session bastion │          │          │                  │           │
-       │<───────────────────│          │          │                  │           │
-       │                    │          │          │                  │           │
-       │ 4. ssh backend1    │          │          │                  │           │
-       │───────────────────>│──────────┼─────────>│                  │           │
-       │                    │          │          │                  │           │
-       │                    │          │   5. PAM vérifie            │           │
-       │                    │          │      sur LLNG               │           │
-       │                    │          │          │                  │           │
-       │ 6. Session backend │          │          │                  │           │
-       │<───────────────────┼──────────┼──────────│                  │           │
-       │                    │          │          │                  │           │
-       └────────────────────┴──────────┴──────────┴──────────────────┴───────────┘
-                                       │           Réseau privé                  │
-                                       └─────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph External["Internet"]
+        Client[Client SSH]
+    end
+
+    subgraph SecureZone["Zone sécurisée / Réseau privé"]
+        Bastion[Bastion<br/>PAM LLNG]
+        subgraph Backends["Backends"]
+            Backend1[Backend 1<br/>PAM LLNG]
+            Backend2[Backend 2<br/>PAM LLNG]
+        end
+    end
+
+    Client -->|1. ssh bastion| Bastion
+    Bastion -->|2. PAM vérifie sur LLNG| Bastion
+    Bastion -->|3. Session bastion| Client
+    Client -->|4. ssh backend1| Bastion
+    Bastion -->|5. PAM vérifie sur LLNG| Backend1
+    Backend1 -->|6. Session backend| Client
 ```
 
 ### Double vérification PAM
@@ -265,29 +230,22 @@ Architecture optimale combinant :
 - Double vérification PAM sur bastion et backends
 - Restriction réseau des backends
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  ┌─────────────┐                                           ┌─────────────┐  │
-│  │   SSH CA    │                                           │   Portail   │  │
-│  │ (signe les  │                                           │    LLNG     │  │
-│  │ certificats)│                                           │             │  │
-│  └──────┬──────┘                                           └──────┬──────┘  │
-│         │                                                         │         │
-│         │ Certificat signé                                        │         │
-│         ▼                                                         │         │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐        │         │
-│  │   Client    │      │   Bastion   │      │   Backend   │        │         │
-│  │    SSH      │─────>│  (PAM LLNG) │─────>│  (PAM LLNG) │        │         │
-│  │ (cert signé)│      │ (TrustedCA) │      │ (TrustedCA) │        │         │
-│  └─────────────┘      └──────┬──────┘      └──────┬──────┘        │         │
-│                              │                    │               │         │
-│                              │ Vérifie cert +     │ Vérifie cert +│         │
-│                              │ autorise via LLNG  │ autorise LLNG │         │
-│                              │                    │               │         │
-│                              └────────────────────┴───────────────┘         │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Infrastructure
+        CA[SSH CA<br/>signe les certificats]
+        LLNG[Portail LLNG]
+
+        CA -->|Certificat signé| Client
+
+        subgraph ConnectionFlow["Flux de connexion"]
+            Client[Client SSH<br/>cert signé] -->|1. ssh| Bastion[Bastion<br/>PAM LLNG<br/>TrustedCA]
+            Bastion -->|2. ssh| Backend[Backend<br/>PAM LLNG<br/>TrustedCA]
+        end
+
+        Bastion -->|Vérifie cert +<br/>autorise via LLNG| LLNG
+        Backend -->|Vérifie cert +<br/>autorise via LLNG| LLNG
+    end
 ```
 
 ### Flux complet
@@ -716,80 +674,44 @@ pkill -u $USERNAME -KILL
 ### Architecture A : Serveur Isolé
 
 **Avant remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │                │     R-S2       │     R-S1       │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │     R-S7       │     R-S8       │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │                │                │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         |                     | R-S2             | R-S1         |                   |
+| **3 - Important**        |                     | R-S7             | R-S8         |                   |
+| **2 - Limité**           |                     |                  |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Après remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │     R-S1       │                │                │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │     R-S2       │                │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │     R-S7       │    R-S8        │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S1                |                  |              |                   |
+| **3 - Important**        |                     | R-S2             |              |                   |
+| **2 - Limité**           | R-S7                | R-S8             |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 ---
 
 ### Architecture B : Serveur Isolé + SSH CA
 
 **Avant remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │     R-S4       │                │     R-S1       │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │  R-S3  R-S7    │     R-S8       │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │                │                │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S4                |                  | R-S1         |                   |
+| **3 - Important**        |                     | R-S3 R-S7        | R-S8         |                   |
+| **2 - Limité**           |                     |                  |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Après remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │  R-S1  R-S4    │                │                │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │                │                │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │  R-S3  R-S7    │     R-S8       │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S1 R-S4           |                  |              |                   |
+| **3 - Important**        |                     |                  |              |                   |
+| **2 - Limité**           | R-S3 R-S7           | R-S8             |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Bénéfices SSH CA :** R-S3 (certificat compromis) remplace R-S2 (clé compromise) avec impact réduit grâce à la durée de vie limitée.
 
@@ -798,40 +720,22 @@ pkill -u $USERNAME -KILL
 ### Architecture C : Bastion + Backends
 
 **Avant remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │                │     R-S6       │     R-S1       │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │  R-S2  R-S7    │  R-S5  R-S8    │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │                │                │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         |                     | R-S6             | R-S1         |                   |
+| **3 - Important**        |                     | R-S2 R-S7        | R-S5 R-S8    |                   |
+| **2 - Limité**           |                     |                  |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Après remédiation (avec restriction réseau backends) :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │     R-S1       │                │                │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │     R-S5       │  R-S2  R-S6    │                │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │     R-S7       │     R-S8       │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S1                |                  |              |                   |
+| **3 - Important**        | R-S5                | R-S2 R-S6        |              |                   |
+| **2 - Limité**           | R-S7                | R-S8             |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Bénéfice restriction réseau :** R-S5 (contournement bastion) passe de P=3 à P=1.
 
@@ -840,40 +744,22 @@ pkill -u $USERNAME -KILL
 ### Architecture D : Bastion + Backends + SSH CA
 
 **Avant remédiation :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │     R-S4       │     R-S6       │     R-S1       │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │                │  R-S3  R-S7    │  R-S5  R-S8    │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │                │                │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S4                | R-S6             | R-S1         |                   |
+| **3 - Important**        |                     | R-S3 R-S7        | R-S5 R-S8    |                   |
+| **2 - Limité**           |                     |                  |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Après remédiation complète :**
-```
-                                    PROBABILITÉ
-              ┌────────────────┬────────────────┬────────────────┬────────────────┐
-              │       1        │       2        │       3        │       4        │
-              │ Très improbable│  Peu probable  │    Probable    │ Très probable  │
-   ┌──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
-   │    4     │  R-S1  R-S4    │                │                │                │
- I │ Critique │                │                │                │                │
- M ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- P │    3     │     R-S5       │     R-S6       │                │                │
- A │Important │                │                │                │                │
- C ├──────────┼────────────────┼────────────────┼────────────────┼────────────────┤
- T │    2     │  R-S3  R-S7    │     R-S8       │                │                │
-   │  Limité  │                │                │                │                │
-   └──────────┴────────────────┴────────────────┴────────────────┴────────────────┘
-```
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+|--------------------------|---------------------|------------------|--------------|-------------------|
+| **4 - Critique**         | R-S1 R-S4           |                  |              |                   |
+| **3 - Important**        | R-S5                | R-S6             |              |                   |
+| **2 - Limité**           | R-S3 R-S7           | R-S8             |              |                   |
+| **1 - Négligeable**      |                     |                  |              |                   |
 
 **Architecture D = meilleur profil de risque :**
 - Tous les risques critiques en P=1
@@ -936,14 +822,18 @@ Tout de B et C, plus :
 
 ### Évolution progressive
 
-```
-A → B : Ajouter SSH CA
-    └─ Gain : traçabilité, révocation, durée limitée
+```mermaid
+flowchart LR
+    A[A<br/>Serveur isolé] -->|+ SSH CA| B[B<br/>Serveur + CA]
+    A -->|+ Bastion| C[C<br/>Bastion + Backends]
+    B -->|+ Bastion| D[D<br/>Bastion + CA]
+    C -->|+ SSH CA| D
 
-A → C : Ajouter bastion
-    └─ Gain : point d'entrée unique, audit centralisé
-
-B → D : Ajouter bastion
-C → D : Ajouter SSH CA
-    └─ Gain : cumul des avantages
+    style D fill:#90EE90
 ```
+
+| Transition | Gain |
+|------------|------|
+| A → B | Traçabilité, révocation, durée limitée |
+| A → C | Point d'entrée unique, audit centralisé |
+| B/C → D | Cumul des avantages |

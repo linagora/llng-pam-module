@@ -2,6 +2,8 @@ Analyse des Risques - État Après Remédiations
 
 ## Risques Enrôlement
 
+### Avec segmentation `server_group` seul
+
 | Risque                            | Score (P×I) | Zone             | Remédiation                        |
 |-----------------------------------|-------------|------------------|------------------------------------|
 | R5                                | 1×4 = 4     | Critique         | Certificate pinning recommandé     |
@@ -10,7 +12,23 @@ Analyse des Risques - État Après Remédiations
 | R0, R9, R10                       | 1×2 = 2     | Vert/Limité      | -                                  |
 | R13                               | 1×1 = 1     | Négligeable      | PKCE implémenté                    |
 
-**Changement notable :** R2 passe de P=2 à P=1 grâce à l'intégration CrowdSec (rate-limiting IP).
+### Avec clients OIDC distincts par zone (RECOMMANDÉ)
+
+| Risque                        | Score (P×I) | Zone             | Remédiation                                    |
+|-------------------------------|-------------|------------------|------------------------------------------------|
+| R5                            | 1×4 = 4     | Critique         | Certificate pinning recommandé                 |
+| R6                            | 2×2 = 4     | Jaune (P=2, I=2) | TTL 10 min par défaut                          |
+| R1, R2, R3, R8, R12           | 1×3 = 3     | Vert/Important   | Voir détails ci-dessous                        |
+| **R4, R7, R11**               | **1×2 = 2** | **Vert/Limité**  | **Clients OIDC distincts (blast radius réduit)** |
+| R9, R10                       | 1×2 = 2     | Vert/Limité      | -                                              |
+| **R0**, R13                   | **1×1 = 1** | **Négligeable**  | **Secret isolé par zone + PKCE**               |
+
+**Changements notables :**
+- R2 passe de P=2 à P=1 grâce à l'intégration CrowdSec (rate-limiting IP)
+- **R0** passe de I=2 à I=1 avec clients OIDC distincts (le secret compromis ne peut initier d'enrôlements que dans sa zone)
+- **R4, R7, R11** passent de I=3 à I=2 avec clients OIDC distincts (blast radius doublement limité)
+
+Voir [01-enrollment.md](01-enrollment.md) section 5 pour la configuration multi-clients.
 
 ## Risques Connexion SSH (Architecture D)
 
@@ -100,11 +118,20 @@ Pistes pour réduire P à 1 :
 1. Augmenter le TTL par défaut (10 min au lieu de 5)
 2. Notification push quand l'admin approuve (l'opérateur sait que c'est bon)
 
-# R1, R4, R7, R11 _(P=1, I=3)_ - Risques liés aux tokens/credentials
+# R1, R4, R7, R11 _(P=1, I=3 → I=2 avec multi-clients)_ - Risques liés aux tokens/credentials
 
-Pistes pour réduire I à 2 :
+**Amélioration implémentée : Clients OIDC distincts par zone**
+
+Avec des clients OIDC distincts (pam-prod, pam-staging, pam-dev), R4, R7 et R11 passent de I=3 à I=2 :
+- Le `client_secret` compromis ne permet d'enrôler que dans sa zone
+- Le token volé n'est valide que pour le scope de sa zone
+- Le blast radius est doublement limité (client_id + server_group)
+
+Voir [01-enrollment.md](01-enrollment.md) section 5.2 pour la configuration.
+
+Pistes supplémentaires pour réduire I à 1 :
 1. Token lié au matériel (TPM/HSM) : Le token ne peut être utilisé que sur la machine qui l'a obtenu
-2. Segmentation plus fine (déjà fait, mais possibilité de groups dynamiques)
+2. Groupes dynamiques basés sur des attributs (département, projet)
 
 # R8 _(P=1, I=3)_ - Fuite mémoire
 
