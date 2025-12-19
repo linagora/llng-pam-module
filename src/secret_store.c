@@ -27,6 +27,9 @@
 #define SALT_SIZE 16        /* PBKDF2 salt */
 #define PBKDF2_ITERATIONS 100000
 
+/* Salt file for key derivation - generated once with random bytes */
+#define SALT_FILE "/var/lib/pam_llng/secrets/.salt"
+
 /* Secret store structure */
 struct secret_store {
     secret_store_config_t config;
@@ -57,7 +60,59 @@ static int read_machine_id(char *buf, size_t buf_size)
     return 0;
 }
 
-/* Derive encryption key from machine-id using PBKDF2 */
+/*
+ * Load or generate random salt for PBKDF2.
+ * Security improvement: use random salt instead of deterministic machine-id hash.
+ * The salt is stored in a protected file and generated once per installation.
+ * Salt doesn't need to be secret - it just prevents precomputation attacks.
+ */
+static int load_or_generate_salt(const char *store_dir, unsigned char *salt, size_t salt_size)
+{
+    char salt_path[512];
+    snprintf(salt_path, sizeof(salt_path), "%s/.salt", store_dir);
+
+    /* Try to load existing salt */
+    int fd = open(salt_path, O_RDONLY | O_NOFOLLOW);
+    if (fd >= 0) {
+        ssize_t bytes_read = read(fd, salt, salt_size);
+        close(fd);
+        if (bytes_read == (ssize_t)salt_size) {
+            return 0;  /* Successfully loaded existing salt */
+        }
+        /* Salt file corrupted or wrong size - regenerate */
+    }
+
+    /* Generate new random salt */
+    if (RAND_bytes(salt, salt_size) != 1) {
+        return -1;  /* Failed to generate random bytes */
+    }
+
+    /* Save salt to file (atomic write via temp file) */
+    char temp_path[520];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp.%d", salt_path, (int)getpid());
+
+    fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        return -1;  /* Can't create salt file */
+    }
+
+    ssize_t written = write(fd, salt, salt_size);
+    close(fd);
+
+    if (written != (ssize_t)salt_size) {
+        unlink(temp_path);
+        return -1;
+    }
+
+    if (rename(temp_path, salt_path) != 0) {
+        unlink(temp_path);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Derive encryption key from machine-id using PBKDF2 with random salt */
 static int derive_key(secret_store_t *store)
 {
     char machine_id[64] = {0};
@@ -68,7 +123,7 @@ static int derive_key(secret_store_t *store)
         return -1;
     }
 
-    /* Combine machine-id with optional salt */
+    /* Combine machine-id with optional config salt */
     char combined[256];
     int combined_len;
     if (store->config.salt) {
@@ -79,32 +134,18 @@ static int derive_key(secret_store_t *store)
     }
 
     /*
-     * Derive a unique salt from machine-id to avoid rainbow table attacks.
-     * We hash the machine-id to create a per-installation salt.
-     * This is better than a static salt while still being deterministic.
+     * Security: use random salt for PBKDF2 instead of deterministic derivation.
+     * This prevents precomputation attacks even if machine-id is known.
+     * The salt is stored in the secrets directory and generated once.
      */
     unsigned char pbkdf_salt[SALT_SIZE];
-    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-    unsigned char salt_hash[EVP_MAX_MD_SIZE];
-    unsigned int salt_hash_len = 0;
-
-    if (!md_ctx ||
-        EVP_DigestInit_ex(md_ctx, EVP_sha256(), NULL) != 1 ||
-        EVP_DigestUpdate(md_ctx, "pam_llng_salt:", 14) != 1 ||
-        EVP_DigestUpdate(md_ctx, machine_id, strlen(machine_id)) != 1 ||
-        EVP_DigestFinal_ex(md_ctx, salt_hash, &salt_hash_len) != 1) {
-        if (md_ctx) EVP_MD_CTX_free(md_ctx);
+    if (load_or_generate_salt(store->config.store_dir, pbkdf_salt, SALT_SIZE) != 0) {
         snprintf(store->error_buf, sizeof(store->error_buf),
-                 "Salt derivation failed");
+                 "Failed to load or generate PBKDF2 salt");
         explicit_bzero(machine_id, sizeof(machine_id));
         explicit_bzero(combined, sizeof(combined));
         return -1;
     }
-    EVP_MD_CTX_free(md_ctx);
-
-    /* Use first SALT_SIZE bytes of hash as salt */
-    memcpy(pbkdf_salt, salt_hash, SALT_SIZE);
-    explicit_bzero(salt_hash, sizeof(salt_hash));
 
     /* Derive key using PBKDF2 */
     if (PKCS5_PBKDF2_HMAC(combined, combined_len,
