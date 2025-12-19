@@ -132,19 +132,36 @@ Avec SSH CA, la révocation est centralisée et plus simple.
 
 Si les certificats ont une durée de vie courte (30-60 minutes), il suffit d'attendre leur expiration naturelle. La révocation LLNG (Phase 1) empêche A d'obtenir de nouveaux certificats.
 
-**Option 2 : Révocation via KRL (Key Revocation List)**
+**Option 2 : Révocation via l'interface d'administration LLNG**
 
-Pour une révocation immédiate des certificats existants :
+Le plugin SSH CA de LLNG fournit une interface d'administration pour révoquer les certificats :
 
-1. **Ajouter le certificat de A à la KRL côté LLNG** :
+1. **Accéder à l'interface d'administration** :
+   ```
+   https://auth.example.com/ssh/admin
+   ```
+
+2. **Rechercher les certificats de A** :
+   - L'endpoint `/ssh/certs` permet de lister/rechercher les certificats émis
+   - Filtrer par utilisateur pour trouver les certificats de A
+
+3. **Révoquer les certificats** :
+   - Utiliser `/ssh/revoke` pour ajouter les certificats à la KRL
+   - La révocation est immédiate côté LLNG
+
+> **Note** : L'accès à l'interface d'administration est contrôlé par la règle `sshCaAdminRule` dans la configuration LLNG.
+
+**Option 3 : Révocation manuelle via KRL**
+
+Pour une révocation en ligne de commande :
 
 ```bash
-# Récupérer le serial du dernier certificat de A (depuis les logs LLNG)
+# Récupérer le serial du dernier certificat de A (depuis les logs LLNG ou /ssh/certs)
 # Puis ajouter à la KRL
 ssh-keygen -k -f /var/lib/lemonldap-ng/ssh/krl -s /path/to/ca_key -z <serial> /dev/null
 ```
 
-2. **Propager la KRL aux serveurs** :
+**Propagation de la KRL aux serveurs** :
 
 La KRL est automatiquement distribuée si le cron est configuré :
 
@@ -226,8 +243,8 @@ Indépendamment des offboardings, planifier une rotation régulière :
 |-------|--------|-------|-------|
 | 1 | Désactiver compte LLNG | Immédiat | Bloque nouveaux certificats |
 | 1 | Révoquer VPN | Immédiat | Bloque accès réseau |
-| 2 | (Optionnel) KRL | < 1h | Révoque certificats existants |
-| 2 | Expiration naturelle | 30-60 min | Certificats invalides |
+| 2 | Révoquer via `/ssh/admin` | Immédiat | Ajoute certificats à la KRL |
+| 2 | Expiration naturelle | 30-60 min | Certificats invalides (si pas de révocation) |
 | 3 | Rotation `client_secret` | < 30 jours | Limite exposition |
 
 ### Architecture C : Bastion + Backends (Clés SSH)
@@ -246,8 +263,8 @@ Indépendamment des offboardings, planifier une rotation régulière :
 |-------|--------|-------|-------|
 | 1 | Désactiver compte LLNG | Immédiat | Bloque nouveaux certificats |
 | 1 | Révoquer VPN | Immédiat | Bloque accès bastion |
-| 2 | (Optionnel) KRL | < 1h | Révoque certificats |
-| 2 | Expiration naturelle | 30-60 min | Certificats invalides |
+| 2 | Révoquer via `/ssh/admin` | Immédiat | Ajoute certificats à la KRL |
+| 2 | Expiration naturelle | 30-60 min | Certificats invalides (si pas de révocation) |
 | 3 | Rotation `client_secret` | < 30 jours | Limite exposition |
 
 ---
@@ -259,7 +276,7 @@ Indépendamment des offboardings, planifier une rotation régulière :
 - [ ] Compte A désactivé dans l'annuaire LDAP/AD
 - [ ] Sessions LLNG de A supprimées
 - [ ] Accès VPN de A révoqué
-- [ ] (Si SSH CA) KRL mise à jour avec certificats de A
+- [ ] (Si SSH CA) Certificats révoqués via `/ssh/admin`
 - [ ] Équipe informée de ne pas réactiver le compte
 
 ### J+1 à J+7
