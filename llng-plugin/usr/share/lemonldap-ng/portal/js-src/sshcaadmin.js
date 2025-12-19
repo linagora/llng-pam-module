@@ -7,6 +7,17 @@
   var revokeModal = null;
   var alertToast = null;
 
+  // Escape HTML to prevent XSS
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   // Get the base URL (script name without trailing slash)
   function getBaseUrl() {
     var path = window.location.pathname;
@@ -124,11 +135,11 @@
           var row = document.createElement('tr');
           row.className = 'cert-row';
           row.innerHTML =
-            '<td>' + (cert.serial || '-') + '</td>' +
-            '<td>' + (cert.user || '-') + '</td>' +
-            '<td><code>' + (cert.principals || '-') + '</code></td>' +
-            '<td>' + formatDate(cert.issued_at) + '</td>' +
-            '<td>' + formatDate(cert.expires_at) + '</td>' +
+            '<td>' + escapeHtml(cert.serial || '-') + '</td>' +
+            '<td>' + escapeHtml(cert.user || '-') + '</td>' +
+            '<td><code>' + escapeHtml(cert.principals || '-') + '</code></td>' +
+            '<td>' + escapeHtml(formatDate(cert.issued_at)) + '</td>' +
+            '<td>' + escapeHtml(formatDate(cert.expires_at)) + '</td>' +
             '<td>' + getStatusBadge(cert.status) + '</td>' +
             '<td>' + getActionButtons(cert) + '</td>';
           tableBody.appendChild(row);
@@ -161,16 +172,16 @@
   // Get action buttons HTML for a certificate
   function getActionButtons(cert) {
     if (cert.status === 'revoked') {
-      return '<span class="text-muted" title="Revoked by ' + (cert.revoked_by || 'unknown') +
-             ' at ' + formatDate(cert.revoked_at) + '">' +
+      return '<span class="text-muted" title="Revoked by ' + escapeHtml(cert.revoked_by || 'unknown') +
+             ' at ' + escapeHtml(formatDate(cert.revoked_at)) + '">' +
              '<span class="fa fa-ban"></span> Revoked</span>';
     }
 
     return '<button class="btn btn-sm btn-outline-danger btn-revoke" ' +
-           'data-session-id="' + cert.session_id + '" ' +
-           'data-serial="' + (cert.serial || '') + '" ' +
-           'data-user="' + (cert.user || '') + '" ' +
-           'data-key-id="' + (cert.key_id || '') + '">' +
+           'data-session-id="' + escapeHtml(cert.session_id) + '" ' +
+           'data-serial="' + escapeHtml(cert.serial || '') + '" ' +
+           'data-user="' + escapeHtml(cert.user || '') + '" ' +
+           'data-key-id="' + escapeHtml(cert.key_id || '') + '">' +
            '<span class="fa fa-ban"></span> Revoke</button>';
   }
 
