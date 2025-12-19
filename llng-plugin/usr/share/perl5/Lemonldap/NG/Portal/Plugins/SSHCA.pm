@@ -35,19 +35,6 @@ has rule => (
 );
 with 'Lemonldap::NG::Portal::MenuTab';
 
-# Compiled rule for admin access to revocation interface
-has adminRule => (
-    is      => 'ro',
-    lazy    => 1,
-    builder => sub {
-        my $self = shift;
-        my $rule = $self->conf->{sshCaAdminRule};
-        return sub { 0 } unless $rule;    # Disabled by default
-        my $compiled = $self->p->buildRule( $rule, 'sshCaAdminRule' );
-        return $compiled || sub { 0 };
-    },
-);
-
 # INITIALIZATION
 
 sub init {
@@ -587,7 +574,9 @@ sub _pemToOpenSSHPrivateKey {
 
     # For Ed25519 PEM keys, we need to convert to OpenSSH format
     # because ssh-keygen cannot read Ed25519 PEM keys
-    if ( $pemKey =~ /BEGIN PRIVATE KEY/ || $pemKey =~ /BEGIN ED25519 PRIVATE KEY/ ) {
+    if (   $pemKey =~ /BEGIN PRIVATE KEY/
+        || $pemKey =~ /BEGIN ED25519 PRIVATE KEY/ )
+    {
         eval {
             require Crypt::PK::Ed25519;
             require MIME::Base64;
@@ -599,7 +588,8 @@ sub _pemToOpenSSHPrivateKey {
             my $pubRaw  = $pk->export_key_raw('public');     # 32 bytes
 
             # Build OpenSSH private key format
-            my $opensshKey = $self->_buildOpenSSHPrivateKey( $privRaw, $pubRaw, '' );
+            my $opensshKey =
+              $self->_buildOpenSSHPrivateKey( $privRaw, $pubRaw, '' );
             return $opensshKey if $opensshKey;
         };
         if ($@) {
@@ -764,34 +754,24 @@ sub _pemToSshPublicKey {
 # =============================================================================
 
 # GET /ssh/admin - Display the revocation interface
+# Access control is handled by locationRules on the portal vhost
 sub sshAdminInterface {
     my ( $self, $req ) = @_;
 
-    # Check admin access
-    unless ( $self->adminRule->( $req, $req->userData ) ) {
-        return $self->p->sendError( $req, 'Forbidden', 403 );
-    }
-
-    # Load the admin template
     return $self->p->sendHtml( $req, 'sshcaadmin' );
 }
 
 # GET /ssh/certs - List/search certificates from persistent sessions
+# Access control is handled by locationRules on the portal vhost
 sub sshCertsList {
     my ( $self, $req ) = @_;
 
-    # Check admin access
-    unless ( $self->adminRule->( $req, $req->userData ) ) {
-        return $self->p->sendJSONresponse( $req, { error => 'Forbidden' },
-            code => 403 );
-    }
-
     # Get search parameters
-    my $userFilter   = $req->param('user')      || '';
-    my $serialFilter = $req->param('serial')    || '';
-    my $keyIdFilter  = $req->param('key_id')    || '';
-    my $statusFilter = $req->param('status')    || '';    # active, revoked, expired
-    my $limit        = int( $req->param('limit') || 100 );
+    my $userFilter   = $req->param('user')   || '';
+    my $serialFilter = $req->param('serial') || '';
+    my $keyIdFilter  = $req->param('key_id') || '';
+    my $statusFilter = $req->param('status') || '';   # active, revoked, expired
+    my $limit        = int( $req->param('limit')  || 100 );
     my $offset       = int( $req->param('offset') || 0 );
 
     $limit = 1000 if $limit > 1000;
@@ -801,7 +781,7 @@ sub sshCertsList {
         backend => $self->conf->{persistentStorage}
           || $self->conf->{globalStorage},
         %{
-            $self->conf->{persistentStorageOptions}
+                 $self->conf->{persistentStorageOptions}
               || $self->conf->{globalStorageOptions}
               || {}
         },
@@ -810,9 +790,9 @@ sub sshCertsList {
     my @fields = qw( _session_kind _session_uid _sshCerts );
 
     # Search for all persistent sessions that have _sshCerts
-    my $res = Lemonldap::NG::Common::Apache::Session->searchOnExpr(
-        $moduleOptions, '_session_kind', 'Persistent', @fields
-    );
+    my $res =
+      Lemonldap::NG::Common::Apache::Session->searchOnExpr( $moduleOptions,
+        '_session_kind', 'Persistent', @fields );
 
     my @certs;
     my $now = time();
@@ -833,11 +813,14 @@ sub sshCertsList {
         }
 
         for my $cert (@$sshCerts) {
+
             # Apply filters
             if ( $serialFilter && $cert->{serial} ne $serialFilter ) {
                 next;
             }
-            if ( $keyIdFilter && ( $cert->{key_id} || '' ) !~ /\Q$keyIdFilter\E/i ) {
+            if ( $keyIdFilter
+                && ( $cert->{key_id} || '' ) !~ /\Q$keyIdFilter\E/i )
+            {
                 next;
             }
 
@@ -855,7 +838,8 @@ sub sshCertsList {
                 next;
             }
 
-            push @certs, {
+            push @certs,
+              {
                 session_id    => $sessionId,
                 serial        => $cert->{serial},
                 key_id        => $cert->{key_id},
@@ -867,13 +851,13 @@ sub sshCertsList {
                 revoked_by    => $cert->{revoked_by},
                 revoke_reason => $cert->{revoke_reason},
                 status        => $certStatus,
-            };
+              };
         }
     }
 
     # Sort by issued_at descending (newest first)
-    @certs = sort { ( $b->{issued_at} || 0 ) <=> ( $a->{issued_at} || 0 ) }
-      @certs;
+    @certs =
+      sort { ( $b->{issued_at} || 0 ) <=> ( $a->{issued_at} || 0 ) } @certs;
 
     my $total = scalar @certs;
 
@@ -894,14 +878,9 @@ sub sshCertsList {
 }
 
 # POST /ssh/revoke - Revoke a certificate in persistent session
+# Access control is handled by locationRules on the portal vhost
 sub sshCertRevoke {
     my ( $self, $req ) = @_;
-
-    # Check admin access
-    unless ( $self->adminRule->( $req, $req->userData ) ) {
-        return $self->p->sendJSONresponse( $req, { error => 'Forbidden' },
-            code => 403 );
-    }
 
     # Parse request body
     my $body = eval { from_json( $req->content ) };
@@ -919,7 +898,8 @@ sub sshCertRevoke {
     }
 
     # Get current admin user
-    my $adminUser = $req->userData->{ $self->conf->{whatToTrace} }
+    my $adminUser =
+         $req->userData->{ $self->conf->{whatToTrace} }
       || $req->userData->{uid}
       || $req->user
       || 'unknown';
@@ -999,20 +979,19 @@ sub sshCertRevoke {
     # Update the KRL file
     my $krlUpdated = $self->_updateKrl($serial);
 
-    $self->logger->info(
-            "SSH CA: Certificate revoked by '$adminUser': "
+    $self->logger->info( "SSH CA: Certificate revoked by '$adminUser': "
           . "serial=$serial, key_id=$keyId, user=$user, reason=$reason" );
 
     # Audit log
     $self->p->auditLog(
         $req,
-        code       => 'SSH_CERT_REVOKED',
-        user       => $user,
-        admin      => $adminUser,
-        message    => "SSH certificate revoked for user '$user' by '$adminUser'",
-        serial     => $serial,
-        key_id     => $keyId,
-        reason     => $reason,
+        code    => 'SSH_CERT_REVOKED',
+        user    => $user,
+        admin   => $adminUser,
+        message => "SSH certificate revoked for user '$user' by '$adminUser'",
+        serial  => $serial,
+        key_id  => $keyId,
+        reason  => $reason,
         krl_update => $krlUpdated ? 'success' : 'failed',
     );
 
@@ -1123,16 +1102,16 @@ sub _updateKrl {
     close $fh;
 
     # Build ssh-keygen command to update KRL
-    # -k: Generate or update a KRL
-    # -u: Update existing KRL (create if doesn't exist)
+    # -k: Generate a KRL
+    # -u: Update existing KRL (only if file exists)
     # -s: CA public key
     # -f: KRL file
-    my @cmd = (
-        'ssh-keygen', '-k', '-u',
-        '-s', $caPubFile,
-        '-f', $krlPath,
-        $specFile
-    );
+    my @cmd = ( 'ssh-keygen', '-k' );
+
+    # Only use -u if KRL file already exists
+    push @cmd, '-u' if -f $krlPath;
+
+    push @cmd, '-s', $caPubFile, '-f', $krlPath, $specFile;
 
     $self->logger->debug( "SSH CA: Updating KRL: " . join( ' ', @cmd ) );
 
@@ -1235,6 +1214,47 @@ Response:
         "valid_until": "2025-01-01T12:00:00Z",
         "principals": ["user1"],
         "key_id": "user1@llng-1234567890-000001"
+    }
+
+=head2 GET /ssh/admin
+
+Displays the SSH CA administration interface for searching and revoking
+certificates. Access control is handled by locationRules on the portal vhost.
+
+=head2 GET /ssh/certs
+
+Lists/searches issued certificates from persistent sessions.
+Access control is handled by locationRules on the portal vhost.
+
+Parameters:
+
+=over
+
+=item * user - Filter by user name (partial match)
+
+=item * serial - Filter by certificate serial number (exact match)
+
+=item * key_id - Filter by key ID (partial match)
+
+=item * status - Filter by status: active, revoked, expired
+
+=item * limit - Maximum number of results (default: 100, max: 1000)
+
+=item * offset - Offset for pagination (default: 0)
+
+=back
+
+=head2 POST /ssh/revoke
+
+Revokes a certificate. Access control is handled by locationRules on the
+portal vhost.
+
+Request body (JSON):
+
+    {
+        "session_id": "persistent-session-id",
+        "serial": "123",
+        "reason": "Key compromised"     # optional
     }
 
 =head1 CONFIGURATION
