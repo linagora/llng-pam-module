@@ -4,6 +4,8 @@
 # - /ssh/ca : Public CA key endpoint (no auth required)
 # - /ssh/revoked : Key Revocation List (KRL) endpoint (no auth required)
 # - /ssh/sign : Sign user's SSH public key (auth required)
+# - /ssh/certs : List/search issued certificates (auth required, admin only)
+# - /ssh/revoke : Revoke a certificate (auth required, admin only)
 #
 # Requires configuration of SSH CA key in LLNG keys store.
 
@@ -12,6 +14,7 @@ package Lemonldap::NG::Portal::Plugins::SSHCA;
 use strict;
 use Mouse;
 use JSON qw(from_json to_json);
+use Lemonldap::NG::Common::Apache::Session;
 use Lemonldap::NG::Portal::Main::Constants qw(
   PE_OK
   PE_ERROR
@@ -31,6 +34,19 @@ has rule => (
     builder => sub { $_[0]->conf->{portalDisplaySshCa} // 0 },
 );
 with 'Lemonldap::NG::Portal::MenuTab';
+
+# Compiled rule for admin access to revocation interface
+has adminRule => (
+    is      => 'ro',
+    lazy    => 1,
+    builder => sub {
+        my $self = shift;
+        my $rule = $self->conf->{sshCaAdminRule};
+        return sub { 0 } unless $rule;    # Disabled by default
+        my $compiled = $self->p->buildRule( $rule, 'sshCaAdminRule' );
+        return $compiled || sub { 0 };
+    },
+);
 
 # INITIALIZATION
 
@@ -63,8 +79,26 @@ sub init {
         ['POST']
     );
 
-    # GET /ssh - Display the signing interface (auth required)
-    $self->addAuthRoute( ssh => 'sshInterface', ['GET'] );
+    # GET /ssh/admin - Display the revocation interface (auth required, admin)
+    $self->addAuthRoute(
+        ssh => { admin => 'sshAdminInterface' },
+        ['GET']
+    );
+
+    # GET /ssh/certs - List/search certificates (auth required, admin)
+    $self->addAuthRoute(
+        ssh => { certs => 'sshCertsList' },
+        ['GET']
+    );
+
+    # POST /ssh/revoke - Revoke a certificate (auth required, admin)
+    $self->addAuthRoute(
+        ssh => { revoke => 'sshCertRevoke' },
+        ['POST']
+    );
+
+    # GET /ssh/* - Display the signing interface (auth required, wildcard route)
+    $self->addAuthRoute( ssh => { '*' => 'sshInterface' }, ['GET'] );
 
     return 1;
 }
@@ -324,6 +358,17 @@ sub sshCaSign {
           . join( ',', @principals ) . ", "
           . "validity: ${validityMinutes}min, serial: $serial" );
 
+    # Store certificate in persistent session for revocation tracking
+    $self->_storeCertificate(
+        $req,
+        serial     => $serial,
+        key_id     => $keyId,
+        user       => $user,
+        principals => \@principals,
+        issued_at  => $timestamp,
+        expires_at => $validUntil,
+    );
+
     # Audit log
     $self->p->auditLog(
         $req,
@@ -453,6 +498,7 @@ sub _signSshKey {
         return undef;
     };
     print $fh $caKeyOpenSSH;
+    print $fh "\n" unless $caKeyOpenSSH =~ /\n$/;
     close $fh;
     chmod 0600, $caKeyFile;
 
@@ -529,42 +575,135 @@ sub _signSshKey {
 sub _pemToOpenSSHPrivateKey {
     my ( $self, $pemKey ) = @_;
 
-    # For Ed25519 keys, we need to convert PEM to OpenSSH format
-    # ssh-keygen can read PEM format directly for some key types,
-    # but for Ed25519 we may need conversion
-
     # First, try to detect if it's already in OpenSSH format
     if ( $pemKey =~ /^-----BEGIN OPENSSH PRIVATE KEY-----/ ) {
         return $pemKey;
     }
 
-    # For Ed25519 PEM keys, use ssh-keygen to convert
-    if ( $pemKey =~ /BEGIN PRIVATE KEY/ || $pemKey =~ /BEGIN EC PRIVATE KEY/ ) {
-        require File::Temp;
-        my $tmpdir  = File::Temp::tempdir( CLEANUP => 1 );
-        my $pemFile = "$tmpdir/key.pem";
-        my $sshFile = "$tmpdir/key";
-
-        # Write PEM key
-        open my $fh, '>', $pemFile or return undef;
-        print $fh $pemKey;
-        close $fh;
-        chmod 0600, $pemFile;
-
-        # Try to use the PEM directly with ssh-keygen
-        # ssh-keygen -s accepts PEM format for RSA/ECDSA
-        # For Ed25519, we need to check if it works
-
-        # Actually, let's just return the PEM and see if ssh-keygen accepts it
-        return $pemKey;
-    }
-
-    # RSA keys in traditional format
+    # RSA keys in traditional format - ssh-keygen can read these directly
     if ( $pemKey =~ /BEGIN RSA PRIVATE KEY/ ) {
         return $pemKey;
     }
 
+    # For Ed25519 PEM keys, we need to convert to OpenSSH format
+    # because ssh-keygen cannot read Ed25519 PEM keys
+    if ( $pemKey =~ /BEGIN PRIVATE KEY/ || $pemKey =~ /BEGIN ED25519 PRIVATE KEY/ ) {
+        eval {
+            require Crypt::PK::Ed25519;
+            require MIME::Base64;
+
+            my $pk = Crypt::PK::Ed25519->new( \$pemKey );
+
+            # Get raw keys
+            my $privRaw = $pk->export_key_raw('private');    # 32 bytes
+            my $pubRaw  = $pk->export_key_raw('public');     # 32 bytes
+
+            # Build OpenSSH private key format
+            my $opensshKey = $self->_buildOpenSSHPrivateKey( $privRaw, $pubRaw, '' );
+            return $opensshKey if $opensshKey;
+        };
+        if ($@) {
+            $self->logger->error("SSH CA: Failed to convert Ed25519 key: $@");
+        }
+    }
+
+    # EC keys - ssh-keygen can typically read these
+    if ( $pemKey =~ /BEGIN EC PRIVATE KEY/ ) {
+        return $pemKey;
+    }
+
+    # Fallback: return as-is and let ssh-keygen try
     return $pemKey;
+}
+
+# HELPER: Build OpenSSH private key format from raw Ed25519 key material
+sub _buildOpenSSHPrivateKey {
+    my ( $self, $privRaw, $pubRaw, $comment ) = @_;
+
+    require MIME::Base64;
+
+    # OpenSSH private key format for Ed25519 (unencrypted):
+    # - Magic: "openssh-key-v1\0"
+    # - Cipher name: "none" (string with length prefix)
+    # - KDF name: "none" (string with length prefix)
+    # - KDF options: empty string (length 0)
+    # - Number of keys: 1 (uint32)
+    # - Public key section (length-prefixed)
+    # - Private/encrypted section (length-prefixed)
+
+    my $keytype = 'ssh-ed25519';
+
+    # Build public key blob
+    my $pubBlob = pack( 'N', length($keytype) ) . $keytype;
+    $pubBlob .= pack( 'N', length($pubRaw) ) . $pubRaw;
+
+    # Build private section
+    # Generate random check integers (must match)
+    my $checkInt = int( rand(0xFFFFFFFF) );
+
+    my $privSection = '';
+    $privSection .= pack( 'N', $checkInt );    # check-int 1
+    $privSection .= pack( 'N', $checkInt );    # check-int 2 (must match)
+
+    # Key type
+    $privSection .= pack( 'N', length($keytype) ) . $keytype;
+
+    # Public key (32 bytes)
+    $privSection .= pack( 'N', length($pubRaw) ) . $pubRaw;
+
+    # Secret buffer: private key (32 bytes) + public key (32 bytes) = 64 bytes
+    my $secretBuf = $privRaw . $pubRaw;
+    $privSection .= pack( 'N', length($secretBuf) ) . $secretBuf;
+
+    # Comment
+    $comment //= '';
+    $privSection .= pack( 'N', length($comment) ) . $comment;
+
+    # Padding to 8-byte block size (for "none" cipher)
+    my $blockSize = 8;
+    my $padLen    = $blockSize - ( length($privSection) % $blockSize );
+    $padLen = 0 if $padLen == $blockSize;
+    for my $i ( 1 .. $padLen ) {
+        $privSection .= chr($i);
+    }
+
+    # Build full key
+    my $key = '';
+
+    # Magic header
+    $key .= "openssh-key-v1\0";
+
+    # Cipher name: "none"
+    my $cipher = 'none';
+    $key .= pack( 'N', length($cipher) ) . $cipher;
+
+    # KDF name: "none"
+    my $kdf = 'none';
+    $key .= pack( 'N', length($kdf) ) . $kdf;
+
+    # KDF options: empty
+    $key .= pack( 'N', 0 );
+
+    # Number of keys
+    $key .= pack( 'N', 1 );
+
+    # Public key section
+    $key .= pack( 'N', length($pubBlob) ) . $pubBlob;
+
+    # Private section
+    $key .= pack( 'N', length($privSection) ) . $privSection;
+
+    # Encode as PEM
+    my $b64    = MIME::Base64::encode_base64( $key, '' );
+    my $pem    = "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    my $offset = 0;
+    while ( $offset < length($b64) ) {
+        $pem .= substr( $b64, $offset, 70 ) . "\n";
+        $offset += 70;
+    }
+    $pem .= "-----END OPENSSH PRIVATE KEY-----\n";
+
+    return $pem;
 }
 
 # HELPER: Convert PEM public key to SSH format
@@ -618,6 +757,412 @@ sub _pemToSshPublicKey {
     }
 
     return "$sshKey\n";
+}
+
+# =============================================================================
+# ADMIN INTERFACE METHODS
+# =============================================================================
+
+# GET /ssh/admin - Display the revocation interface
+sub sshAdminInterface {
+    my ( $self, $req ) = @_;
+
+    # Check admin access
+    unless ( $self->adminRule->( $req, $req->userData ) ) {
+        return $self->p->sendError( $req, 'Forbidden', 403 );
+    }
+
+    # Load the admin template
+    return $self->p->sendHtml( $req, 'sshcaadmin' );
+}
+
+# GET /ssh/certs - List/search certificates from persistent sessions
+sub sshCertsList {
+    my ( $self, $req ) = @_;
+
+    # Check admin access
+    unless ( $self->adminRule->( $req, $req->userData ) ) {
+        return $self->p->sendJSONresponse( $req, { error => 'Forbidden' },
+            code => 403 );
+    }
+
+    # Get search parameters
+    my $userFilter   = $req->param('user')      || '';
+    my $serialFilter = $req->param('serial')    || '';
+    my $keyIdFilter  = $req->param('key_id')    || '';
+    my $statusFilter = $req->param('status')    || '';    # active, revoked, expired
+    my $limit        = int( $req->param('limit') || 100 );
+    my $offset       = int( $req->param('offset') || 0 );
+
+    $limit = 1000 if $limit > 1000;
+
+    # Search in persistent sessions
+    my $moduleOptions = {
+        backend => $self->conf->{persistentStorage}
+          || $self->conf->{globalStorage},
+        %{
+            $self->conf->{persistentStorageOptions}
+              || $self->conf->{globalStorageOptions}
+              || {}
+        },
+    };
+
+    my @fields = qw( _session_kind _session_uid _sshCerts );
+
+    # Search for all persistent sessions that have _sshCerts
+    my $res = Lemonldap::NG::Common::Apache::Session->searchOnExpr(
+        $moduleOptions, '_session_kind', 'Persistent', @fields
+    );
+
+    my @certs;
+    my $now = time();
+
+    for my $sessionId ( keys %{ $res || {} } ) {
+        my $session = $res->{$sessionId};
+
+        # Skip if no SSH certs
+        next unless $session->{_sshCerts};
+
+        my $user     = $session->{_session_uid} || '';
+        my $sshCerts = eval { from_json( $session->{_sshCerts} ) };
+        next if $@ || ref($sshCerts) ne 'ARRAY';
+
+        # Apply user filter at session level
+        if ( $userFilter && $user !~ /\Q$userFilter\E/i ) {
+            next;
+        }
+
+        for my $cert (@$sshCerts) {
+            # Apply filters
+            if ( $serialFilter && $cert->{serial} ne $serialFilter ) {
+                next;
+            }
+            if ( $keyIdFilter && ( $cert->{key_id} || '' ) !~ /\Q$keyIdFilter\E/i ) {
+                next;
+            }
+
+            # Determine status
+            my $certStatus = 'active';
+            if ( $cert->{revoked_at} ) {
+                $certStatus = 'revoked';
+            }
+            elsif ( $cert->{expires_at} && $cert->{expires_at} < $now ) {
+                $certStatus = 'expired';
+            }
+
+            # Apply status filter
+            if ( $statusFilter && $certStatus ne $statusFilter ) {
+                next;
+            }
+
+            push @certs, {
+                session_id    => $sessionId,
+                serial        => $cert->{serial},
+                key_id        => $cert->{key_id},
+                user          => $user,
+                principals    => $cert->{principals},
+                issued_at     => $cert->{issued_at},
+                expires_at    => $cert->{expires_at},
+                revoked_at    => $cert->{revoked_at},
+                revoked_by    => $cert->{revoked_by},
+                revoke_reason => $cert->{revoke_reason},
+                status        => $certStatus,
+            };
+        }
+    }
+
+    # Sort by issued_at descending (newest first)
+    @certs = sort { ( $b->{issued_at} || 0 ) <=> ( $a->{issued_at} || 0 ) }
+      @certs;
+
+    my $total = scalar @certs;
+
+    # Apply pagination
+    if ( $offset > 0 || $limit < $total ) {
+        @certs = splice( @certs, $offset, $limit );
+    }
+
+    return $self->p->sendJSONresponse(
+        $req,
+        {
+            certificates => \@certs,
+            total        => $total,
+            limit        => $limit,
+            offset       => $offset,
+        }
+    );
+}
+
+# POST /ssh/revoke - Revoke a certificate in persistent session
+sub sshCertRevoke {
+    my ( $self, $req ) = @_;
+
+    # Check admin access
+    unless ( $self->adminRule->( $req, $req->userData ) ) {
+        return $self->p->sendJSONresponse( $req, { error => 'Forbidden' },
+            code => 403 );
+    }
+
+    # Parse request body
+    my $body = eval { from_json( $req->content ) };
+    if ($@) {
+        $self->logger->error("SSH revoke: Invalid JSON body: $@");
+        return $self->_badRequest( $req, 'Invalid JSON' );
+    }
+
+    my $sessionId = $body->{session_id};
+    my $serial    = $body->{serial};
+    my $reason    = $body->{reason} || '';
+
+    unless ( $sessionId && $serial ) {
+        return $self->_badRequest( $req, 'session_id and serial required' );
+    }
+
+    # Get current admin user
+    my $adminUser = $req->userData->{ $self->conf->{whatToTrace} }
+      || $req->userData->{uid}
+      || $req->user
+      || 'unknown';
+
+    # Load the persistent session
+    my $moduleOptions = {
+        storageModule => $self->conf->{persistentStorage}
+          || $self->conf->{globalStorage},
+        storageModuleOptions => $self->conf->{persistentStorageOptions}
+          || $self->conf->{globalStorageOptions}
+          || {},
+    };
+
+    my $psession = Lemonldap::NG::Common::Session->new( {
+            %$moduleOptions,
+            id    => $sessionId,
+            force => 1,
+        }
+    );
+
+    unless ( $psession && !$psession->error ) {
+        return $self->p->sendJSONresponse(
+            $req,
+            { error => 'Session not found' },
+            code => 404
+        );
+    }
+
+    # Get SSH certs from session
+    my $sshCerts = [];
+    if ( $psession->data->{_sshCerts} ) {
+        $sshCerts = eval { from_json( $psession->data->{_sshCerts} ) };
+        if ($@) {
+            $self->logger->error("SSH revoke: Corrupted _sshCerts: $@");
+            return $self->p->sendJSONresponse(
+                $req,
+                { error => 'Corrupted certificate data' },
+                code => 500
+            );
+        }
+    }
+
+    # Find and update the certificate
+    my $found = 0;
+    my $user  = $psession->data->{_session_uid} || '';
+    my $keyId;
+
+    for my $cert (@$sshCerts) {
+        if ( $cert->{serial} eq $serial ) {
+            if ( $cert->{revoked_at} ) {
+                return $self->p->sendJSONresponse(
+                    $req,
+                    { error => 'Certificate already revoked' },
+                    code => 400
+                );
+            }
+            $cert->{revoked_at}    = time();
+            $cert->{revoked_by}    = $adminUser;
+            $cert->{revoke_reason} = $reason;
+            $keyId                 = $cert->{key_id};
+            $found                 = 1;
+            last;
+        }
+    }
+
+    unless ($found) {
+        return $self->p->sendJSONresponse(
+            $req,
+            { error => 'Certificate not found' },
+            code => 404
+        );
+    }
+
+    # Update session
+    $psession->update( { _sshCerts => to_json($sshCerts) } );
+
+    # Update the KRL file
+    my $krlUpdated = $self->_updateKrl($serial);
+
+    $self->logger->info(
+            "SSH CA: Certificate revoked by '$adminUser': "
+          . "serial=$serial, key_id=$keyId, user=$user, reason=$reason" );
+
+    # Audit log
+    $self->p->auditLog(
+        $req,
+        code       => 'SSH_CERT_REVOKED',
+        user       => $user,
+        admin      => $adminUser,
+        message    => "SSH certificate revoked for user '$user' by '$adminUser'",
+        serial     => $serial,
+        key_id     => $keyId,
+        reason     => $reason,
+        krl_update => $krlUpdated ? 'success' : 'failed',
+    );
+
+    return $self->p->sendJSONresponse(
+        $req,
+        {
+            result      => 1,
+            serial      => $serial,
+            key_id      => $keyId,
+            user        => $user,
+            revoked_at  => time(),
+            revoked_by  => $adminUser,
+            krl_updated => $krlUpdated ? JSON::true : JSON::false,
+        }
+    );
+}
+
+# HELPER: Store certificate in user's persistent session
+sub _storeCertificate {
+    my ( $self, $req, %args ) = @_;
+
+    # Build certificate record
+    my $certRecord = {
+        serial     => $args{serial},
+        key_id     => $args{key_id},
+        principals => join( ',', @{ $args{principals} || [] } ),
+        issued_at  => $args{issued_at},
+        expires_at => $args{expires_at},
+    };
+
+    # Get existing certificates from persistent session
+    my $sshCerts = [];
+    if ( $req->sessionInfo->{_sshCerts} ) {
+        $sshCerts = eval { from_json( $req->sessionInfo->{_sshCerts} ) };
+        if ( $@ || ref($sshCerts) ne 'ARRAY' ) {
+            $self->logger->warn("SSH CA: Corrupted _sshCerts, resetting: $@");
+            $sshCerts = [];
+        }
+    }
+
+    # Add new certificate
+    push @$sshCerts, $certRecord;
+
+    # Update persistent session
+    $self->p->updatePersistentSession( $req,
+        { _sshCerts => to_json($sshCerts) } );
+
+    $self->logger->debug(
+        "SSH CA: Stored certificate serial=$args{serial} in persistent session"
+    );
+    return 1;
+}
+
+# HELPER: Update KRL file with revoked serial
+sub _updateKrl {
+    my ( $self, $serial ) = @_;
+
+    my $krlPath = $self->conf->{sshCaKrlPath}
+      || '/var/lib/lemonldap-ng/ssh/revoked_keys';
+
+    # Ensure directory exists
+    my $dir = $krlPath;
+    $dir =~ s|/[^/]+$||;
+    unless ( -d $dir ) {
+        require File::Path;
+        File::Path::make_path($dir);
+    }
+
+    # Get CA public key for KRL
+    my $keyRef = $self->conf->{sshCaKeyRef};
+    unless ($keyRef) {
+        $self->logger->error('SSH CA: No key reference configured for KRL');
+        return 0;
+    }
+
+    my $keys    = $self->conf->{keys} || {};
+    my $keyData = $keys->{$keyRef};
+    unless ( $keyData && $keyData->{keyPublic} ) {
+        $self->logger->error("SSH CA: Key '$keyRef' not found for KRL");
+        return 0;
+    }
+
+    my $caPubKey = $self->_pemToSshPublicKey( $keyData->{keyPublic}, $keyRef );
+    unless ($caPubKey) {
+        $self->logger->error('SSH CA: Failed to convert CA public key for KRL');
+        return 0;
+    }
+
+    require File::Temp;
+    my $tmpdir = File::Temp::tempdir( CLEANUP => 1 );
+
+    # Write CA public key
+    my $caPubFile = "$tmpdir/ca.pub";
+    open my $fh, '>', $caPubFile or do {
+        $self->logger->error("SSH CA: Cannot write CA public key: $!");
+        return 0;
+    };
+    print $fh $caPubKey;
+    close $fh;
+
+    # Create KRL spec file with serial to revoke
+    my $specFile = "$tmpdir/revoke_spec";
+    open $fh, '>', $specFile or do {
+        $self->logger->error("SSH CA: Cannot write revoke spec: $!");
+        return 0;
+    };
+    print $fh "serial: $serial\n";
+    close $fh;
+
+    # Build ssh-keygen command to update KRL
+    # -k: Generate or update a KRL
+    # -u: Update existing KRL (create if doesn't exist)
+    # -s: CA public key
+    # -f: KRL file
+    my @cmd = (
+        'ssh-keygen', '-k', '-u',
+        '-s', $caPubFile,
+        '-f', $krlPath,
+        $specFile
+    );
+
+    $self->logger->debug( "SSH CA: Updating KRL: " . join( ' ', @cmd ) );
+
+    # Execute ssh-keygen
+    my $output = '';
+    my $pid    = open my $pipe, '-|';
+    if ( !defined $pid ) {
+        $self->logger->error("SSH CA: Cannot fork for KRL update: $!");
+        return 0;
+    }
+    elsif ( $pid == 0 ) {
+        open STDERR, '>&', \*STDOUT;
+        exec @cmd;
+        exit 1;
+    }
+    else {
+        local $/;
+        $output = <$pipe>;
+        close $pipe;
+    }
+
+    my $exitCode = $? >> 8;
+    if ( $exitCode != 0 ) {
+        $self->logger->error(
+            "SSH CA: KRL update failed (exit $exitCode): $output");
+        return 0;
+    }
+
+    $self->logger->info("SSH CA: KRL updated with revoked serial $serial");
+    return 1;
 }
 
 1;
