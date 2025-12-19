@@ -1347,6 +1347,7 @@ flowchart TB
 ### Avant l'enrôlement
 
 - [ ] LLNG configuré avec Device Authorization Grant activé
+- [ ] `Hashed session storage` activé côté LLNG (recommandé)
 - [ ] Plugin CrowdSec activé pour le rate-limiting (R2)
 - [ ] Client OIDC `pam-access` créé avec scope `pam:server`
 - [ ] `client_secret` stocké dans `/etc/security/pam_llng.conf` (pas en CLI)
@@ -1392,6 +1393,7 @@ Référence : [Issue LLNG #3030](https://gitlab.ow2.org/lemonldap-ng/lemonldap-n
 | Pas de token dans les logs       | R32       | ✅ Implémenté    | Aucun token dans les logs PAM                     |
 | PKCE pour Device Flow            | Extension | ✅ Implémenté    | `code_verifier` / `code_challenge` (S256)         |
 | PKCE obligatoire                 | Extension | ✅ Configuration | `oidcRPMetaDataOptionsRequirePKCE: 1` côté LLNG   |
+| Stockage hashé des tokens        | R21, R25  | ✅ Configuration | `Hashed session storage` côté LLNG (2.19.0+)      |
 
 ### Configuration LLNG recommandée (côté serveur)
 
@@ -1417,8 +1419,28 @@ oidcRPMetaDataOptionsAccessTokenExpiration: 3600
 oidcRPMetaDataOptionsRefreshTokenRotation: 1
 
 # Stockage hashé des tokens (R21, R25) - LLNG 2.19.0+
-# Activé globalement dans la configuration LLNG
+# Voir ci-dessous pour l'activation globale
 ```
+
+### Stockage hashé des sessions et tokens (recommandé)
+
+LemonLDAP::NG 2.19.0+ propose l'option **Hashed session storage** qui renforce la confidentialité :
+
+- Les sessions SSO et les tokens OIDC (y compris les `refresh_token` des machines enrôlées) sont stockés avec un nom hashé
+- Lors du parcours du stockage (base de données, fichiers), personne ne peut récupérer le nom de session SSO ou les tokens OIDC
+- Protection contre les attaques par lecture directe du backend de stockage
+- **Pour le module PAM** : les `refresh_token` des serveurs enrôlés sont protégés même en cas de compromission du backend de sessions LLNG
+
+**Activation dans le Manager LLNG :**
+
+```
+General Parameters → Advanced Parameters → Security → Hashed session storage → On
+```
+
+**Avertissements :**
+- Non activé par défaut car cela casse les sessions OIDC offline existantes
+- **Incompatible avec l'authentification "Proxy" en mode SOAP**
+- Pour migrer les sessions existantes, utiliser le script `convertToHashSessionStorage` fourni par LemonLDAP::NG
 
 **Note importante sur `oidcRPMetaDataOptionsRequirePKCE` :**
 
@@ -1469,6 +1491,6 @@ flowchart TB
 | Device Flow  | Anti-interception | PKCE obligatoire (`oidcRPMetaDataOptionsRequirePKCE: 1`)  |
 | Token        | Confidentialité   | PKCE (`code_verifier` / `code_challenge`)                 |
 | Token        | Rotation          | Refresh token rotatif                                     |
-| Stockage     | Confidentialité   | Permissions 0600, hashage côté LLNG                       |
+| Stockage     | Confidentialité   | Permissions 0600, `Hashed session storage` côté LLNG      |
 | Segmentation | Blast radius (niveau 1) | `server_group` par environnement                    |
 | Segmentation | Blast radius (niveau 2) | Clients OIDC distincts par zone (recommandé)        |
