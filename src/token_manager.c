@@ -20,6 +20,9 @@
 #include "token_manager.h"
 #include "jwt_utils.h"
 
+/* Maximum response size to prevent DoS via memory exhaustion (256KB) */
+#define MAX_RESPONSE_SIZE (256 * 1024)
+
 /* Token manager structure */
 struct token_manager {
     token_manager_config_t config;
@@ -33,11 +36,16 @@ typedef struct {
     size_t size;
 } response_buffer_t;
 
-/* Curl write callback */
+/* Curl write callback with size limit to prevent DoS */
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t total = size * nmemb;
     response_buffer_t *buf = (response_buffer_t *)userp;
+
+    /* Security: prevent memory exhaustion from malicious/large responses */
+    if (buf->size + total > MAX_RESPONSE_SIZE) {
+        return 0;  /* Abort transfer */
+    }
 
     char *ptr = realloc(buf->data, buf->size + total + 1);
     if (!ptr) return 0;

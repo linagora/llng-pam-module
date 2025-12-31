@@ -647,14 +647,18 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
          */
         #define MAX_SSH_FIELD_LEN 1024  /* Max length for individual parsed fields */
 
-        /* Helper macro to safely duplicate a field with length check.
-         * Note: strdup failure results in NULL dest, which is handled gracefully
-         * by the rest of the code (fields are optional). */
+        /*
+         * Helper macro to safely duplicate a field with length check.
+         * Security improvement: track allocation failures to detect OOM conditions.
+         * Under memory pressure, incomplete certificate validation could be a risk.
+         */
+        int oom_error = 0;
         #define SAFE_FIELD_DUP(dest, src) do { \
             if ((src) && *(src) && strlen(src) < MAX_SSH_FIELD_LEN) { \
                 (dest) = strdup(src); \
                 if (!(dest)) { \
-                    LLNG_LOG_DEBUG(pamh, "strdup failed for SSH cert field"); \
+                    LLNG_LOG_DEBUG(pamh, "strdup failed for SSH cert field (OOM)"); \
+                    oom_error = 1; \
                 } \
             } \
         } while(0)
@@ -701,6 +705,16 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
                 }
             }
             free(auth_copy);
+        } else {
+            /* Track OOM on initial SSH auth strdup as well */
+            LLNG_LOG_DEBUG(pamh, "strdup failed for ssh_auth during SSH cert parsing (OOM)");
+            oom_error = 1;
+        }
+
+        /* Security: if OOM occurred during parsing, log warning */
+        if (oom_error) {
+            LLNG_LOG_WARN(pamh, "Memory allocation failed during SSH cert parsing - "
+                          "certificate validation may be incomplete");
         }
         #undef SAFE_FIELD_DUP
         #undef MAX_SSH_FIELD_LEN
@@ -1436,40 +1450,80 @@ static int create_unix_user(pam_handle_t *pamh,
     /* User created successfully in passwd/shadow */
     ret = 0;
 
-    /* Create home directory with secure permissions (0700) */
+    /*
+     * Create home directory with secure permissions (0700).
+     * Security: Use fchown on the directory fd to avoid TOCTOU race conditions.
+     * This prevents an attacker from replacing the directory between mkdir and chown.
+     */
+    bool home_dir_safe = false;  /* Track if we verified the directory is safe */
+
     if (mkdir(home_dir, 0700) != 0 && errno != EEXIST) {
         LLNG_LOG_WARN(pamh, "Cannot create home directory %s: %s", home_dir, strerror(errno));
         /* Continue anyway - user is created */
     } else {
-        /* Copy skeleton files if configured and validated */
-        if (config->create_user_skel && access(config->create_user_skel, R_OK) == 0) {
-            /* Validate skel path for security */
-            if (config_validate_skel(config->create_user_skel) == 0) {
-                pid_t pid = fork();
-                if (pid == 0) {
-                    /* Child: copy skel contents (-P preserves symlinks, doesn't follow them) */
-                    execl("/bin/cp", "cp", "-rTP", config->create_user_skel, home_dir, NULL);
-                    _exit(127);
-                } else if (pid > 0) {
-                    int status;
-                    waitpid(pid, &status, 0);
+        /* Open directory to get fd for secure ownership change */
+        int home_fd = open(home_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (home_fd < 0) {
+            LLNG_LOG_WARN(pamh, "Cannot open home directory %s for chown: %s",
+                          home_dir, strerror(errno));
+            /* Security: don't proceed with skel/chown if we can't verify the directory */
+        } else {
+            /* Verify we own the directory or it's newly created */
+            struct stat st;
+            if (fstat(home_fd, &st) == 0) {
+                /* Only change ownership if it's root-owned (just created) or already correct */
+                if (st.st_uid == 0 || (st.st_uid == (uid_t)uid && st.st_gid == (gid_t)gid)) {
+                    /* Security: use fchown on the fd - immune to symlink attacks */
+                    if (fchown(home_fd, uid, gid) == 0) {
+                        home_dir_safe = true;  /* Directory verified and ownership set */
+                    } else {
+                        LLNG_LOG_WARN(pamh, "Cannot set ownership of home directory: %s",
+                                      strerror(errno));
+                    }
+                } else {
+                    LLNG_LOG_WARN(pamh, "Home directory %s owned by unexpected user %d, skipping chown",
+                                  home_dir, st.st_uid);
                 }
-            } else {
-                LLNG_LOG_WARN(pamh, "Skel path validation failed for %s, skipping",
-                              config->create_user_skel);
             }
+            close(home_fd);
         }
 
-        /* Set ownership recursively using chown -R uid:gid */
-        char owner_str[64];
-        snprintf(owner_str, sizeof(owner_str), "%d:%d", uid, gid);
-        pid_t pid = fork();
-        if (pid == 0) {
-            execl("/bin/chown", "chown", "-R", owner_str, home_dir, NULL);
-            _exit(127);
-        } else if (pid > 0) {
-            int status;
-            waitpid(pid, &status, 0);
+        /* Only proceed with skel copy and recursive chown if directory is verified safe */
+        if (home_dir_safe) {
+            /* Copy skeleton files if configured and validated */
+            if (config->create_user_skel && access(config->create_user_skel, R_OK) == 0) {
+                /* Validate skel path for security */
+                if (config_validate_skel(config->create_user_skel) == 0) {
+                    pid_t pid = fork();
+                    if (pid == 0) {
+                        /* Child: copy skel contents (-P preserves symlinks, doesn't follow them) */
+                        execl("/bin/cp", "cp", "-rTP", config->create_user_skel, home_dir, NULL);
+                        _exit(127);
+                    } else if (pid > 0) {
+                        int status;
+                        waitpid(pid, &status, 0);
+                    }
+                } else {
+                    LLNG_LOG_WARN(pamh, "Skel path validation failed for %s, skipping",
+                                  config->create_user_skel);
+                }
+            }
+
+            /*
+             * Set ownership of contents recursively.
+             * Note: We still need chown -R for the contents copied from skel.
+             * The directory itself is already owned by the user (fchown above).
+             */
+            char owner_str[64];
+            snprintf(owner_str, sizeof(owner_str), "%d:%d", uid, gid);
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("/bin/chown", "chown", "-R", owner_str, home_dir, NULL);
+                _exit(127);
+            } else if (pid > 0) {
+                int status;
+                waitpid(pid, &status, 0);
+            }
         }
     }
 

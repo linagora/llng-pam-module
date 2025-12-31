@@ -241,6 +241,21 @@ static int url_contains_dangerous_chars(const char *url)
         if (c < 32 || c == 127) {  /* Control characters */
             return 1;
         }
+        /*
+         * Security: check for URL-encoded CRLF injection (%0d, %0a, %0D, %0A).
+         * CURL will decode these, potentially enabling HTTP response splitting.
+         */
+        if (c == '%' && p[1] && p[2]) {
+            char hex[3] = { p[1], p[2], '\0' };
+            unsigned int decoded;
+            if (sscanf(hex, "%2x", &decoded) == 1) {
+                if (decoded < 32 || decoded == 127) {
+                    return 1;  /* Encoded control character */
+                }
+                /* Skip the two hex characters we just processed */
+                p += 2;
+            }
+        }
     }
     return 0;
 }

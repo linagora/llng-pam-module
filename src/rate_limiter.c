@@ -105,14 +105,18 @@ static void build_state_path(rate_limiter_t *rl, const char *key, char *path, si
     snprintf(path, path_size, "%s/%s.state", rl->config.state_dir, hash);
 }
 
-/* Load state from file */
-static bool load_state(const char *path, rate_limit_state_t *state)
+/*
+ * Load state from file using directory fd to avoid TOCTOU race conditions.
+ * Security: the dir_fd approach ensures we operate on the correct file
+ * even if an attacker tries symlink attacks between open and unlink.
+ */
+static bool load_state_at(int dir_fd, const char *filename, rate_limit_state_t *state)
 {
-    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    int fd = openat(dir_fd, filename, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) {
         if (errno == ELOOP) {
-            /* Symlink detected - security violation, remove it */
-            unlink(path);
+            /* Symlink detected - security violation, remove it safely */
+            unlinkat(dir_fd, filename, 0);
         }
         return false;
     }
@@ -144,19 +148,86 @@ static bool load_state(const char *path, rate_limit_state_t *state)
     return true;
 }
 
-/* Save state to file */
+/* Legacy wrapper for load_state - opens directory first */
+static bool load_state(const char *path, rate_limit_state_t *state)
+{
+    /* Extract directory and filename from path */
+    char *path_copy = strdup(path);
+    if (!path_copy) return false;
+
+    char *last_slash = strrchr(path_copy, '/');
+    if (!last_slash) {
+        free(path_copy);
+        return false;
+    }
+
+    *last_slash = '\0';
+    const char *dir = path_copy;
+    const char *filename = last_slash + 1;
+
+    int dir_fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dir_fd < 0) {
+        free(path_copy);
+        return false;
+    }
+
+    bool result = load_state_at(dir_fd, filename, state);
+    close(dir_fd);
+    free(path_copy);
+    return result;
+}
+
+/*
+ * Save state to file using directory fd to avoid TOCTOU race conditions.
+ * Security: uses O_EXCL for temp file creation to prevent symlink attacks.
+ */
 static bool save_state(const char *path, const rate_limit_state_t *state)
 {
-    char temp_path[512];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    /* Extract directory and filename from path */
+    char *path_copy = strdup(path);
+    if (!path_copy) return false;
 
-    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
-    if (fd < 0) return false;
+    char *last_slash = strrchr(path_copy, '/');
+    if (!last_slash) {
+        free(path_copy);
+        return false;
+    }
+
+    *last_slash = '\0';
+    const char *dir = path_copy;
+    const char *filename = last_slash + 1;
+
+    int dir_fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dir_fd < 0) {
+        free(path_copy);
+        return false;
+    }
+
+    /* Create temp filename */
+    char temp_filename[256];
+    snprintf(temp_filename, sizeof(temp_filename), "%s.tmp.%d", filename, (int)getpid());
+
+    /* Use O_EXCL to ensure we create a new file (no symlink attack possible) */
+    int fd = openat(dir_fd, temp_filename, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        /* If file exists (race condition), try to unlink and retry */
+        if (errno == EEXIST) {
+            unlinkat(dir_fd, temp_filename, 0);
+            fd = openat(dir_fd, temp_filename, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        }
+        if (fd < 0) {
+            close(dir_fd);
+            free(path_copy);
+            return false;
+        }
+    }
 
     FILE *f = fdopen(fd, "w");
     if (!f) {
         close(fd);
-        unlink(temp_path);
+        unlinkat(dir_fd, temp_filename, 0);
+        close(dir_fd);
+        free(path_copy);
         return false;
     }
 
@@ -168,11 +239,16 @@ static bool save_state(const char *path, const rate_limit_state_t *state)
 
     fclose(f);
 
-    if (rename(temp_path, path) != 0) {
-        unlink(temp_path);
+    /* Atomic rename within the same directory */
+    if (renameat(dir_fd, temp_filename, dir_fd, filename) != 0) {
+        unlinkat(dir_fd, temp_filename, 0);
+        close(dir_fd);
+        free(path_copy);
         return false;
     }
 
+    close(dir_fd);
+    free(path_copy);
     return true;
 }
 
