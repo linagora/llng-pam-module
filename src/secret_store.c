@@ -27,8 +27,7 @@
 #define SALT_SIZE 16        /* PBKDF2 salt */
 #define PBKDF2_ITERATIONS 100000
 
-/* Salt file for key derivation - generated once with random bytes */
-#define SALT_FILE "/var/lib/pam_llng/secrets/.salt"
+/* Secret is stored in store_dir/.salt, generated once per installation */
 
 /* Secret store structure */
 struct secret_store {
@@ -91,9 +90,17 @@ static int load_or_generate_salt(const char *store_dir, unsigned char *salt, siz
     char temp_path[520];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp.%d", salt_path, (int)getpid());
 
-    fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    /* Security: use O_EXCL to prevent symlink/race attacks on temp file */
+    fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (fd < 0) {
-        return -1;  /* Can't create salt file */
+        /* If file exists (stale temp), try to remove and retry */
+        if (errno == EEXIST) {
+            unlink(temp_path);
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        }
+        if (fd < 0) {
+            return -1;  /* Can't create salt file */
+        }
     }
 
     ssize_t written = write(fd, salt, salt_size);

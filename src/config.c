@@ -252,6 +252,8 @@ static int url_contains_dangerous_chars(const char *url)
                 if (decoded < 32 || decoded == 127) {
                     return 1;  /* Encoded control character */
                 }
+                /* Skip the two hex characters we just processed */
+                p += 2;
             }
         }
     }
