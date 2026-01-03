@@ -27,26 +27,79 @@ extends 'Lemonldap::NG::Portal::Main::Plugin';
 
 use constant name => 'SSHCA';
 
-# MenuTab configuration - rule for displaying the tab
-has rule => (
-    is      => 'ro',
-    lazy    => 1,
-    builder => sub { $_[0]->conf->{portalDisplaySshCa} // 0 },
-);
+# MenuTab configuration - compiled rule for displaying the tab
+has _rule => ( is => 'rw' );
+
+sub rule { $_[0]->_rule }
+
 with 'Lemonldap::NG::Portal::MenuTab';
+
+has key => (
+    is      => 'rw',
+    lazy    => 1,
+    builder => sub {
+        $_[0]->conf->{sshCaKeyRef}
+          ? $_[0]->conf->{keys}->{ $_[0]->conf->{sshCaKeyRef} }
+          : undef;
+    },
+);
+
+has sshPubKey  => ( is => 'rw' );
+has sshPrivKey => ( is => 'rw' );
 
 # INITIALIZATION
 
 sub init {
     my ($self) = @_;
 
-    # Check that SSH CA is enabled
-    unless ( $self->conf->{sshCaActivation} ) {
-        $self->logger->debug('SSH CA plugin not enabled');
-        return 1;
+    # Compile display rule for MenuTab
+    my $rule = $self->conf->{portalDisplaySshCa} // 0;
+    $rule = $self->p->HANDLER->substitute($rule);
+    my $sub  = $self->p->HANDLER->buildSub($rule);
+    unless ($sub) {
+        $self->logger->error(
+            'SSHCA: Bad portalDisplaySshCa rule: '
+              . $self->p->HANDLER->tsv->{jail}->error
+        );
+        return 0;
+    }
+    $self->_rule($sub);
+
+    # Check parameters
+    unless ( $self->key
+        and ref $self->key
+        and $self->key->{keyPublic}
+        and $self->key->{keyPrivate} )
+    {
+        $self->logger->error('SSH CA Key not configured');
+        return 0;
     }
 
-    $self->logger->debug('SSH CA plugin initialized');
+    unless (
+        $self->sshPubKey(
+            $self->_pemToSshPublicKey(
+                $self->key->{keyPublic},
+                $self->conf->{sshCaKeyRef}
+            )
+        )
+      )
+    {
+        $self->logger->error(
+            'SSH CA: Failed to convert public key to SSH format');
+        return 0;
+    }
+    unless (
+        $self->sshPrivKey(
+            $self->_pemToOpenSSHPrivateKey( $self->key->{keyPrivate} )
+        )
+      )
+    {
+        $self->logger->error(
+            'SSH CA: Failed to convert private key to SSH format');
+        return 0;
+    }
+    $self->sshPrivKey( $self->sshPrivKey . "\n" )
+      unless $self->sshPrivKey =~ /\n$/s;
 
     # GET /ssh/ca - Public CA key (no auth required)
     $self->addUnauthRoute(
@@ -55,10 +108,16 @@ sub init {
     );
 
     # GET /ssh/revoked - Key Revocation List (no auth required)
-    $self->addUnauthRoute(
-        ssh => { revoked => 'sshCaKrl' },
-        ['GET']
-    );
+    unless ( $self->conf->{sshCaKrlPath} ) {
+        $self->logger->error('SSH CA: No KRL path configured');
+    }
+    else {
+
+        $self->addUnauthRoute(
+            ssh => { revoked => 'sshCaKrl' },
+            ['GET']
+        );
+    }
 
     # POST /ssh/sign - Sign user's SSH key (auth required)
     $self->addAuthRoute(
@@ -86,6 +145,8 @@ sub init {
 
     # GET /ssh/* - Display the signing interface (auth required, wildcard route)
     $self->addAuthRoute( ssh => { '*' => 'sshInterface' }, ['GET'] );
+
+    $self->logger->debug('SSH CA plugin initialized');
 
     return 1;
 }
@@ -127,46 +188,13 @@ sub sshInterface {
 sub sshCaPublicKey {
     my ( $self, $req ) = @_;
 
-    # Get the key reference from config
-    my $keyRef = $self->conf->{sshCaKeyRef};
-    unless ($keyRef) {
-        $self->logger->error(
-            'SSH CA: No key reference configured (sshCaKeyRef)');
-        return $self->p->sendError( $req, 'SSH CA not configured', 500 );
-    }
-
-    # Get the key from LLNG keys store
-    my $keys    = $self->conf->{keys} || {};
-    my $keyData = $keys->{$keyRef};
-    unless ($keyData) {
-        $self->logger->error("SSH CA: Key '$keyRef' not found in keys store");
-        return $self->p->sendError( $req, 'SSH CA key not found', 500 );
-    }
-
-    # Get the public key
-    my $publicKey = $keyData->{keyPublic};
-    unless ($publicKey) {
-        $self->logger->error("SSH CA: No public key for '$keyRef'");
-        return $self->p->sendError( $req, 'SSH CA public key not found', 500 );
-    }
-
-    # Convert PEM public key to SSH format
-    my $sshPubKey = $self->_pemToSshPublicKey( $publicKey, $keyRef );
-    unless ($sshPubKey) {
-        $self->logger->error(
-            'SSH CA: Failed to convert public key to SSH format');
-        return $self->p->sendError( $req, 'Failed to convert key', 500 );
-    }
-
-    $self->logger->debug('SSH CA: Serving public key');
-
     return [
         200,
         [
             'Content-Type'  => 'text/plain; charset=utf-8',
             'Cache-Control' => 'public, max-age=3600',
         ],
-        [$sshPubKey]
+        [ $self->sshPubKey ]
     ];
 }
 
@@ -174,13 +202,8 @@ sub sshCaPublicKey {
 sub sshCaKrl {
     my ( $self, $req ) = @_;
 
-    my $krlPath = $self->conf->{sshCaKrlPath};
-    unless ($krlPath) {
-        $self->logger->error('SSH CA: No KRL path configured');
-        return $self->p->sendError( $req, 'KRL not configured', 500 );
-    }
-
     # Read KRL file if it exists
+    my $krlPath = $self->conf->{sshCaKrlPath};
     if ( -f $krlPath ) {
         open my $fh, '<:raw', $krlPath or do {
             $self->logger->error("SSH CA: Cannot read KRL file: $!");
@@ -224,12 +247,12 @@ sub sshCaSign {
     my $body = eval { from_json( $req->content ) };
     if ($@) {
         $self->logger->error("SSH CA sign: Invalid JSON body: $@");
-        return $self->_badRequest( $req, 'Invalid JSON' );
+        return $self->p->sendError( $req, 'Invalid JSON', 400 );
     }
 
     my $userPubKey = $body->{public_key};
     unless ($userPubKey) {
-        return $self->_badRequest( $req, 'public_key parameter required' );
+        return $self->p->sendError( $req, 'public_key parameter required', 400 );
     }
 
    # Validate SSH public key format: type, base64, optional comment, single line
@@ -237,7 +260,7 @@ sub sshCaSign {
     unless ( $userPubKey =~
         /\A(ssh-\w+|ecdsa-sha2-\w+)\s+[A-Za-z0-9+\/]+={0,2}(?:\s+[^\r\n]*)?\z/ )
     {
-        return $self->_badRequest( $req, 'Invalid SSH public key format' );
+        return $self->p->sendError( $req, 'Invalid SSH public key format', 400 );
     }
 
     # Get validity from request (in days) or default to 30 days
@@ -297,7 +320,7 @@ sub sshCaSign {
 
     unless (@principals) {
         $self->logger->error('SSH CA sign: No principals available');
-        return $self->_badRequest( $req, 'No principals available' );
+        return $self->p->sendError( $req, 'No principals available', 400 );
     }
 
     # Get user info for key_id
@@ -385,14 +408,6 @@ sub sshCaSign {
 # HELPER METHODS
 # =============================================================================
 
-sub _badRequest {
-    my ( $self, $req, $message ) = @_;
-    $message ||= 'Bad Request';
-
-    return $self->p->sendJSONresponse( $req, { error => $message },
-        code => 400 );
-}
-
 # HELPER: Get next serial number (atomic increment)
 sub _getNextSerial {
     my ($self) = @_;
@@ -455,38 +470,16 @@ sub _signSshKey {
 
     require File::Temp;
 
-    # Get CA private key
-    my $keyRef = $self->conf->{sshCaKeyRef};
-    unless ($keyRef) {
-        $self->logger->error('SSH CA: No key reference configured');
-        return undef;
-    }
-
-    my $keys    = $self->conf->{keys} || {};
-    my $keyData = $keys->{$keyRef};
-    unless ( $keyData && $keyData->{keyPrivate} ) {
-        $self->logger->error(
-            "SSH CA: Key '$keyRef' not found or has no private key");
-        return undef;
-    }
-
     # Create temp directory for key files
     my $tmpdir = File::Temp::tempdir( CLEANUP => 1 );
 
     # Write CA private key to temp file (convert PEM to OpenSSH format)
-    my $caKeyFile    = "$tmpdir/ca_key";
-    my $caKeyOpenSSH = $self->_pemToOpenSSHPrivateKey( $keyData->{keyPrivate} );
-    unless ($caKeyOpenSSH) {
-        $self->logger->error('SSH CA: Failed to convert CA key');
-        return undef;
-    }
-
+    my $caKeyFile = "$tmpdir/ca_key";
     open my $fh, '>', $caKeyFile or do {
         $self->logger->error("SSH CA: Cannot write CA key: $!");
         return undef;
     };
-    print $fh $caKeyOpenSSH;
-    print $fh "\n" unless $caKeyOpenSSH =~ /\n$/;
+    print $fh $self->sshPrivKey;
     close $fh;
     chmod 0600, $caKeyFile;
 
@@ -496,8 +489,7 @@ sub _signSshKey {
         $self->logger->error("SSH CA: Cannot write user key: $!");
         return undef;
     };
-    print $fh $userPubKey;
-    print $fh "\n" unless $userPubKey =~ /\n$/;
+    print $fh $self->sshPubKey;
     close $fh;
 
     # Build ssh-keygen command
@@ -887,7 +879,7 @@ sub sshCertRevoke {
     my $body = eval { from_json( $req->content ) };
     if ($@) {
         $self->logger->error("SSH revoke: Invalid JSON body: $@");
-        return $self->_badRequest( $req, 'Invalid JSON' );
+        return $self->p->sendError( $req, 'Invalid JSON', 400 );
     }
 
     my $sessionId = $body->{session_id};
@@ -895,7 +887,7 @@ sub sshCertRevoke {
     my $reason    = $body->{reason} || '';
 
     unless ( $sessionId && $serial ) {
-        return $self->_badRequest( $req, 'session_id and serial required' );
+        return $self->p->sendError( $req, 'session_id and serial required', 400 );
     }
 
     # Get current admin user
@@ -1068,19 +1060,6 @@ sub _updateKrl {
         return 0;
     }
 
-    my $keys    = $self->conf->{keys} || {};
-    my $keyData = $keys->{$keyRef};
-    unless ( $keyData && $keyData->{keyPublic} ) {
-        $self->logger->error("SSH CA: Key '$keyRef' not found for KRL");
-        return 0;
-    }
-
-    my $caPubKey = $self->_pemToSshPublicKey( $keyData->{keyPublic}, $keyRef );
-    unless ($caPubKey) {
-        $self->logger->error('SSH CA: Failed to convert CA public key for KRL');
-        return 0;
-    }
-
     require File::Temp;
     my $tmpdir = File::Temp::tempdir( CLEANUP => 1 );
 
@@ -1090,7 +1069,7 @@ sub _updateKrl {
         $self->logger->error("SSH CA: Cannot write CA public key: $!");
         return 0;
     };
-    print $fh $caPubKey;
+    print $fh $self->sshPubKey;
     close $fh;
 
     # Create KRL spec file with serial to revoke

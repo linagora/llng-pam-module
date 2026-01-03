@@ -268,6 +268,14 @@ sub deviceAuthorizationEndpoint {
     $self->userLogger->info(
         "Device authorization initiated for client $client_id");
 
+    $self->auditLog(
+        $req,
+        code      => "ISSUER_OIDC_DEVICE_AUTH_INITIATED",
+        rp        => $rp,
+        user_code => $user_code,
+        message   => "Device authorization initiated for RP $rp",
+    );
+
     return $self->p->sendJSONresponse( $req, $response );
 }
 
@@ -395,6 +403,15 @@ sub submitVerification {
         # Report to CrowdSec if available (potential bruteforce)
         $self->_reportInvalidUserCode( $req, $user_code );
 
+        my $user = $req->userData->{ $self->conf->{whatToTrace} };
+        $self->auditLog(
+            $req,
+            code      => "ISSUER_OIDC_DEVICE_AUTH_INVALID_CODE",
+            user_code => $user_code,
+            user      => $user,
+            message   => "Invalid or expired user_code submitted by $user",
+        );
+
         return $self->_showVerificationError( $req, 'invalidUserCode' );
     }
 
@@ -411,10 +428,20 @@ sub submitVerification {
 
         # User denied the authorization
         $self->_updateDeviceAuthStatus( $device_auth, 'denied' );
-        $self->userLogger->notice( "Device authorization denied by user "
-              . $req->userData->{ $self->conf->{whatToTrace} }
-              . " for client "
+        my $user = $req->userData->{ $self->conf->{whatToTrace} };
+        $self->userLogger->notice(
+            "Device authorization denied by user $user for client "
               . $device_auth->{client_id} );
+
+        $self->auditLog(
+            $req,
+            code      => "ISSUER_OIDC_DEVICE_AUTH_DENIED",
+            rp        => $device_auth->{rp},
+            user_code => $device_auth->{user_code},
+            user      => $user,
+            message   =>
+              "Device authorization denied by $user for RP $device_auth->{rp}",
+        );
 
         return $self->p->sendHtml(
             $req, 'device',
@@ -428,20 +455,30 @@ sub submitVerification {
     # Approve the authorization
     # Store user info for token generation
     my $user_session_id = $req->id || $req->userData->{_session_id};
+    my $user            = $req->userData->{ $self->conf->{whatToTrace} };
     $self->_updateDeviceAuthStatus(
         $device_auth,
         'approved',
         {
             user_session_id => $user_session_id,
-            user            => $req->userData->{ $self->conf->{whatToTrace} },
+            user            => $user,
             approved_at     => time(),
         }
     );
 
-    $self->userLogger->notice( "Device authorization approved by user "
-          . $req->userData->{ $self->conf->{whatToTrace} }
-          . " for client "
+    $self->userLogger->notice(
+        "Device authorization approved by user $user for client "
           . $device_auth->{client_id} );
+
+    $self->auditLog(
+        $req,
+        code      => "ISSUER_OIDC_DEVICE_AUTH_APPROVED",
+        rp        => $device_auth->{rp},
+        user_code => $device_auth->{user_code},
+        user      => $user,
+        message   =>
+          "Device authorization approved by $user for RP $device_auth->{rp}",
+    );
 
     return $self->p->sendHtml(
         $req, 'device',
@@ -696,6 +733,16 @@ sub _generateTokens {
     $self->_deleteDeviceAuth($device_auth);
 
     $self->logger->debug("Device code grant completed for RP $rp");
+
+    my $user = $device_auth->{user};
+    $self->auditLog(
+        $req,
+        code      => "ISSUER_OIDC_DEVICE_AUTH_TOKEN_GRANTED",
+        rp        => $rp,
+        user_code => $device_auth->{user_code},
+        user      => $user,
+        message   => "Device code exchanged for tokens by $user for RP $rp",
+    );
 
     $req->response( $self->p->sendJSONresponse( $req, $response ) );
     return PE_SENDRESPONSE;
