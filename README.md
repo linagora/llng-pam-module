@@ -1,6 +1,10 @@
 # PAM Module for LemonLDAP::NG
 
-This PAM module enables Linux servers to authenticate users via LemonLDAP::NG (LLNG), supporting both:
+**Control SSH access and sudo privileges on your Linux servers through LemonLDAP::NG.**
+
+This PAM module integrates your servers with LemonLDAP::NG (LLNG) to centrally manage who can SSH into which servers and who can use sudo. Administrators define access rules in the LLNG portal, and the PAM module enforces them on each server.
+
+The module supports two authentication methods:
 
 - **Token-based authentication**: Users generate temporary access tokens from the LLNG portal to use as SSH passwords
 - **Key-based authorization**: When users connect via SSH keys, the module checks if they're authorized to access this server
