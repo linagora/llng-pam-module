@@ -489,7 +489,8 @@ sub _signSshKey {
         $self->logger->error("SSH CA: Cannot write user key: $!");
         return undef;
     };
-    print $fh $self->sshPubKey;
+    print $fh $userPubKey;
+    print $fh "\n" unless $userPubKey =~ /\n$/;
     close $fh;
 
     # Build ssh-keygen command
