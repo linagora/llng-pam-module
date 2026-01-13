@@ -74,7 +74,7 @@ Enterprise solutions focused on privileged access control and session recording:
 
 ### Feature Comparison with Wallix
 
-Wallix Bastion is a French company often considered in the same market.
+Wallix is a French company whose Wallix Bastion product is often considered in the same market.
 Here's a detailed comparison:
 
 | Feature | LLNG + Bastion | Wallix Bastion |
