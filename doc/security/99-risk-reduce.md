@@ -18,7 +18,7 @@ Pistes exploratoires pour améliorer la sécurité mais non implémentées.
 
 **Nouveaux risques identifiés (PR #64 - JWT bastion) :**
 - **R-S9** : Replay d'un JWT bastion intercepté (P=1, I=2 après remédiation)
-- **R-S10** : Rotation des clés JWKS non propagée (P=1, I=2 après remédiation)
+- **R-S10** : Rotation des clés JWKS non propagée (P=1, I=1 - atténué par publication anticipée LLNG)
 
 Voir [01-enrollment.md](01-enrollment.md) et [02-ssh-connection.md](02-ssh-connection.md) pour les détails des risques et remédiations.
 
@@ -112,12 +112,18 @@ Pistes pour réduire P à quasi-zéro :
 2. **Vérification stricte IP** : Rejeter (au lieu de warning) si `bastion_ip` != IP source SSH
 3. **Nonce challenge** : Le backend génère un nonce que le bastion doit inclure dans le JWT (complexe)
 
-### R-S10 _(P=1, I=2)_ - Rotation JWKS non propagée
+### R-S10 _(P=1, I=1)_ - Rotation JWKS non propagée
 
-Pistes pour réduire I à 1 :
-1. **Push de révocation** : LLNG notifie les backends via webhook quand les clés changent
-2. **Cache TTL adaptatif** : Réduire le TTL automatiquement si une vérification échoue
-3. **Double-key signing** : Signer avec ancienne ET nouvelle clé pendant la période de transition
+**Risque largement atténué par l'implémentation LLNG :**
+
+LemonLDAP::NG gère nativement la rotation de clés de manière sécurisée :
+- La future clé est publiée dans le JWKS **avant** d'être utilisée
+- L'ancienne clé reste disponible **après** la rotation
+
+→ Avec un TTL de cache ≤ 24h, la rotation est transparente et sans interruption.
+
+Piste supplémentaire (optionnelle) :
+1. **Push de notification** : LLNG notifie les backends via webhook pour refresh immédiat (utile uniquement en cas de compromission)
 
 ---
 

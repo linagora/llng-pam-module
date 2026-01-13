@@ -821,39 +821,43 @@ pamAccessBastionJwtTtl: 60    # 1 minute au lieu de 5
 
 |                 | Score |
 | --------------- | :---: |
-| **Probabilité** |   2   |
+| **Probabilité** |   1   |
 | **Impact**      |   2   |
 
 **Architectures concernées :** C, D (avec JWT bastion activé)
 
-**Description :** Si les clés de signature LLNG sont rotées ou révoquées, le cache JWKS local sur les backends pourrait continuer à accepter des JWT signés avec les anciennes clés.
+**Description :** Si les clés de signature LLNG sont rotées, le cache JWKS local sur les backends doit être mis à jour pour accepter les JWT signés avec la nouvelle clé.
 
-**Vecteurs d'attaque :**
-- Un attaquant ayant obtenu l'ancienne clé privée LLNG pourrait signer des JWT frauduleux
-- Si LLNG est compromis et les clés rotées, les backends continuent à faire confiance aux anciennes clés
+**Remédiation embarquée (LLNG) :**
 
-**Remédiation embarquée :**
+LemonLDAP::NG gère la rotation des clés de manière sécurisée :
+1. **Publication anticipée** : La future clé est publiée dans le JWKS avant d'être utilisée pour signer
+2. **Maintien de l'ancienne** : L'ancienne clé reste dans le JWKS après rotation pour les JWT en cours de validité
+3. **Transition transparente** : Avec un refresh du cache JWKS au moins quotidien, la rotation est automatique
+
+**Remédiation embarquée (PAM) :**
 - TTL du cache JWKS configurable (défaut: 3600s = 1h)
 - Refresh automatique du cache si `kid` (Key ID) non trouvé
 - Vérification du claim `iss` (issuer) pour éviter les JWT d'autres sources
 
-**Remédiation configuration :**
+**Configuration recommandée :**
 ```ini
 # /etc/security/pam_llng.conf (backend)
-bastion_jwt_cache_ttl = 1800   # 30 min au lieu d'1h pour rotation plus rapide
+# Le TTL par défaut (1h) est suffisant grâce à la publication anticipée LLNG
+bastion_jwt_cache_ttl = 3600
 ```
 
-**Remédiation procédurale :**
-- Lors d'une rotation de clés LLNG, purger manuellement les caches :
-  ```bash
-  rm -f /var/cache/pam_llng/jwks.json
-  ```
-- En cas de compromission LLNG : désactiver temporairement `bastion_jwt_required` le temps de propager les nouvelles clés
+**Cas particulier - Compromission clé LLNG :**
 
-|                 | Score résiduel                    |
-| --------------- | :-------------------------------: |
-| **Probabilité** | 1 (avec TTL court + procédure)    |
-| **Impact**      |               2                   |
+En cas de compromission de la clé privée LLNG (urgence), purger manuellement les caches :
+```bash
+rm -f /var/cache/pam_llng/jwks.json
+```
+
+|                 | Score résiduel                                         |
+| --------------- | :----------------------------------------------------: |
+| **Probabilité** | 1 (rotation transparente grâce à publication anticipée)|
+| **Impact**      |               1 (en fonctionnement normal)             |
 
 ---
 
