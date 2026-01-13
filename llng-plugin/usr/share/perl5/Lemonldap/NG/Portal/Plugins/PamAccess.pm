@@ -91,6 +91,13 @@ sub init {
         ['POST']
     );
 
+    # Route for bastion token generation (bastion -> LLNG)
+    # Returns a JWT that proves the bastion has a valid session
+    $self->addUnauthRoute(
+        pam => { 'bastion-token' => 'bastionToken' },
+        ['POST']
+    );
+
     return 1;
 }
 
@@ -888,6 +895,274 @@ sub userinfo {
         },
         code => 200
     );
+}
+
+# POST /pam/bastion-token - Generate JWT for bastion-to-backend authentication
+#
+# This endpoint allows a bastion server to obtain a signed JWT that proves:
+# 1. The bastion has a valid server token (enrolled via Device Authorization Grant)
+# 2. The bastion is in a "bastion" server group
+# 3. The user has been authenticated on this bastion
+#
+# The backend server can verify this JWT to ensure connections only come from
+# authorized bastions, not direct connections bypassing the bastion.
+#
+# Request:
+# {
+#   "user": "dwho",                      # User being proxied
+#   "target_host": "backend.example.com", # Target backend server
+#   "target_group": "production"          # Target server group (optional)
+# }
+#
+# Response:
+# {
+#   "bastion_jwt": "eyJhbGciOiJSUzI1NiI...",  # Signed JWT
+#   "expires_in": 300                          # JWT validity in seconds
+# }
+sub bastionToken {
+    my ( $self, $req ) = @_;
+
+    # 1. Validate Bearer token from Authorization header
+    my $access_token = $self->oidc->getEndPointAccessToken($req);
+    unless ($access_token) {
+        $self->logger->warn('PAM bastion-token: No Bearer token provided');
+        return $self->_unauthorizedResponse( $req, 'Bearer token required' );
+    }
+
+    my $tokenSession = $self->oidc->getAccessToken($access_token);
+    unless ($tokenSession) {
+        $self->logger->warn('PAM bastion-token: Invalid or expired Bearer token');
+        return $self->_unauthorizedResponse( $req, 'Invalid or expired token' );
+    }
+
+    # 2. Verify token was obtained via Device Authorization Grant
+    my $grant_type = $tokenSession->data->{grant_type} || '';
+    unless ( $grant_type eq 'device_code' ) {
+        $self->logger->warn(
+                "PAM bastion-token: Token not from Device Authorization Grant "
+              . "(grant_type: '$grant_type')" );
+        return $self->_forbiddenResponse( $req,
+            'Server not enrolled. Use Device Authorization Grant.' );
+    }
+
+    # 3. Verify token has correct scope
+    my $scope = $tokenSession->data->{scope} || '';
+    unless ( $scope =~ /\bpam(?::server)?\b/ ) {
+        $self->logger->warn("PAM bastion-token: Invalid token scope '$scope'");
+        return $self->_forbiddenResponse( $req, 'Invalid token scope' );
+    }
+
+    # 4. Verify server is in a bastion group
+    my $server_group = $tokenSession->data->{server_group} || 'default';
+    my $bastion_groups = $self->conf->{pamAccessBastionGroups} || 'bastion';
+    my @allowed_groups = split /[,;\s]+/, $bastion_groups;
+
+    my $is_bastion = 0;
+    for my $allowed (@allowed_groups) {
+        if ( $server_group eq $allowed ) {
+            $is_bastion = 1;
+            last;
+        }
+    }
+
+    unless ($is_bastion) {
+        $self->logger->warn(
+            "PAM bastion-token: Server group '$server_group' is not a bastion group"
+        );
+        return $self->_forbiddenResponse( $req,
+            "Server is not an authorized bastion (group: $server_group)" );
+    }
+
+    # 5. Parse JSON request body
+    my $body = eval { from_json( $req->content ) };
+    if ($@) {
+        $self->logger->error("PAM bastion-token: Invalid JSON body: $@");
+        return $self->_badRequest( $req, 'Invalid JSON' );
+    }
+
+    my $user         = $body->{user};
+    my $target_host  = $body->{target_host}  || '';
+    my $target_group = $body->{target_group} || 'default';
+
+    unless ($user) {
+        return $self->_badRequest( $req, 'Missing user parameter' );
+    }
+
+    # 6. Get bastion identity
+    my $bastion_id = $tokenSession->data->{client_id} || 'unknown';
+
+    $self->logger->info(
+        "PAM bastion-token: Generating JWT for bastion '$bastion_id' "
+          . "proxying user '$user' to '$target_host'" );
+
+    # 7. Generate JWT
+    my $jwt_ttl = $self->conf->{pamAccessBastionJwtTtl} || 300;  # 5 minutes default
+    my $now     = time();
+    my $exp     = $now + $jwt_ttl;
+
+    # Build JWT claims
+    my $claims = {
+        iss          => $self->conf->{portal},                 # Issuer: LLNG portal URL
+        sub          => $user,                                  # Subject: user being proxied
+        aud          => 'pam:bastion-backend',                  # Audience
+        exp          => $exp,                                   # Expiration
+        iat          => $now,                                   # Issued at
+        jti          => $self->_generateUUID(),                 # Unique ID
+        bastion_id   => $bastion_id,                            # Bastion server ID
+        bastion_group => $server_group,                         # Bastion server group
+        target_host  => $target_host,                           # Target backend
+        target_group => $target_group,                          # Target server group
+        bastion_ip   => $req->address,                          # Bastion IP address
+    };
+
+    # Lookup user groups if available
+    $req->user($user);
+    $req->data->{_pamBastionToken} = 1;
+    $req->steps( [
+            'getUser',                 'setSessionInfo',
+            $self->p->groupsAndMacros, 'setLocalGroups'
+        ]
+    );
+
+    my $error = $self->p->process($req);
+    if ( $error == PE_OK ) {
+        my $groups = $req->sessionInfo->{groups} || '';
+        my @groupList = split /[,;\s]+/, $groups;
+        $claims->{user_groups} = \@groupList if @groupList;
+    }
+
+    # 8. Sign JWT using OIDC module's key
+    my $jwt = $self->_signBastionJwt($claims);
+    unless ($jwt) {
+        $self->logger->error("PAM bastion-token: Failed to sign JWT");
+        return $self->p->sendJSONresponse(
+            $req,
+            { error => 'Failed to generate token' },
+            code => 500
+        );
+    }
+
+    # 9. Audit log
+    $self->p->auditLog(
+        $req,
+        code         => 'PAM_BASTION_TOKEN_GENERATED',
+        user         => $user,
+        message      => "Bastion JWT generated for user '$user' to '$target_host'",
+        bastion_id   => $bastion_id,
+        target_host  => $target_host,
+        target_group => $target_group,
+        ttl          => $jwt_ttl,
+    );
+
+    # 10. Return JWT
+    return $self->p->sendJSONresponse(
+        $req,
+        {
+            bastion_jwt => $jwt,
+            expires_in  => $jwt_ttl,
+        }
+    );
+}
+
+# Generate a UUID v4
+sub _generateUUID {
+    my ($self) = @_;
+
+    # Use random bytes if available
+    my @bytes;
+    if ( eval { require Crypt::URandom; 1 } ) {
+        @bytes = unpack( 'C16', Crypt::URandom::urandom(16) );
+    }
+    else {
+        @bytes = map { int( rand(256) ) } ( 1 .. 16 );
+    }
+
+    # Set version 4 (random)
+    $bytes[6] = ( $bytes[6] & 0x0f ) | 0x40;
+    # Set variant (RFC 4122)
+    $bytes[8] = ( $bytes[8] & 0x3f ) | 0x80;
+
+    return sprintf(
+        '%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x',
+        @bytes
+    );
+}
+
+# Sign a JWT for bastion authentication using RS256
+# Uses the OIDC module's signing key
+sub _signBastionJwt {
+    my ( $self, $claims ) = @_;
+
+    # Try to use OIDC module's JWT signing capability
+    my $oidc = $self->oidc;
+    return undef unless $oidc;
+
+    # Get the signing key from OIDC configuration
+    my $key;
+    my $kid;
+
+    # Check if we have OIDC service private key
+    if ( $self->conf->{oidcServicePrivateKeySig} ) {
+        $key = $self->conf->{oidcServicePrivateKeySig};
+        $kid = $self->conf->{oidcServiceKeyIdSig} || 'llng-sig';
+    }
+    elsif ( $self->conf->{oidcServicePrivateKeyEnc} ) {
+        # Fallback to encryption key if no signing key
+        $key = $self->conf->{oidcServicePrivateKeyEnc};
+        $kid = $self->conf->{oidcServiceKeyIdEnc} || 'llng-enc';
+    }
+    else {
+        $self->logger->error(
+            'PAM bastion-token: No OIDC private key configured for JWT signing'
+        );
+        return undef;
+    }
+
+    # Build JWT header
+    my $header = {
+        alg => 'RS256',
+        typ => 'JWT',
+        kid => $kid,
+    };
+
+    # Encode header and payload
+    require MIME::Base64;
+    require JSON;
+
+    my $header_b64 = MIME::Base64::encode_base64url(
+        JSON::encode_json($header), ''
+    );
+    my $payload_b64 = MIME::Base64::encode_base64url(
+        JSON::encode_json($claims), ''
+    );
+
+    my $signing_input = "$header_b64.$payload_b64";
+
+    # Sign with RSA-SHA256
+    require Crypt::OpenSSL::RSA;
+
+    my $rsa;
+    eval {
+        $rsa = Crypt::OpenSSL::RSA->new_private_key($key);
+        $rsa->use_sha256_hash();
+    };
+    if ($@) {
+        $self->logger->error("PAM bastion-token: RSA key error: $@");
+        return undef;
+    }
+
+    my $signature;
+    eval {
+        $signature = $rsa->sign($signing_input);
+    };
+    if ($@) {
+        $self->logger->error("PAM bastion-token: Signing error: $@");
+        return undef;
+    }
+
+    my $sig_b64 = MIME::Base64::encode_base64url( $signature, '' );
+
+    return "$signing_input.$sig_b64";
 }
 
 1;

@@ -1,0 +1,147 @@
+.TH LLNG-SSH-PROXY 1 "January 2025" "pam-llng" "User Commands"
+.SH NAME
+llng-ssh-proxy \- SSH proxy command for bastion-to-backend authentication with LLNG JWT
+.SH SYNOPSIS
+.B llng-ssh-proxy
+[\fIOPTIONS\fR] [\fItarget_host\fR] [\fItarget_port\fR]
+.SH DESCRIPTION
+.B llng-ssh-proxy
+is used on bastion servers to request a signed JWT from LemonLDAP::NG
+before connecting to backend servers. The JWT proves to the backend that
+the connection comes from an authorized bastion with a valid session.
+.PP
+The script operates in three modes:
+.TP
+.B ProxyCommand mode
+When called with a target host argument, typically from SSH config.
+.TP
+.B ForceCommand mode
+When SSH_ORIGINAL_COMMAND is set (used as sshd ForceCommand).
+.TP
+.B Interactive mode
+When neither argument nor SSH_ORIGINAL_COMMAND is set, prompts for target.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Use alternate configuration file (default: /etc/llng/ssh-proxy.conf)
+.TP
+.BR \-d ", " \-\-debug
+Enable debug output to stderr
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit
+.TP
+.BR \-V ", " \-\-version
+Show version and exit
+.SH CONFIGURATION
+The script reads configuration from \fI/etc/llng/ssh-proxy.conf\fR:
+.PP
+.nf
+# LemonLDAP::NG portal URL (required)
+PORTAL_URL="https://auth.example.com"
+
+# Server token file (from llng-pam-enroll)
+SERVER_TOKEN_FILE="/etc/security/pam_llng.token"
+
+# Server group for this bastion
+SERVER_GROUP="bastion"
+
+# Target server group for backends
+TARGET_GROUP="default"
+
+# HTTP timeout (seconds)
+TIMEOUT=10
+
+# Verify SSL certificates
+VERIFY_SSL=true
+
+# Additional SSH options
+SSH_OPTIONS=""
+
+# Enable debug output
+DEBUG=false
+.fi
+.SH SSH CONFIGURATION
+.SS Bastion Configuration (~/.ssh/config or /etc/ssh/ssh_config)
+.nf
+Host backend-*
+    ProxyCommand llng-ssh-proxy %h %p
+.fi
+.PP
+Or as ForceCommand in /etc/ssh/sshd_config:
+.nf
+Match User *
+    ForceCommand /usr/bin/llng-ssh-proxy
+.fi
+.SS Backend Configuration (/etc/ssh/sshd_config)
+The backend must accept the LLNG_BASTION_JWT environment variable:
+.nf
+AcceptEnv LLNG_BASTION_JWT
+.fi
+.SH PAM CONFIGURATION
+On backend servers, configure PAM to verify the bastion JWT by adding
+to /etc/security/pam_llng.conf:
+.nf
+bastion_jwt_required = true
+bastion_jwt_issuer = https://auth.example.com
+.fi
+.SH SECURITY
+The bastion JWT provides cryptographic proof that:
+.IP \(bu 2
+The connection originates from an authorized bastion server
+.IP \(bu 2
+The bastion has a valid session with LLNG
+.IP \(bu 2
+The user is authorized to connect to the target backend
+.IP \(bu 2
+The JWT is signed by LLNG using RS256 and can be verified offline
+.PP
+This prevents unauthorized SSH access to backends even if an attacker
+knows the backend's SSH configuration.
+.SH FILES
+.TP
+.I /etc/llng/ssh-proxy.conf
+Main configuration file
+.TP
+.I /etc/security/pam_llng.token
+Server authentication token (from llng-pam-enroll)
+.SH ENVIRONMENT
+.TP
+.B LLNG_BASTION_JWT
+The JWT is exported via this variable and passed to backends via SendEnv.
+.TP
+.B SSH_ORIGINAL_COMMAND
+Used in ForceCommand mode to determine the target host.
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Error (configuration, network, authentication)
+.SH EXAMPLES
+.SS As ProxyCommand
+.nf
+# In ~/.ssh/config on the bastion:
+Host backend-*
+    ProxyCommand llng-ssh-proxy %h %p
+
+# Connect from bastion to backend:
+$ ssh backend-web01
+.fi
+.SS Manual invocation
+.nf
+$ llng-ssh-proxy backend-web01 22
+.fi
+.SH SEE ALSO
+.BR llng-bastion-setup (8),
+.BR llng-backend-setup (8),
+.BR llng-pam-enroll (8),
+.BR pam_llng.conf (5),
+.BR ssh_config (5),
+.BR sshd_config (5)
+.SH COPYRIGHT
+Copyright (C) 2025 Linagora.
+License: AGPL-3.0
+.SH AUTHORS
+Xavier Guimard <xguimard@linagora.com>

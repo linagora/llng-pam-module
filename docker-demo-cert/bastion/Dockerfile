@@ -48,7 +48,9 @@ RUN mkdir -p build && cd build && \
     cp pam_llng.so /usr/lib/x86_64-linux-gnu/security/ && \
     cp nss/libnss_llng.so.2 /lib/x86_64-linux-gnu/ && \
     cp ../scripts/llng-session-recorder /usr/sbin/ && \
+    cp ../scripts/llng-ssh-proxy /usr/bin/ && \
     chmod 755 /usr/sbin/llng-session-recorder && \
+    chmod 755 /usr/bin/llng-ssh-proxy && \
     ldconfig && \
     cd / && rm -rf /src/llng-pam-module/build
 

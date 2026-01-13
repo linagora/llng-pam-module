@@ -283,6 +283,24 @@ EOF
 
 chmod 644 /etc/nss_llng.conf
 
+# Create SSH proxy configuration for bastion-to-backend connections
+mkdir -p /etc/llng
+cat > /etc/llng/ssh-proxy.conf << EOF
+# LemonLDAP::NG SSH Proxy configuration
+# Used by llng-ssh-proxy to request JWT for bastion-to-backend auth
+
+PORTAL_URL=$PORTAL_URL
+SERVER_TOKEN_FILE=$TOKEN_FILE
+SERVER_GROUP=$SERVER_GROUP
+TARGET_GROUP=backend
+TIMEOUT=10
+VERIFY_SSL=false
+SSH_OPTIONS="-o StrictHostKeyChecking=no"
+DEBUG=false
+EOF
+chmod 644 /etc/llng/ssh-proxy.conf
+echo "SSH proxy configured for bastion-to-backend authentication"
+
 # Configure NSS to use LLNG for user/group resolution
 sed -i 's/^passwd:.*/passwd:         files llng/' /etc/nsswitch.conf
 sed -i 's/^group:.*/group:          files llng/' /etc/nsswitch.conf
@@ -330,6 +348,10 @@ fi
 echo "=== Bastion Configuration Complete ==="
 echo "SSH listening on port 22"
 echo "Users can connect with SSH certificates from LLNG"
+echo ""
+echo "To connect to backend via bastion:"
+echo "  From bastion: llng-ssh-proxy backend"
+echo "  Or: ssh -o ProxyCommand='llng-ssh-proxy %h %p' backend"
 
 # Execute the command (sshd)
 exec "$@"

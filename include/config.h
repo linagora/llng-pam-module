@@ -91,6 +91,16 @@ typedef struct {
     /* Path validation */
     char *approved_shells;          /* Colon-separated approved shells (default: common shells) */
     char *approved_home_prefixes;   /* Colon-separated home prefixes (default: /home:/var/home) */
+
+    /* Bastion JWT verification (for backend servers) */
+    bool bastion_jwt_required;      /* Require JWT from bastion (default: false) */
+    bool bastion_jwt_verify_local;  /* Verify JWT locally with JWKS (default: true) */
+    char *bastion_jwt_issuer;       /* Expected JWT issuer (LLNG portal URL) */
+    char *bastion_jwt_jwks_url;     /* JWKS endpoint URL (default: portal_url/.well-known/jwks.json) */
+    char *bastion_jwt_jwks_cache;   /* Local JWKS cache path (default: /var/cache/pam_llng/jwks.json) */
+    int bastion_jwt_cache_ttl;      /* JWKS cache TTL in seconds (default: 3600) */
+    int bastion_jwt_clock_skew;     /* Allowed clock skew in seconds (default: 60) */
+    char *bastion_jwt_allowed_bastions; /* Comma-separated list of allowed bastion IDs */
 } pam_llng_config_t;
 
 /*

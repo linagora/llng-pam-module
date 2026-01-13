@@ -39,6 +39,8 @@ set(PAM_MODULE_SOURCES
     src/notify.c
     src/secret_store.c
     src/auth_cache.c
+    src/bastion_jwt.c
+    src/jwks_cache.c
 )
 
 if(ENABLE_CACHE)
@@ -137,6 +139,16 @@ install(FILES ${CMAKE_SOURCE_DIR}/scripts/session-recorder.conf.example
     DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/llng
 )
 
+# Install SSH proxy for bastion
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-ssh-proxy
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Install SSH proxy config example
+install(FILES ${CMAKE_SOURCE_DIR}/scripts/ssh-proxy.conf.example
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/llng
+)
+
 # Install SSH certificate tool (user-facing)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-ssh-cert
     DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -164,6 +176,7 @@ install(FILES
 # Install man pages (section 1 - user commands)
 install(FILES
     ${CMAKE_SOURCE_DIR}/man/llng-ssh-cert.1
+    ${CMAKE_SOURCE_DIR}/man/llng-ssh-proxy.1
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
 )
 

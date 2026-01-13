@@ -1,0 +1,35 @@
+# llng-ssh-proxy configuration
+#
+# This file is sourced by llng-ssh-proxy when the bastion connects to backends.
+# Copy this file to /etc/llng/ssh-proxy.conf and adjust the values.
+
+# LemonLDAP::NG portal URL (required)
+PORTAL_URL="https://auth.example.com"
+
+# Server token file (from llng-pam-enroll)
+# The bastion must be enrolled with LLNG to get a token
+SERVER_TOKEN_FILE="/etc/security/pam_llng.token"
+
+# Server group for this bastion
+# This should match the group configured in LLNG
+SERVER_GROUP="bastion"
+
+# Target server group for backends
+# Backends should be in this group to accept connections from this bastion
+TARGET_GROUP="default"
+
+# HTTP timeout for LLNG API calls (seconds)
+TIMEOUT=10
+
+# Verify SSL certificates
+# Set to false only for testing with self-signed certificates
+VERIFY_SSL=true
+
+# Additional SSH options to pass when connecting to backends
+# Examples:
+#   SSH_OPTIONS="-o ConnectTimeout=10"
+#   SSH_OPTIONS="-o StrictHostKeyChecking=no"
+SSH_OPTIONS=""
+
+# Enable debug output (logs to stderr)
+DEBUG=false

@@ -1,0 +1,357 @@
+#!/bin/bash
+# shellcheck disable=SC2155
+#
+# llng-ssh-proxy - SSH proxy command for bastion-to-backend authentication
+#
+# This script is used as a ProxyCommand (or ForceCommand) on bastion servers
+# to request a JWT from LLNG before connecting to backend servers. The JWT
+# is passed to the backend via SSH's SendEnv mechanism.
+#
+# Usage:
+#   As ProxyCommand (in ~/.ssh/config):
+#     Host backend-*
+#       ProxyCommand /usr/bin/llng-ssh-proxy %h %p
+#
+#   As ForceCommand (in sshd_config):
+#     Match User *
+#       ForceCommand /usr/bin/llng-ssh-proxy
+#
+# The script:
+# 1. Requests a bastion JWT from LLNG /pam/bastion-token endpoint
+# 2. Exports the JWT as LLNG_BASTION_JWT environment variable
+# 3. Connects to the target backend via SSH with SendEnv
+#
+# Copyright (C) 2025 Linagora
+# Author: Xavier Guimard <xguimard@linagora.com>
+# License: AGPL-3.0
+
+set -euo pipefail
+
+VERSION="1.0.0"
+PROG_NAME=$(basename "$0")
+
+# Configuration (can be overridden via /etc/llng/ssh-proxy.conf)
+PORTAL_URL=""
+SERVER_TOKEN_FILE="/etc/security/pam_llng.token"
+SERVER_GROUP="bastion"
+TARGET_GROUP="default"
+TIMEOUT=10
+VERIFY_SSL=true
+SSH_OPTIONS=""
+DEBUG=false
+
+# Configuration file
+CONFIG_FILE="/etc/llng/ssh-proxy.conf"
+
+# Load configuration
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Debug logging
+debug() {
+    if [ "$DEBUG" = "true" ]; then
+        echo "[DEBUG] $*" >&2
+    fi
+}
+
+# Error logging
+error() {
+    echo "[ERROR] $*" >&2
+}
+
+# Build curl options
+curl_opts() {
+    local opts=("-s" "-f" "--connect-timeout" "$TIMEOUT")
+    if [ "$VERIFY_SSL" = "false" ]; then
+        opts+=("-k")
+    fi
+    printf '%s\n' "${opts[@]}"
+}
+
+# Get server token
+get_server_token() {
+    if [ ! -f "$SERVER_TOKEN_FILE" ]; then
+        error "Server token file not found: $SERVER_TOKEN_FILE"
+        exit 1
+    fi
+
+    # Support both JSON format (from llng-pam-enroll) and plain text
+    if head -c1 "$SERVER_TOKEN_FILE" | grep -q '{'; then
+        # JSON format: extract access_token
+        jq -r '.access_token // empty' "$SERVER_TOKEN_FILE" 2>/dev/null || cat "$SERVER_TOKEN_FILE"
+    else
+        # Plain text format
+        cat "$SERVER_TOKEN_FILE"
+    fi
+}
+
+# Request bastion JWT from LLNG
+request_bastion_jwt() {
+    local user="$1"
+    local target_host="$2"
+    local server_token
+
+    server_token=$(get_server_token)
+    if [ -z "$server_token" ]; then
+        error "Failed to read server token"
+        exit 1
+    fi
+
+    debug "Requesting bastion JWT for user $user to host $target_host"
+
+    local response
+    local curl_args
+    mapfile -t curl_args < <(curl_opts)
+
+    response=$(curl "${curl_args[@]}" \
+        -X POST \
+        -H "Authorization: Bearer $server_token" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"user\": \"$user\",
+            \"target_host\": \"$target_host\",
+            \"target_group\": \"$TARGET_GROUP\",
+            \"bastion_group\": \"$SERVER_GROUP\"
+        }" \
+        "${PORTAL_URL}/pam/bastion-token" 2>&1) || {
+        error "Failed to request bastion JWT: $response"
+        exit 1
+    }
+
+    # Check if response is valid JSON with a token
+    local jwt
+    jwt=$(echo "$response" | jq -r '.token // empty' 2>/dev/null)
+
+    if [ -z "$jwt" ]; then
+        # Check for error message
+        local err_msg
+        err_msg=$(echo "$response" | jq -r '.error // .message // empty' 2>/dev/null)
+        if [ -n "$err_msg" ]; then
+            error "LLNG returned error: $err_msg"
+        else
+            error "Invalid response from LLNG: $response"
+        fi
+        exit 1
+    fi
+
+    echo "$jwt"
+}
+
+# Main function for ProxyCommand mode
+proxy_command_mode() {
+    local target_host="$1"
+    local target_port="${2:-22}"
+    local user="${USER:-$(whoami)}"
+
+    # Request JWT
+    local jwt
+    jwt=$(request_bastion_jwt "$user" "$target_host")
+
+    debug "Got bastion JWT, connecting to $target_host:$target_port"
+
+    # Connect to backend with JWT in environment
+    # The backend's sshd must have AcceptEnv LLNG_BASTION_JWT
+    export LLNG_BASTION_JWT="$jwt"
+
+    # shellcheck disable=SC2086
+    exec ssh -o SendEnv=LLNG_BASTION_JWT \
+             -o StrictHostKeyChecking=accept-new \
+             $SSH_OPTIONS \
+             -W "$target_host:$target_port" \
+             "$target_host"
+}
+
+# Main function for ForceCommand mode
+force_command_mode() {
+    local user="${USER:-$(whoami)}"
+
+    # In ForceCommand mode, the original command is in SSH_ORIGINAL_COMMAND
+    # Format: "ssh user@host" or just a command to run
+    local ssh_cmd="${SSH_ORIGINAL_COMMAND:-}"
+
+    if [ -z "$ssh_cmd" ]; then
+        error "No SSH_ORIGINAL_COMMAND set"
+        exit 1
+    fi
+
+    debug "Original command: $ssh_cmd"
+
+    # Parse target from command
+    local target_host=""
+    local target_user=""
+
+    if [[ "$ssh_cmd" =~ ^ssh[[:space:]]+(.+)$ ]]; then
+        local target="${BASH_REMATCH[1]}"
+        # Parse user@host format
+        if [[ "$target" =~ ^([^@]+)@([^[:space:]]+)(.*)$ ]]; then
+            target_user="${BASH_REMATCH[1]}"
+            target_host="${BASH_REMATCH[2]}"
+        elif [[ "$target" =~ ^([^[:space:]]+)(.*)$ ]]; then
+            target_host="${BASH_REMATCH[1]}"
+            target_user="$user"
+        fi
+    fi
+
+    if [ -z "$target_host" ]; then
+        error "Could not parse target host from command: $ssh_cmd"
+        exit 1
+    fi
+
+    # Request JWT
+    local jwt
+    jwt=$(request_bastion_jwt "$user" "$target_host")
+
+    debug "Got bastion JWT, connecting to $target_host"
+
+    # Connect to backend with JWT
+    export LLNG_BASTION_JWT="$jwt"
+
+    # shellcheck disable=SC2086
+    exec ssh -o SendEnv=LLNG_BASTION_JWT \
+             -o StrictHostKeyChecking=accept-new \
+             $SSH_OPTIONS \
+             ${target_user:+-l "$target_user"} \
+             "$target_host"
+}
+
+# Interactive shell mode (user connects to bastion directly)
+interactive_mode() {
+    local user="${USER:-$(whoami)}"
+
+    echo "Welcome to the LLNG bastion server"
+    echo ""
+    echo "Usage: ssh <backend-hostname>"
+    echo ""
+    echo -n "Enter target hostname: "
+    read -r target_host
+
+    if [ -z "$target_host" ]; then
+        error "No target specified"
+        exit 1
+    fi
+
+    # Request JWT
+    local jwt
+    jwt=$(request_bastion_jwt "$user" "$target_host")
+
+    debug "Got bastion JWT, connecting to $target_host"
+
+    # Connect to backend with JWT
+    export LLNG_BASTION_JWT="$jwt"
+
+    # shellcheck disable=SC2086
+    exec ssh -o SendEnv=LLNG_BASTION_JWT \
+             -o StrictHostKeyChecking=accept-new \
+             $SSH_OPTIONS \
+             "$target_host"
+}
+
+# Show usage
+usage() {
+    cat <<EOF
+Usage: $PROG_NAME [OPTIONS] [target_host] [target_port]
+
+SSH proxy command for bastion-to-backend authentication with LLNG JWT.
+
+Modes:
+  ProxyCommand mode:  $PROG_NAME <host> [port]
+  ForceCommand mode:  $PROG_NAME (reads SSH_ORIGINAL_COMMAND)
+  Interactive mode:   $PROG_NAME (prompts for target)
+
+Options:
+  -c, --config FILE   Use alternate config file (default: $CONFIG_FILE)
+  -d, --debug         Enable debug output
+  -h, --help          Show this help
+  -V, --version       Show version
+
+Configuration:
+  The script reads configuration from $CONFIG_FILE
+
+  Example configuration:
+    PORTAL_URL="https://auth.example.com"
+    SERVER_TOKEN_FILE="/etc/security/pam_llng.token"
+    SERVER_GROUP="bastion"
+    TARGET_GROUP="default"
+    TIMEOUT=10
+    VERIFY_SSL=true
+    SSH_OPTIONS="-o ConnectTimeout=10"
+    DEBUG=false
+
+SSH Configuration (bastion ~/.ssh/config):
+  Host backend-*
+    ProxyCommand $PROG_NAME %h %p
+
+SSH Configuration (backend /etc/ssh/sshd_config):
+  AcceptEnv LLNG_BASTION_JWT
+
+EOF
+}
+
+# Parse arguments
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            -d|--debug)
+                DEBUG=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -V|--version)
+                echo "$PROG_NAME version $VERSION"
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Remaining arguments
+    TARGET_HOST="${1:-}"
+    TARGET_PORT="${2:-22}"
+}
+
+# Main
+main() {
+    parse_args "$@"
+    load_config
+
+    # Validate required configuration
+    if [ -z "$PORTAL_URL" ]; then
+        error "PORTAL_URL not configured. Set it in $CONFIG_FILE"
+        exit 1
+    fi
+
+    # Determine mode based on arguments and environment
+    if [ -n "$TARGET_HOST" ]; then
+        # ProxyCommand mode: target specified as argument
+        debug "ProxyCommand mode: $TARGET_HOST:$TARGET_PORT"
+        proxy_command_mode "$TARGET_HOST" "$TARGET_PORT"
+    elif [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+        # ForceCommand mode: parse SSH_ORIGINAL_COMMAND
+        debug "ForceCommand mode"
+        force_command_mode
+    else
+        # Interactive mode: prompt for target
+        debug "Interactive mode"
+        interactive_mode
+    fi
+}
+
+main "$@"
