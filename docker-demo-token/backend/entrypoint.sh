@@ -76,12 +76,23 @@ else
     exit 1
 fi
 
-# Step 3: Initiate Device Authorization Grant
+# Step 3: Initiate Device Authorization Grant with PKCE
 echo "Initiating Device Authorization Grant..."
+
+# Generate PKCE code_verifier (43-128 chars, URL-safe)
+CODE_VERIFIER=$(head -c 32 /dev/urandom | base64 | tr -d '=' | tr '+/' '-_')
+echo "  Generated code_verifier"
+
+# Calculate code_challenge = BASE64URL(SHA256(code_verifier))
+CODE_CHALLENGE=$(echo -n "$CODE_VERIFIER" | openssl sha256 -binary | base64 | tr -d '=' | tr '+/' '-_')
+echo "  Generated code_challenge"
+
 DEVICE_RESP=$(curl -s -X POST "$PORTAL_URL/oauth2/device" \
     -d "client_id=$CLIENT_ID" \
     -d "client_secret=$CLIENT_SECRET" \
-    -d "scope=pam pam:server")
+    -d "scope=pam pam:server" \
+    -d "code_challenge=$CODE_CHALLENGE" \
+    -d "code_challenge_method=S256")
 echo "  Device response: $DEVICE_RESP"
 
 DEVICE_CODE=$(echo "$DEVICE_RESP" | jq -r '.device_code // empty')
@@ -124,7 +135,8 @@ for i in {1..30}; do
         -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
         -d "device_code=$DEVICE_CODE" \
         -d "client_id=$CLIENT_ID" \
-        -d "client_secret=$CLIENT_SECRET")
+        -d "client_secret=$CLIENT_SECRET" \
+        -d "code_verifier=$CODE_VERIFIER")
 
     ACCESS_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.access_token // empty')
 
