@@ -86,13 +86,13 @@ error() {
     echo "[ERROR] $*" >&2
 }
 
-# Build curl options
-curl_opts() {
-    local opts=("-s" "-f" "--connect-timeout" "$TIMEOUT")
+# Build curl options array
+# Returns options via the global CURL_OPTS array (safer than mapfile)
+build_curl_opts() {
+    CURL_OPTS=("-s" "-f" "--connect-timeout" "$TIMEOUT")
     if [ "$VERIFY_SSL" = "false" ]; then
-        opts+=("-k")
+        CURL_OPTS+=("-k")
     fi
-    printf '%s\n' "${opts[@]}"
 }
 
 # Get server token
@@ -127,8 +127,7 @@ request_bastion_jwt() {
     debug "Requesting bastion JWT for user $user to host $target_host"
 
     local response
-    local curl_args
-    mapfile -t curl_args < <(curl_opts)
+    build_curl_opts
 
     # Build JSON payload safely using jq to avoid injection
     local json_payload
@@ -139,7 +138,7 @@ request_bastion_jwt() {
         --arg bastion_group "$SERVER_GROUP" \
         '{user: $user, target_host: $target_host, target_group: $target_group, bastion_group: $bastion_group}')
 
-    response=$(curl "${curl_args[@]}" \
+    response=$(curl "${CURL_OPTS[@]}" \
         -X POST \
         -H "Authorization: Bearer $server_token" \
         -H "Content-Type: application/json" \
