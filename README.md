@@ -613,23 +613,22 @@ SSH connections to backends come from authorized bastions with valid LLNG sessio
 
 ### How It Works
 
-```
-┌─────────┐     ┌─────────┐     ┌──────────┐     ┌─────────┐
-│  User   │────▶│ Bastion │────▶│   LLNG   │     │ Backend │
-│         │ SSH │         │ JWT │  Portal  │     │         │
-│         │     │         │ req │          │     │         │
-└─────────┘     └────┬────┘     └────┬─────┘     └────┬────┘
-                     │               │                 │
-                     │  JWT token    │                 │
-                     │◀──────────────│                 │
-                     │               │                 │
-                     │  SSH + JWT    │                 │
-                     │──────────────────────────────▶ │
-                     │               │                 │
-                     │               │  Verify JWT     │
-                     │               │  (JWKS cache)   │
-                     │  Access granted                 │
-                     │◀─────────────────────────────── │
+```mermaid
+sequenceDiagram
+    participant User
+    participant Bastion
+    participant LLNG as LLNG Portal
+    participant Backend
+
+    User->>Bastion: SSH connection
+    Note over User,Bastion: Certificate or token auth
+
+    Bastion->>LLNG: POST /pam/bastion-token
+    LLNG-->>Bastion: Signed JWT
+
+    Bastion->>Backend: SSH + LLNG_BASTION_JWT
+    Note over Backend: Verify JWT signature<br/>(using JWKS cache)
+    Backend-->>Bastion: Access granted
 ```
 
 1. User connects to bastion via SSH (with certificate or token)

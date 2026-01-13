@@ -163,20 +163,15 @@ The bastion JWT contains:
 
 Server groups allow different authorization rules for different environments:
 
-```
-LLNG Manager Configuration:
+**LLNG Manager Configuration** → Server Groups:
 
-Server Groups:
-┌────────────────┬─────────────────────────────────────┐
-│ Group Name     │ Authorization Rule                  │
-├────────────────┼─────────────────────────────────────┤
-│ production     │ $hGroup->{sre} or $hGroup->{oncall} │
-│ staging        │ $hGroup->{sre} or $hGroup->{dev}    │
-│ development    │ $hGroup->{dev}                      │
-│ bastion        │ $hGroup->{employees}                │
-│ default        │ 0  (deny all)                       │
-└────────────────┴─────────────────────────────────────┘
-```
+| Group Name | Authorization Rule |
+|------------|-------------------|
+| `production` | `$hGroup->{sre} or $hGroup->{oncall}` |
+| `staging` | `$hGroup->{sre} or $hGroup->{dev}` |
+| `development` | `$hGroup->{dev}` |
+| `bastion` | `$hGroup->{employees}` |
+| `default` | `0` (deny all) |
 
 Each server enrolls with its server_group:
 
@@ -285,24 +280,33 @@ See [session-recording.md](session-recording.md) for details.
 
 ### Defense in Depth
 
-```
-Layer 1: Network
-  └── Firewall rules, VPN, network segmentation
+```mermaid
+flowchart TB
+    subgraph L1["Layer 1: Network"]
+        N[Firewall rules, VPN, network segmentation]
+    end
 
-Layer 2: Bastion
-  └── LLNG authentication, session recording, audit logs
+    subgraph L2["Layer 2: Bastion"]
+        B[LLNG authentication, session recording, audit logs]
+    end
 
-Layer 3: Bastion JWT
-  └── Cryptographic proof of bastion origin, prevents direct backend access
+    subgraph L3["Layer 3: Bastion JWT"]
+        J[Cryptographic proof of bastion origin]
+    end
 
-Layer 4: Authorization
-  └── Server groups, per-user rules, time-based access
+    subgraph L4["Layer 4: Authorization"]
+        A[Server groups, per-user rules, time-based access]
+    end
 
-Layer 5: Backend
-  └── LLNG authorization, JWT verification, minimal privileges, auto-provisioning
+    subgraph L5["Layer 5: Backend"]
+        BE[LLNG authorization, JWT verification, auto-provisioning]
+    end
 
-Layer 6: Audit
-  └── Centralized logging, session replay, compliance reports
+    subgraph L6["Layer 6: Audit"]
+        AU[Centralized logging, session replay, compliance]
+    end
+
+    L1 --> L2 --> L3 --> L4 --> L5 --> L6
 ```
 
 ### Token Security
