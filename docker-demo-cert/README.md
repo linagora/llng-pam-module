@@ -8,21 +8,22 @@ This Docker Compose demo demonstrates SSH certificate authentication with LemonL
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph Docker["Docker Network (llng-net)"]
+        SSO["SSO<br/>(LLNG)<br/>:80"]
+        Bastion["Bastion<br/>(SSH)<br/>:2222"]
+        Backend["Backend<br/>(SSH)<br/>:22"]
+    end
+
+    User["User"] -->|:80| SSO
+    User -->|:2222| Bastion
+    Bastion -->|SSH + JWT| Backend
+
+    style Backend fill:#f9f,stroke:#333
 ```
-                    ┌─────────────────────────────────────────────────────┐
-                    │                   Docker Network                     │
-                    │                                                      │
-┌──────────┐        │  ┌───────────┐      ┌───────────┐      ┌──────────┐ │
-│  User    │        │  │    SSO    │      │  Bastion  │      │ Backend  │ │
-│          │───────────│  (LLNG)   │      │   (SSH)   │─────▶│  (SSH)   │ │
-│          │  :80   │  │  :80      │      │  :2222    │      │  :22     │ │
-└──────────┘        │  └───────────┘      └───────────┘      └──────────┘ │
-     │              │        │                  │                  │      │
-     │              │        └──────────────────┴──────────────────┘      │
-     │              │                    llng-net                          │
-     └──────────────┴─────────────────────────────────────────────────────┘
-           :2222 (bastion only - backend has no external port)
-```
+
+> Note: Only bastion port 2222 is exposed externally. Backend has no external port.
 
 ## Quick Start
 
@@ -90,11 +91,19 @@ ssh -p 2222 dwho@localhost
 
 ### 5. From bastion, connect to backend
 
-First, get a backend certificate and copy it to the bastion, then:
+The backend server requires a signed JWT from the bastion to prove the connection
+comes from an authorized bastion server. Use the `llng-ssh-proxy` command:
+
 ```bash
-# On bastion
-ssh dwho@backend
+# On bastion - the proxy automatically gets a JWT and forwards it
+llng-ssh-proxy backend
+
+# Or using SSH with ProxyCommand
+ssh -o ProxyCommand='llng-ssh-proxy %h %p' dwho@backend
 ```
+
+**Note**: Direct SSH connections to the backend (without the bastion JWT) will be rejected,
+even with a valid SSH certificate. This ensures backends only accept connections from authorized bastions.
 
 ## Demo Users
 
@@ -110,29 +119,22 @@ ssh dwho@backend
 
 SSH certificate authentication relies on a **Certificate Authority (CA)** that both the user and the server trust:
 
-```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│    User     │         │  LLNG SSO   │         │ SSH Server  │
-│             │         │   (CA)      │         │             │
-│ Has: key    │         │ Has: CA key │         │ Trusts: CA  │
-│             │         │             │         │             │
-└──────┬──────┘         └──────┬──────┘         └──────┬──────┘
-       │                       │                       │
-       │  1. Send public key   │                       │
-       │──────────────────────▶│                       │
-       │                       │                       │
-       │  2. Return signed     │                       │
-       │     certificate       │                       │
-       │◀──────────────────────│                       │
-       │                       │                       │
-       │  3. Present certificate                       │
-       │──────────────────────────────────────────────▶│
-       │                       │                       │
-       │                       │  4. Verify signature  │
-       │                       │     with CA public key│
-       │                       │                       │
-       │  5. Access granted    │                       │
-       │◀──────────────────────────────────────────────│
+```mermaid
+sequenceDiagram
+    participant User
+    participant CA as LLNG SSO (CA)
+    participant Server as SSH Server
+
+    Note over User: Has: SSH key pair
+    Note over CA: Has: CA signing key
+    Note over Server: Trusts: CA public key
+
+    User->>CA: 1. Send public key
+    CA-->>User: 2. Return signed certificate
+
+    User->>Server: 3. Present certificate
+    Note over Server: 4. Verify signature<br/>with CA public key
+    Server-->>User: 5. Access granted
 ```
 
 ### CA Configuration in this demo
@@ -430,6 +432,37 @@ account    required     pam_llng.so
 session    required     pam_unix.so
 ```
 
+## Bastion JWT Verification
+
+The backend server is configured to require a JWT from the bastion server. This provides
+cryptographic proof that the SSH connection originates from an authorized bastion.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Bastion
+    participant LLNG as LLNG Portal
+    participant Backend
+
+    User->>Bastion: SSH with certificate
+    Bastion->>LLNG: Request JWT (/pam/bastion-token)
+    LLNG-->>Bastion: Signed JWT
+
+    Bastion->>Backend: SSH + LLNG_BASTION_JWT
+
+    Note over Backend: Verify JWT using<br/>cached JWKS (offline)
+    Backend-->>Bastion: Access granted
+```
+
+### How it works:
+
+1. User SSH to bastion with SSH certificate
+2. From bastion, user runs `llng-ssh-proxy backend`
+3. Proxy requests a signed JWT from LLNG `/pam/bastion-token`
+4. Proxy connects to backend with JWT in `LLNG_BASTION_JWT` env var
+5. Backend verifies JWT signature using cached JWKS (offline capable)
+6. If valid, SSH connection proceeds; otherwise, denied
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -438,9 +471,11 @@ session    required     pam_unix.so
 | `/ssh/ca` | GET | Get SSH CA public key |
 | `/ssh/sign` | POST | Sign a user's public key |
 | `/pam/authorize` | POST | Check user authorization |
+| `/pam/bastion-token` | POST | Get signed JWT for bastion-to-backend auth |
 | `/oauth2/device` | POST | Start device authorization |
 | `/device` | GET/POST | User device verification page |
 | `/oauth2/token` | POST | Exchange device code for token |
+| `/.well-known/jwks.json` | GET | Public keys for JWT verification |
 
 ## Troubleshooting
 
@@ -548,3 +583,5 @@ docker exec llng-bastion ls -la /var/cache/pam_llng/
 - Tokens should be rotated regularly
 - Enable `verify_ssl = true` in production
 - Consider enabling audit logging
+- **Bastion JWT**: Backends require a valid JWT from the bastion, preventing direct access even with valid SSH certificates
+- The JWKS cache allows backends to verify JWTs offline (useful for network partitions)

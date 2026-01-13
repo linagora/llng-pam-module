@@ -100,5 +100,20 @@ target_link_libraries(test_token_manager
 )
 add_test(NAME test_token_manager COMMAND test_token_manager)
 
+# Test bastion JWT verification
+add_executable(test_bastion_jwt test_bastion_jwt.c ../src/bastion_jwt.c ../src/jwks_cache.c)
+target_include_directories(test_bastion_jwt PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CURL_INCLUDE_DIRS}
+    ${JSON_C_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_link_libraries(test_bastion_jwt
+    ${CURL_LIBRARIES}
+    ${JSON_C_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+)
+add_test(NAME test_bastion_jwt COMMAND test_bastion_jwt)
+
 # Note: Integration tests require a running LLNG instance
 # and are meant to be run manually

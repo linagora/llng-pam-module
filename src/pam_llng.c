@@ -38,6 +38,8 @@
 #include "rate_limiter.h"
 #include "auth_cache.h"
 #include "token_manager.h"
+#include "bastion_jwt.h"
+#include "jwks_cache.h"
 #ifdef ENABLE_CACHE
 #include "token_cache.h"
 #endif
@@ -59,6 +61,8 @@ typedef struct {
     audit_context_t *audit;
     rate_limiter_t *rate_limiter;
     auth_cache_t *auth_cache;  /* Authorization cache for offline mode */
+    jwks_cache_t *jwks_cache;  /* JWKS cache for bastion JWT verification */
+    bastion_jwt_verifier_t *bastion_jwt_verifier;  /* Bastion JWT verifier */
 #ifdef ENABLE_CACHE
     token_cache_t *cache;
 #endif
@@ -336,6 +340,12 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status)
         if (llng_data->auth_cache) {
             auth_cache_destroy(llng_data->auth_cache);
         }
+        if (llng_data->bastion_jwt_verifier) {
+            bastion_jwt_verifier_destroy(llng_data->bastion_jwt_verifier);
+        }
+        if (llng_data->jwks_cache) {
+            jwks_cache_destroy(llng_data->jwks_cache);
+        }
         if (llng_data->client) {
             llng_client_destroy(llng_data->client);
         }
@@ -535,6 +545,69 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         data->auth_cache = auth_cache_init(data->config.auth_cache_dir);
         if (!data->auth_cache) {
             LLNG_LOG_WARN(pamh, "Failed to initialize auth cache, offline mode disabled");
+        }
+    }
+
+    /* Initialize bastion JWT verification if required */
+    if (data->config.bastion_jwt_required && data->config.bastion_jwt_verify_local) {
+        /* Build JWKS URL from portal_url if not specified */
+        char *jwks_url = data->config.bastion_jwt_jwks_url;
+        char jwks_url_buf[512] = {0};
+        if (!jwks_url && data->config.portal_url) {
+            snprintf(jwks_url_buf, sizeof(jwks_url_buf), "%s/.well-known/jwks.json",
+                     data->config.portal_url);
+            jwks_url = jwks_url_buf;
+        }
+
+        /* Build JWKS cache file path if not specified */
+        char *jwks_cache_file = data->config.bastion_jwt_jwks_cache;
+        char jwks_cache_buf[256] = {0};
+        if (!jwks_cache_file) {
+            snprintf(jwks_cache_buf, sizeof(jwks_cache_buf),
+                     "%s/jwks.json", data->config.cache_dir ? data->config.cache_dir : "/var/cache/pam_llng");
+            jwks_cache_file = jwks_cache_buf;
+        }
+
+        /* Initialize JWKS cache */
+        if (jwks_url) {
+            jwks_cache_config_t jwks_cfg = {
+                .jwks_url = jwks_url,
+                .cache_file = jwks_cache_file,
+                .refresh_interval = data->config.bastion_jwt_cache_ttl,
+                .timeout = data->config.timeout,
+                .verify_ssl = data->config.verify_ssl,
+                .ca_cert = data->config.ca_cert
+            };
+            data->jwks_cache = jwks_cache_init(&jwks_cfg);
+            if (!data->jwks_cache) {
+                LLNG_LOG_WARN(pamh, "Failed to initialize JWKS cache for bastion JWT");
+            }
+        }
+
+        /* Initialize bastion JWT verifier */
+        if (data->jwks_cache) {
+            /* Use portal_url as issuer if not specified */
+            char *issuer = data->config.bastion_jwt_issuer;
+            if (!issuer) {
+                issuer = data->config.portal_url;
+            }
+
+            bastion_jwt_config_t jwt_cfg = {
+                .issuer = issuer,
+                .audience = "pam:bastion-backend",
+                .max_clock_skew = data->config.bastion_jwt_clock_skew,
+                .allowed_bastions = data->config.bastion_jwt_allowed_bastions,
+                .jwks_cache = data->jwks_cache
+            };
+            data->bastion_jwt_verifier = bastion_jwt_verifier_init(&jwt_cfg);
+            if (!data->bastion_jwt_verifier) {
+                LLNG_LOG_WARN(pamh, "Failed to initialize bastion JWT verifier");
+            }
+        }
+
+        if (data->config.bastion_jwt_required && !data->bastion_jwt_verifier) {
+            LLNG_LOG_ERR(pamh, "Bastion JWT verification required but failed to initialize");
+            goto error;
         }
     }
 
@@ -1079,6 +1152,123 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     const char *service = NULL;
     if (pam_get_item(pamh, PAM_SERVICE, (const void **)&service) != PAM_SUCCESS || !service) {
         service = "unknown";
+    }
+
+    /*
+     * Bastion JWT verification for backend servers.
+     * If bastion_jwt_required is enabled, we require a valid JWT from the bastion
+     * server before allowing SSH access. The JWT is passed via the LLNG_BASTION_JWT
+     * environment variable (set by SSH's SendEnv/AcceptEnv).
+     */
+    if (data->config.bastion_jwt_required &&
+        (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0)) {
+
+        const char *bastion_jwt = pam_getenv(pamh, "LLNG_BASTION_JWT");
+
+        if (!bastion_jwt || !*bastion_jwt) {
+            LLNG_LOG_ERR(pamh, "Bastion JWT required but not provided for user %s", user);
+
+            if (data->audit) {
+                audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);
+                audit_event.user = user;
+                audit_event.service = service;
+                audit_event.client_ip = client_ip;
+                audit_event.tty = tty;
+                audit_event.result_code = PAM_PERM_DENIED;
+                audit_event.reason = "Bastion JWT required but not provided";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_PERM_DENIED;
+        }
+
+        /* Verify the JWT */
+        if (data->bastion_jwt_verifier) {
+            bastion_jwt_claims_t claims = {0};
+            bastion_jwt_result_t jwt_result = bastion_jwt_verify(
+                data->bastion_jwt_verifier, bastion_jwt, &claims);
+
+            if (jwt_result != BASTION_JWT_OK) {
+                LLNG_LOG_ERR(pamh, "Bastion JWT verification failed for user %s: %s",
+                             user, bastion_jwt_result_str(jwt_result));
+
+                if (data->audit) {
+                    audit_event_init(&audit_event, AUDIT_SECURITY_ERROR);
+                    audit_event.user = user;
+                    audit_event.service = service;
+                    audit_event.client_ip = client_ip;
+                    audit_event.tty = tty;
+                    audit_event.result_code = PAM_PERM_DENIED;
+                    audit_event.reason = bastion_jwt_result_str(jwt_result);
+                    audit_event_set_end_time(&audit_event);
+                    audit_log_event(data->audit, &audit_event);
+                }
+
+                bastion_jwt_claims_free(&claims);
+                return PAM_PERM_DENIED;
+            }
+
+            /* Verify the JWT subject matches the PAM user */
+            if (!claims.sub || strcmp(claims.sub, user) != 0) {
+                LLNG_LOG_ERR(pamh, "Bastion JWT subject mismatch: expected %s, got %s",
+                             user, claims.sub ? claims.sub : "(null)");
+
+                if (data->audit) {
+                    /* Use AUDIT_AUTHZ_DENIED for authorization failures,
+                     * AUDIT_SECURITY_ERROR is for crypto/verification failures */
+                    audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);
+                    audit_event.user = user;
+                    audit_event.service = service;
+                    audit_event.client_ip = client_ip;
+                    audit_event.tty = tty;
+                    audit_event.result_code = PAM_PERM_DENIED;
+                    audit_event.reason = "Bastion JWT subject mismatch";
+                    audit_event_set_end_time(&audit_event);
+                    audit_log_event(data->audit, &audit_event);
+                }
+
+                bastion_jwt_claims_free(&claims);
+                return PAM_PERM_DENIED;
+            }
+
+            /* Optionally verify the bastion IP matches the connecting client */
+            if (claims.bastion_ip && client_ip && strcmp(client_ip, "local") != 0) {
+                if (strcmp(claims.bastion_ip, client_ip) != 0) {
+                    LLNG_LOG_WARN(pamh, "Bastion IP mismatch: JWT claims %s, connection from %s",
+                                  claims.bastion_ip, client_ip);
+                    /* This is a warning, not an error - the bastion might be behind NAT */
+                }
+            }
+
+            LLNG_LOG_INFO(pamh, "Bastion JWT verified for user %s from bastion %s",
+                          user, claims.bastion_id ? claims.bastion_id : "(unknown)");
+
+            /* Store bastion info in PAM environment for potential use */
+            if (claims.bastion_id) {
+                char env_buf[256];
+                int env_len = snprintf(env_buf, sizeof(env_buf),
+                                       "LLNG_BASTION_ID=%s", claims.bastion_id);
+                if (env_len < 0) {
+                    LLNG_LOG_WARN(pamh,
+                                  "Failed to format LLNG_BASTION_ID environment variable");
+                } else if ((size_t)env_len >= sizeof(env_buf)) {
+                    LLNG_LOG_WARN(pamh,
+                                  "Truncated LLNG_BASTION_ID (length %d, buffer %zu)",
+                                  env_len, sizeof(env_buf));
+                }
+                pam_putenv(pamh, env_buf);
+            }
+
+            bastion_jwt_claims_free(&claims);
+        } else {
+            /*
+             * No local verifier available - this shouldn't happen if
+             * bastion_jwt_required is true, but handle it gracefully.
+             */
+            LLNG_LOG_ERR(pamh, "Bastion JWT required but verifier not initialized");
+            return PAM_SERVICE_ERR;
+        }
     }
 
     /*

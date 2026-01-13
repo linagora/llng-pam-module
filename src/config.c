@@ -128,6 +128,12 @@ void config_init(pam_llng_config_t *config)
     /* Path validation - secure defaults */
     config->approved_shells = strdup(DEFAULT_APPROVED_SHELLS);
     config->approved_home_prefixes = strdup(DEFAULT_APPROVED_HOME_PREFIXES);
+
+    /* Bastion JWT verification - disabled by default */
+    config->bastion_jwt_required = false;
+    config->bastion_jwt_verify_local = true;  /* Local verification preferred */
+    config->bastion_jwt_cache_ttl = 3600;     /* 1 hour JWKS cache */
+    config->bastion_jwt_clock_skew = 60;      /* 1 minute clock skew allowed */
 }
 
 /* Secure free: zero memory before freeing */
@@ -185,6 +191,12 @@ void config_free(pam_llng_config_t *config)
     /* Path validation */
     free(config->approved_shells);
     free(config->approved_home_prefixes);
+
+    /* Bastion JWT verification */
+    free(config->bastion_jwt_issuer);
+    free(config->bastion_jwt_jwks_url);
+    free(config->bastion_jwt_jwks_cache);
+    free(config->bastion_jwt_allowed_bastions);
 
     explicit_bzero(config, sizeof(*config));
 }
@@ -522,6 +534,35 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     else if (strcmp(key, "approved_home_prefixes") == 0) {
         free(config->approved_home_prefixes);
         config->approved_home_prefixes = strdup(value);
+    }
+    /* Bastion JWT verification settings */
+    else if (strcmp(key, "bastion_jwt_required") == 0 || strcmp(key, "require_bastion") == 0) {
+        config->bastion_jwt_required = parse_bool(value);
+    }
+    else if (strcmp(key, "bastion_jwt_verify_local") == 0) {
+        config->bastion_jwt_verify_local = parse_bool(value);
+    }
+    else if (strcmp(key, "bastion_jwt_issuer") == 0) {
+        free(config->bastion_jwt_issuer);
+        config->bastion_jwt_issuer = strdup(value);
+    }
+    else if (strcmp(key, "bastion_jwt_jwks_url") == 0) {
+        free(config->bastion_jwt_jwks_url);
+        config->bastion_jwt_jwks_url = strdup(value);
+    }
+    else if (strcmp(key, "bastion_jwt_jwks_cache") == 0) {
+        free(config->bastion_jwt_jwks_cache);
+        config->bastion_jwt_jwks_cache = strdup(value);
+    }
+    else if (strcmp(key, "bastion_jwt_cache_ttl") == 0) {
+        config->bastion_jwt_cache_ttl = parse_int(value, 3600, 60, 86400);
+    }
+    else if (strcmp(key, "bastion_jwt_clock_skew") == 0) {
+        config->bastion_jwt_clock_skew = parse_int(value, 60, 0, 600);
+    }
+    else if (strcmp(key, "bastion_jwt_allowed_bastions") == 0 || strcmp(key, "allowed_bastions") == 0) {
+        free(config->bastion_jwt_allowed_bastions);
+        config->bastion_jwt_allowed_bastions = strdup(value);
     }
     /* Unknown keys are silently ignored */
 
