@@ -85,7 +85,7 @@ Here's a detailed comparison:
 | **Web Single Sign-On** | ✅ | ❌ |
 | **SAML/OIDC Provider** | ✅ | Limited |
 | **Centralized Access Policies** | ✅ | ✅ |
-| **Password Vault** | ❌ | ✅ |
+| **Password Vault** | Unneeded (SSH CA) | ✅ |
 | **RDP Recording** | ❌ | ✅ |
 | **License** | AGPL (Free) | Proprietary |
 | **Typical Cost** | Free | 50-100€/user/year |
