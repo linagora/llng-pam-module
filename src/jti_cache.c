@@ -135,6 +135,10 @@ jti_cache_t *jti_cache_create(const jti_cache_config_t *config)
 
     if (config && config->persist_path) {
         cache->persist_path = strdup(config->persist_path);
+        if (!cache->persist_path) {
+            /* Log warning but continue - persistence is optional */
+            fprintf(stderr, "jti_cache: persistence disabled (memory allocation failed)\n");
+        }
         /* Note: persistence not implemented yet, reserved for future */
     }
 
@@ -190,8 +194,9 @@ jti_cache_result_t jti_cache_check_and_add(jti_cache_t *cache,
 
     pthread_mutex_lock(&cache->lock);
 
-    /* Periodic cleanup */
-    if (now - cache->last_cleanup >= cache->cleanup_interval) {
+    /* Periodic cleanup - handle clock adjustments */
+    if (now < cache->last_cleanup ||
+        now - cache->last_cleanup >= (time_t)cache->cleanup_interval) {
         cleanup_expired_locked(cache, now);
     }
 

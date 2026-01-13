@@ -449,15 +449,24 @@ bastion_jwt_result_t bastion_jwt_verify(bastion_jwt_verifier_t *verifier,
     }
 
     /* Check for replay attack if JTI cache is enabled */
-    if (verifier->jti_cache && claims->jti) {
-        jti_cache_result_t jti_result = jti_cache_check_and_add(
-            verifier->jti_cache, claims->jti, claims->exp);
+    if (verifier->jti_cache) {
+        if (claims->jti) {
+            jti_cache_result_t jti_result = jti_cache_check_and_add(
+                verifier->jti_cache, claims->jti, claims->exp);
 
-        if (jti_result == JTI_CACHE_REPLAY_DETECTED) {
-            bastion_jwt_claims_free(claims);
-            return BASTION_JWT_REPLAY_DETECTED;
+            if (jti_result == JTI_CACHE_REPLAY_DETECTED) {
+                bastion_jwt_claims_free(claims);
+                return BASTION_JWT_REPLAY_DETECTED;
+            } else if (jti_result != JTI_CACHE_OK) {
+                /* Log non-fatal cache errors (full, internal error, etc.) */
+                fprintf(stderr, "bastion_jwt: JTI cache warning: %s (jti=%s)\n",
+                        jti_cache_result_str(jti_result), claims->jti);
+            }
+        } else {
+            /* Replay detection configured but token has no jti claim */
+            fprintf(stderr, "bastion_jwt: warning: replay detection enabled but "
+                    "token has no 'jti' claim, skipping replay check\n");
         }
-        /* Other JTI cache errors (full, etc.) are not fatal - log but continue */
     }
 
     return BASTION_JWT_OK;

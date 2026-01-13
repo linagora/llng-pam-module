@@ -369,7 +369,33 @@ static int test_concurrent_access(void)
     return 1;
 }
 
-/* Test concurrent replay detection */
+/* Thread data for concurrent replay test */
+typedef struct {
+    jti_cache_t *cache;
+    const char *shared_jti;
+    time_t exp;
+    int replay_detected;
+    int success;
+} replay_thread_data_t;
+
+/* Thread function for concurrent replay test */
+static void *replay_thread(void *arg)
+{
+    replay_thread_data_t *data = (replay_thread_data_t *)arg;
+
+    jti_cache_result_t result = jti_cache_check_and_add(
+        data->cache, data->shared_jti, data->exp);
+
+    if (result == JTI_CACHE_REPLAY_DETECTED) {
+        data->replay_detected = 1;
+    } else if (result == JTI_CACHE_OK) {
+        data->success = 1;
+    }
+
+    return NULL;
+}
+
+/* Test concurrent replay detection with actual threads */
 static int test_concurrent_replay(void)
 {
     jti_cache_t *cache = jti_cache_create(NULL);
@@ -378,37 +404,40 @@ static int test_concurrent_replay(void)
     time_t exp = time(NULL) + 3600;
     const char *shared_jti = "shared-concurrent-jti";
 
-    /* Add the JTI first */
-    ASSERT(jti_cache_check_and_add(cache, shared_jti, exp) == JTI_CACHE_OK);
-
-    /* Multiple threads try to use the same JTI */
-    #define REPLAY_THREADS 4
+    #define REPLAY_THREADS 8
 
     pthread_t threads[REPLAY_THREADS];
-    thread_data_t thread_data[REPLAY_THREADS];
+    replay_thread_data_t thread_data[REPLAY_THREADS];
 
-    /* Custom thread function that tries to replay same JTI */
+    /* Initialize thread data - all threads will try the same JTI */
     for (int i = 0; i < REPLAY_THREADS; i++) {
         thread_data[i].cache = cache;
-        thread_data[i].thread_id = i;
-        thread_data[i].replays_detected = 0;
-        thread_data[i].successes = 0;
+        thread_data[i].shared_jti = shared_jti;
+        thread_data[i].exp = exp;
+        thread_data[i].replay_detected = 0;
+        thread_data[i].success = 0;
     }
 
-    /* All threads try the same JTI */
+    /* Start all threads simultaneously */
     for (int i = 0; i < REPLAY_THREADS; i++) {
-        jti_cache_result_t result = jti_cache_check_and_add(cache, shared_jti, exp);
-        if (result == JTI_CACHE_REPLAY_DETECTED) {
-            thread_data[i].replays_detected = 1;
-        }
+        pthread_create(&threads[i], NULL, replay_thread, &thread_data[i]);
     }
 
-    /* All should detect replay */
+    /* Wait for all threads */
+    for (int i = 0; i < REPLAY_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    /* Exactly one thread should succeed, all others should detect replay */
+    int total_successes = 0;
     int total_replays = 0;
     for (int i = 0; i < REPLAY_THREADS; i++) {
-        total_replays += thread_data[i].replays_detected;
+        total_successes += thread_data[i].success;
+        total_replays += thread_data[i].replay_detected;
     }
-    ASSERT(total_replays == REPLAY_THREADS);
+
+    ASSERT(total_successes == 1);  /* Only one thread wins the race */
+    ASSERT(total_replays == REPLAY_THREADS - 1);  /* All others detect replay */
 
     jti_cache_destroy(cache);
     return 1;

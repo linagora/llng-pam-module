@@ -61,8 +61,11 @@ void jti_cache_destroy(jti_cache_t *cache);
  *   exp   - Expiration time of the JWT (entries are auto-removed after this)
  *
  * Returns:
- *   JTI_CACHE_OK           - JTI was not in cache, has been added
- *   JTI_CACHE_REPLAY_DETECTED - JTI was already in cache (replay attempt)
+ *   JTI_CACHE_OK           - JTI is accepted. This is returned when:
+ *                            - JTI was not in cache and has been added
+ *                            - JTI was already expired (not cached, accepted)
+ *                            - Existing expired entry was reused
+ *   JTI_CACHE_REPLAY_DETECTED - JTI was already in cache and not expired (replay attempt)
  *   JTI_CACHE_FULL         - Cache is full and cleanup didn't free space
  *   JTI_CACHE_INVALID_PARAM - Invalid parameters
  */
