@@ -40,12 +40,35 @@ VERIFY_SSL=true
 SSH_OPTIONS=""
 DEBUG=false
 
-# Configuration file
+# Configuration file (must be owned by root and not group/world-writable)
 CONFIG_FILE="/etc/llng/ssh-proxy.conf"
 
-# Load configuration
+# Load configuration securely
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
+        # Security: verify config file permissions before sourcing
+        local file_stat
+        file_stat=$(stat -c '%u:%a' "$CONFIG_FILE" 2>/dev/null)
+        if [ -z "$file_stat" ]; then
+            error "Unable to check permissions for config file: $CONFIG_FILE"
+            exit 1
+        fi
+
+        local owner="${file_stat%%:*}"
+        local perms="${file_stat##*:}"
+
+        # Must be owned by root (uid 0)
+        if [ "$owner" != "0" ]; then
+            error "Insecure config file ownership (must be root): $CONFIG_FILE"
+            exit 1
+        fi
+
+        # Check for group-writable (x2x) or world-writable (xx2)
+        if [ $((perms % 100 / 10 & 2)) -ne 0 ] || [ $((perms % 10 & 2)) -ne 0 ]; then
+            error "Insecure config file permissions (group/world-writable): $CONFIG_FILE"
+            exit 1
+        fi
+
         # shellcheck source=/dev/null
         source "$CONFIG_FILE"
     fi
@@ -107,16 +130,20 @@ request_bastion_jwt() {
     local curl_args
     mapfile -t curl_args < <(curl_opts)
 
+    # Build JSON payload safely using jq to avoid injection
+    local json_payload
+    json_payload=$(jq -n \
+        --arg user "$user" \
+        --arg target_host "$target_host" \
+        --arg target_group "$TARGET_GROUP" \
+        --arg bastion_group "$SERVER_GROUP" \
+        '{user: $user, target_host: $target_host, target_group: $target_group, bastion_group: $bastion_group}')
+
     response=$(curl "${curl_args[@]}" \
         -X POST \
         -H "Authorization: Bearer $server_token" \
         -H "Content-Type: application/json" \
-        -d "{
-            \"user\": \"$user\",
-            \"target_host\": \"$target_host\",
-            \"target_group\": \"$TARGET_GROUP\",
-            \"bastion_group\": \"$SERVER_GROUP\"
-        }" \
+        -d "$json_payload" \
         "${PORTAL_URL}/pam/bastion-token" 2>&1) || {
         error "Failed to request bastion JWT: $response"
         exit 1

@@ -1000,6 +1000,16 @@ sub bastionToken {
     my $now     = time();
     my $exp     = $now + $jwt_ttl;
 
+    # Generate unique JWT ID (must be cryptographically secure)
+    my $jti = $self->_generateUUID();
+    unless ($jti) {
+        return $self->p->sendJSONresponse(
+            $req,
+            { error => 'Failed to generate secure token ID' },
+            code => 500
+        );
+    }
+
     # Build JWT claims
     my $claims = {
         iss          => $self->conf->{portal},                 # Issuer: LLNG portal URL
@@ -1007,7 +1017,7 @@ sub bastionToken {
         aud          => 'pam:bastion-backend',                  # Audience
         exp          => $exp,                                   # Expiration
         iat          => $now,                                   # Issued at
-        jti          => $self->_generateUUID(),                 # Unique ID
+        jti          => $jti,                                   # Unique ID
         bastion_id   => $bastion_id,                            # Bastion server ID
         bastion_group => $server_group,                         # Bastion server group
         target_host  => $target_host,                           # Target backend
@@ -1064,17 +1074,35 @@ sub bastionToken {
     );
 }
 
-# Generate a UUID v4
+# Generate a UUID v4 using cryptographically secure random bytes
 sub _generateUUID {
     my ($self) = @_;
 
-    # Use random bytes if available
+    # Use cryptographically secure random bytes (required for JWT jti claim)
     my @bytes;
     if ( eval { require Crypt::URandom; 1 } ) {
         @bytes = unpack( 'C16', Crypt::URandom::urandom(16) );
     }
+    elsif ( -r '/dev/urandom' ) {
+        # Fallback to /dev/urandom if Crypt::URandom not available
+        open my $fh, '<:raw', '/dev/urandom'
+          or do {
+            $self->logger->error(
+                'PAM bastion-token: Cannot open /dev/urandom for UUID generation'
+            );
+            return undef;
+          };
+        read $fh, my $buf, 16;
+        close $fh;
+        @bytes = unpack( 'C16', $buf );
+    }
     else {
-        @bytes = map { int( rand(256) ) } ( 1 .. 16 );
+        # No secure random source available
+        $self->logger->error(
+            'PAM bastion-token: No cryptographically secure random source available '
+              . '(install Crypt::URandom or ensure /dev/urandom is readable)'
+        );
+        return undef;
     }
 
     # Set version 4 (random)
