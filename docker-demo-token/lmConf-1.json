@@ -126,7 +126,7 @@
   "oidcOPMetaDataJSON": {},
   "oidcOPMetaDataJWKS": {},
 
-  "customPlugins": "::Plugins::PamAccess ::Plugins::OIDCDeviceAuthorization",
+  "customPlugins": "::Plugins::OIDCDeviceAuthorization",
 
   "portalDisplayPamAccess": 1,
   "portalDisplaySshCa": 1,
