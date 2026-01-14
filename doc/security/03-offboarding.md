@@ -204,7 +204,7 @@ A connaissait le `client_secret` du client OIDC. Bien que la révocation LLNG em
 
 2. **Mettre à jour la configuration sur tous les serveurs de la zone** :
    ```bash
-   # /etc/security/pam_llng.conf
+   # /etc/open-bastion/openbastion.conf
    client_secret = <nouveau_secret>
    ```
 

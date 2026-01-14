@@ -1,4 +1,4 @@
-# Tests for pam_llng
+# Tests for pam_openbastion
 
 # Test configuration parsing
 add_executable(test_config test_config.c ../src/config.c)
@@ -43,9 +43,9 @@ target_link_libraries(test_secret_store ${OPENSSL_LIBRARIES})
 add_test(NAME test_secret_store COMMAND test_secret_store)
 
 # Test NSS module helper functions
-add_executable(test_nss_llng test_nss_llng.c)
-target_include_directories(test_nss_llng PRIVATE ${CMAKE_SOURCE_DIR}/include)
-add_test(NAME test_nss_llng COMMAND test_nss_llng)
+add_executable(test_nss_openbastion test_nss_openbastion.c)
+target_include_directories(test_nss_openbastion PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_nss_openbastion COMMAND test_nss_openbastion)
 
 # Test path validation
 add_executable(test_path_validator test_path_validator.c ../src/config.c)
@@ -57,21 +57,21 @@ add_executable(test_username_validator test_username_validator.c)
 target_include_directories(test_username_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_username_validator COMMAND test_username_validator)
 
-# Test llng_client structures and functions
-add_executable(test_llng_client test_llng_client.c ../src/llng_client.c ../src/jwt_utils.c)
-target_include_directories(test_llng_client PRIVATE
+# Test ob_client structures and functions
+add_executable(test_ob_client test_ob_client.c ../src/ob_client.c ../src/jwt_utils.c)
+target_include_directories(test_ob_client PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
     ${JSON_C_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIRS}
 )
-target_link_libraries(test_llng_client
+target_link_libraries(test_ob_client
     ${CURL_LIBRARIES}
     ${JSON_C_LIBRARIES}
     ${OPENSSL_LIBRARIES}
     pthread
 )
-add_test(NAME test_llng_client COMMAND test_llng_client)
+add_test(NAME test_ob_client COMMAND test_ob_client)
 
 # Test authorization cache
 add_executable(test_auth_cache test_auth_cache.c ../src/auth_cache.c)
@@ -124,5 +124,5 @@ target_include_directories(test_jti_cache PRIVATE
 target_link_libraries(test_jti_cache pthread)
 add_test(NAME test_jti_cache COMMAND test_jti_cache)
 
-# Note: Integration tests require a running LLNG instance
+# Note: Integration tests require a running Open Bastion instance
 # and are meant to be run manually

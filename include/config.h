@@ -1,5 +1,5 @@
 /*
- * config.h - Configuration parsing for LemonLDAP::NG PAM module
+ * config.h - Configuration parsing for Open Bastion PAM module
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -13,7 +13,7 @@
 /* Configuration structure */
 typedef struct {
     /* Required settings */
-    char *portal_url;        /* LLNG portal URL */
+    char *portal_url;        /* Open Bastion portal URL */
     char *client_id;         /* OIDC client ID */
     char *client_secret;     /* OIDC client secret */
 
@@ -30,7 +30,7 @@ typedef struct {
 
     /* Cache settings (for token cache) */
     bool cache_enabled;      /* Enable token caching (default: true) */
-    char *cache_dir;         /* Cache directory (default: /var/cache/pam_llng) */
+    char *cache_dir;         /* Cache directory (default: /var/cache/open-bastion) */
     int cache_ttl;           /* Cache TTL in seconds (default: 300) */
     int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
     char *high_risk_services; /* Comma-separated list of high-risk PAM services */
@@ -39,8 +39,8 @@ typedef struct {
 
     /* Authorization cache settings (for offline mode) */
     bool auth_cache_enabled;        /* Enable authorization caching (default: true) */
-    char *auth_cache_dir;           /* Auth cache directory (default: /var/cache/pam_llng/auth) */
-    char *auth_cache_force_online;  /* Force-online trigger file (default: /etc/security/pam_llng.force_online) */
+    char *auth_cache_dir;           /* Auth cache directory (default: /var/cache/open-bastion/auth) */
+    char *auth_cache_force_online;  /* Force-online trigger file (default: /etc/open-bastion/force_online) */
 
     /* Authorization mode */
     bool authorize_only;     /* Only check authorization, no password (for SSH keys) */
@@ -56,7 +56,7 @@ typedef struct {
 
     /* Rate limiting */
     bool rate_limit_enabled;        /* Enable rate limiting (default: true) */
-    char *rate_limit_state_dir;     /* State directory (default: /var/lib/pam_llng/ratelimit) */
+    char *rate_limit_state_dir;     /* State directory (default: /var/lib/open-bastion/ratelimit) */
     int rate_limit_max_attempts;    /* Max failures before lockout (default: 5) */
     int rate_limit_initial_lockout; /* Initial lockout seconds (default: 30) */
     int rate_limit_max_lockout;     /* Maximum lockout seconds (default: 3600) */
@@ -71,7 +71,7 @@ typedef struct {
     /* Secret storage */
     bool secrets_encrypted;         /* Encrypt secrets at rest (default: true) */
     bool secrets_use_keyring;       /* Use kernel keyring (default: true) */
-    char *secrets_keyring_name;     /* Keyring name (default: "pam_llng") */
+    char *secrets_keyring_name;     /* Keyring name (default: "open-bastion") */
 
     /* Webhook notifications */
     bool notify_enabled;            /* Enable webhook notifications (default: false) */
@@ -97,7 +97,7 @@ typedef struct {
     bool bastion_jwt_verify_local;  /* Verify JWT locally with JWKS (default: true) */
     char *bastion_jwt_issuer;       /* Expected JWT issuer (LLNG portal URL) */
     char *bastion_jwt_jwks_url;     /* JWKS endpoint URL (default: portal_url/.well-known/jwks.json) */
-    char *bastion_jwt_jwks_cache;   /* Local JWKS cache path (default: /var/cache/pam_llng/jwks.json) */
+    char *bastion_jwt_jwks_cache;   /* Local JWKS cache path (default: /var/cache/open-bastion/jwks.json) */
     int bastion_jwt_cache_ttl;      /* JWKS cache TTL in seconds (default: 3600) */
     int bastion_jwt_clock_skew;     /* Allowed clock skew in seconds (default: 60) */
     char *bastion_jwt_allowed_bastions; /* Comma-separated list of allowed bastion IDs */
@@ -106,35 +106,35 @@ typedef struct {
     bool bastion_jwt_replay_detection;     /* Enable JTI replay detection (default: true) */
     int bastion_jwt_replay_cache_size;     /* Max JTI cache entries (default: 10000) */
     int bastion_jwt_replay_cleanup_interval; /* Cleanup interval in seconds (default: 60) */
-} pam_llng_config_t;
+} pam_openbastion_config_t;
 
 /*
  * Load configuration from file
  * Returns 0 on success, -1 on error
  */
-int config_load(const char *filename, pam_llng_config_t *config);
+int config_load(const char *filename, pam_openbastion_config_t *config);
 
 /*
  * Parse PAM module arguments
  * Returns 0 on success, -1 on error
  */
-int config_parse_args(int argc, const char **argv, pam_llng_config_t *config);
+int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *config);
 
 /*
  * Free configuration structure
  */
-void config_free(pam_llng_config_t *config);
+void config_free(pam_openbastion_config_t *config);
 
 /*
  * Initialize configuration with defaults
  */
-void config_init(pam_llng_config_t *config);
+void config_init(pam_openbastion_config_t *config);
 
 /*
  * Validate configuration
  * Returns 0 if valid, -1 if invalid (with error logged)
  */
-int config_validate(const pam_llng_config_t *config);
+int config_validate(const pam_openbastion_config_t *config);
 
 /*
  * Validate shell path against approved shells list

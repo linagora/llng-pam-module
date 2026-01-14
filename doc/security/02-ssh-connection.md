@@ -64,7 +64,7 @@ LLNG vérifie :
 ### Configuration
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 portal_url = https://auth.example.com
 server_group = production
 verify_ssl = true
@@ -72,8 +72,8 @@ verify_ssl = true
 
 ```
 # /etc/pam.d/sshd
-auth       required     pam_llng.so
-account    required     pam_llng.so
+auth       required     pam_openbastion.so
+account    required     pam_openbastion.so
 ```
 
 ---
@@ -116,7 +116,7 @@ Le module PAM extrait les informations via les variables d'environnement SSH :
 - `SSH_CERT_CA_KEY_FP` : empreinte de la CA
 
 ```c
-// src/pam_llng.c:616-631
+// src/pam_openbastion.c:616-631
 const char *key_id = pam_getenv(pamh, "SSH_CERT_KEY_ID");
 const char *serial = pam_getenv(pamh, "SSH_CERT_SERIAL");
 const char *principals = pam_getenv(pamh, "SSH_CERT_PRINCIPALS");
@@ -276,10 +276,10 @@ Ou via groupe de sécurité (AWS/GCP/Azure) :
 ### Configuration server_group
 
 ```ini
-# Bastion : /etc/security/pam_llng.conf
+# Bastion : /etc/open-bastion/openbastion.conf
 server_group = bastion
 
-# Backends : /etc/security/pam_llng.conf
+# Backends : /etc/open-bastion/openbastion.conf
 server_group = backend-prod
 ```
 
@@ -595,18 +595,18 @@ La vérification JWT bastion offre une protection cryptographique contre le cont
 même si les restrictions réseau sont contournées (VPN, erreur de configuration, etc.) :
 
 ```ini
-# /etc/security/pam_llng.conf sur les backends
+# /etc/open-bastion/openbastion.conf sur les backends
 bastion_jwt_required = true
 bastion_jwt_issuer = https://auth.example.com
 bastion_jwt_jwks_url = https://auth.example.com/.well-known/jwks.json
-bastion_jwt_jwks_cache = /var/cache/pam_llng/jwks.json
+bastion_jwt_jwks_cache = /var/cache/open-bastion/jwks.json
 # Optionnel : whitelist des bastions autorisés
 bastion_jwt_allowed_bastions = bastion-prod-01,bastion-prod-02
 ```
 
 ```bash
 # /etc/ssh/sshd_config sur les backends
-AcceptEnv LLNG_BASTION_JWT
+AcceptEnv OB_BASTION_JWT
 ```
 
 Avec le JWT bastion :
@@ -620,8 +620,8 @@ Avec le JWT bastion :
 ssh -o ConnectTimeout=5 backend.internal.example.com
 # PAM: Bastion JWT required but not provided
 
-# Depuis le bastion via llng-ssh-proxy, doit fonctionner :
-llng-ssh-proxy backend.internal.example.com
+# Depuis le bastion via ob-ssh-proxy, doit fonctionner :
+ob-ssh-proxy backend.internal.example.com
 # Connexion établie
 ```
 
@@ -709,7 +709,7 @@ Host backend
 
 **Remédiation configuration :**
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 auth_cache = true
 auth_cache_ttl = 3600        # 1 heure de cache
 auth_cache_offline_ttl = 86400  # 24h si LLNG indisponible
@@ -781,7 +781,7 @@ pkill -u $USERNAME -KILL
 
 **Vecteurs d'attaque :**
 - MITM entre bastion et backend (rare si réseau interne)
-- Lecture de la variable d'environnement `LLNG_BASTION_JWT` sur le bastion
+- Lecture de la variable d'environnement `OB_BASTION_JWT` sur le bastion
 - Logs applicatifs exposant le JWT
 
 **Facteurs atténuants :**
@@ -798,7 +798,7 @@ pkill -u $USERNAME -KILL
 
 **Configuration détection replay (activée par défaut) :**
 ```ini
-# /etc/security/pam_llng.conf (backend)
+# /etc/open-bastion/openbastion.conf (backend)
 bastion_jwt_replay_detection = true   # Activer la détection (défaut: true)
 bastion_jwt_replay_cache_size = 10000 # Capacité du cache (défaut: 10000)
 bastion_jwt_replay_cleanup_interval = 60  # Nettoyage toutes les N sec (défaut: 60)
@@ -806,7 +806,7 @@ bastion_jwt_replay_cleanup_interval = 60  # Nettoyage toutes les N sec (défaut:
 
 **Remédiation configuration :**
 ```ini
-# /etc/security/pam_llng.conf (backend) - Réduire le TTL accepté
+# /etc/open-bastion/openbastion.conf (backend) - Réduire le TTL accepté
 bastion_jwt_clock_skew = 30   # Réduire la tolérance (défaut: 60s)
 ```
 
@@ -847,7 +847,7 @@ LemonLDAP::NG gère la rotation des clés de manière sécurisée :
 
 **Configuration recommandée :**
 ```ini
-# /etc/security/pam_llng.conf (backend)
+# /etc/open-bastion/openbastion.conf (backend)
 # Le TTL par défaut (1h) est suffisant grâce à la publication anticipée LLNG
 bastion_jwt_cache_ttl = 3600
 ```
@@ -856,7 +856,7 @@ bastion_jwt_cache_ttl = 3600
 
 En cas de compromission de la clé privée LLNG (urgence), purger manuellement les caches :
 ```bash
-rm -f /var/cache/pam_llng/jwks.json
+rm -f /var/cache/open-bastion/jwks.json
 ```
 
 |                 | Score résiduel                                         |

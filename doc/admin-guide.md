@@ -44,16 +44,16 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install pam-llng libnss-llng
+apt-get install libpam-openbastion libnss-openbastion
 
 # RHEL/Rocky
-dnf install pam-llng nss-llng
+dnf install libpam-openbastion nss-openbastion
 ```
 
 ### Step 2: Create Configuration
 
 ```bash
-cat > /etc/security/pam_llng.conf << 'EOF'
+cat > /etc/open-bastion/openbastion.conf << 'EOF'
 # LLNG Portal URL
 portal_url = https://auth.example.com
 
@@ -65,7 +65,7 @@ client_secret = your-client-secret
 server_group = standalone
 
 # Token file (created by enrollment)
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Security settings
 verify_ssl = true
@@ -81,13 +81,13 @@ rate_limit_enabled = true
 rate_limit_max_attempts = 5
 EOF
 
-chmod 600 /etc/security/pam_llng.conf
+chmod 600 /etc/open-bastion/openbastion.conf
 ```
 
 ### Step 3: Enroll Server
 
 ```bash
-llng-pam-enroll -g standalone
+ob-enroll -g standalone
 ```
 
 Follow the instructions to approve the server in LLNG.
@@ -97,12 +97,12 @@ Follow the instructions to approve the server in LLNG.
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
 # Authentication: LLNG token or Unix password
-auth       sufficient   pam_llng.so
+auth       sufficient   pam_openbastion.so
 auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 
 # Authorization: LLNG checks access
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 # Session
@@ -153,16 +153,16 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install pam-llng libnss-llng uuid-runtime jq
+apt-get install libpam-openbastion libnss-openbastion uuid-runtime jq
 
 # RHEL/Rocky
-dnf install pam-llng nss-llng util-linux jq
+dnf install libpam-openbastion nss-openbastion util-linux jq
 ```
 
 ### Step 2: Create Configuration
 
 ```bash
-cat > /etc/security/pam_llng.conf << 'EOF'
+cat > /etc/open-bastion/openbastion.conf << 'EOF'
 # LLNG Portal URL
 portal_url = https://auth.example.com
 
@@ -174,7 +174,7 @@ client_secret = your-client-secret
 server_group = bastion
 
 # Token file
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Security settings (stricter for bastion)
 verify_ssl = true
@@ -183,7 +183,7 @@ timeout = 10
 # Logging (verbose for audit)
 log_level = info
 audit_enabled = true
-audit_log_file = /var/log/pam_llng/audit.json
+audit_log_file = /var/log/open-bastion/audit.json
 audit_to_syslog = true
 audit_level = 2
 
@@ -193,16 +193,16 @@ rate_limit_max_attempts = 3
 rate_limit_initial_lockout = 60
 EOF
 
-chmod 600 /etc/security/pam_llng.conf
+chmod 600 /etc/open-bastion/openbastion.conf
 ```
 
 ### Step 3: Configure Session Recording
 
 ```bash
-mkdir -p /etc/llng
-cat > /etc/llng/session-recorder.conf << 'EOF'
+mkdir -p /etc/open-bastion
+cat > /etc/open-bastion/session-recorder.conf << 'EOF'
 # Session recordings directory
-sessions_dir = /var/lib/llng-sessions
+sessions_dir = /var/lib/open-bastion/sessions
 
 # Recording format (script is default, always available)
 # Use asciinema for web replay if installed
@@ -213,14 +213,14 @@ max_duration = 28800
 EOF
 
 # Create sessions directory
-mkdir -p /var/lib/llng-sessions
-chmod 700 /var/lib/llng-sessions
+mkdir -p /var/lib/open-bastion/sessions
+chmod 700 /var/lib/open-bastion/sessions
 ```
 
 ### Step 4: Enroll Server
 
 ```bash
-llng-pam-enroll -g bastion
+ob-enroll -g bastion
 ```
 
 ### Step 5: Configure PAM
@@ -228,11 +228,11 @@ llng-pam-enroll -g bastion
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
 # Authentication: LLNG only (no Unix passwords on bastion)
-auth       sufficient   pam_llng.so
+auth       sufficient   pam_openbastion.so
 auth       required     pam_deny.so
 
 # Authorization: LLNG required
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 # Session
@@ -252,7 +252,7 @@ PubkeyAuthentication yes
 
 # Session recording for all users except emergency admin
 Match User *,!root,!admin
-    ForceCommand /usr/sbin/llng-session-recorder
+    ForceCommand /usr/sbin/ob-session-recorder
 
 # Emergency admin access (no recording, direct shell)
 Match User admin
@@ -267,11 +267,11 @@ systemctl restart sshd
 When bastion JWT verification is enabled on backends, configure the SSH proxy:
 
 ```bash
-mkdir -p /etc/llng
-cat > /etc/llng/ssh-proxy.conf << 'EOF'
+mkdir -p /etc/open-bastion
+cat > /etc/open-bastion/ssh-proxy.conf << 'EOF'
 # LLNG SSH Proxy configuration
 PORTAL_URL=https://auth.example.com
-SERVER_TOKEN_FILE=/etc/security/pam_llng.token
+SERVER_TOKEN_FILE=/etc/open-bastion/token
 SERVER_GROUP=bastion
 TARGET_GROUP=production
 TIMEOUT=10
@@ -279,25 +279,25 @@ VERIFY_SSL=true
 SSH_OPTIONS="-o StrictHostKeyChecking=accept-new"
 EOF
 
-chmod 644 /etc/llng/ssh-proxy.conf
+chmod 644 /etc/open-bastion/ssh-proxy.conf
 ```
 
 Users can then connect to backends using:
 ```bash
 # Direct command
-llng-ssh-proxy backend-server
+ob-ssh-proxy backend-server
 
 # Or via SSH config on bastion (~/.ssh/config):
 Host backend-*
-    ProxyCommand llng-ssh-proxy %h %p
+    ProxyCommand ob-ssh-proxy %h %p
 ```
 
 ### Step 8: Configure Log Rotation
 
 ```bash
 cat > /etc/logrotate.d/llng-sessions << 'EOF'
-/var/lib/llng-sessions/*/*.cast
-/var/lib/llng-sessions/*/*.json {
+/var/lib/open-bastion/sessions/*/*.cast
+/var/lib/open-bastion/sessions/*/*.json {
     monthly
     rotate 12
     compress
@@ -316,7 +316,7 @@ EOF
 ssh user@bastion
 
 # Verify recording was created
-ls -la /var/lib/llng-sessions/$USER/
+ls -la /var/lib/open-bastion/sessions/$USER/
 
 # Jump to backend
 ssh backend-server
@@ -340,16 +340,16 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install pam-llng libnss-llng
+apt-get install libpam-openbastion libnss-openbastion
 
 # RHEL/Rocky
-dnf install pam-llng nss-llng
+dnf install libpam-openbastion nss-openbastion
 ```
 
 ### Step 2: Create PAM Configuration
 
 ```bash
-cat > /etc/security/pam_llng.conf << 'EOF'
+cat > /etc/open-bastion/openbastion.conf << 'EOF'
 # LLNG Portal URL
 portal_url = https://auth.example.com
 
@@ -361,7 +361,7 @@ client_secret = your-client-secret
 server_group = production
 
 # Token file
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Security settings
 verify_ssl = true
@@ -377,7 +377,7 @@ create_user_skel = /etc/skel
 bastion_jwt_required = true
 bastion_jwt_issuer = https://auth.example.com
 bastion_jwt_jwks_url = https://auth.example.com/.well-known/jwks.json
-bastion_jwt_jwks_cache = /var/cache/pam_llng/jwks.json
+bastion_jwt_jwks_cache = /var/cache/open-bastion/jwks.json
 bastion_jwt_cache_ttl = 3600
 bastion_jwt_clock_skew = 60
 # Optionally restrict to specific bastions:
@@ -389,18 +389,18 @@ audit_enabled = true
 audit_to_syslog = true
 EOF
 
-chmod 600 /etc/security/pam_llng.conf
+chmod 600 /etc/open-bastion/openbastion.conf
 ```
 
 ### Step 3: Create NSS Configuration
 
 ```bash
-cat > /etc/nss_llng.conf << 'EOF'
+cat > /etc/open-bastion/nss_openbastion.conf << 'EOF'
 # LLNG Portal URL
 portal_url = https://auth.example.com
 
 # Server token (same as PAM)
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Timeouts
 timeout = 5
@@ -414,7 +414,7 @@ max_uid = 60000
 default_gid = 100
 EOF
 
-chmod 644 /etc/nss_llng.conf
+chmod 644 /etc/open-bastion/nss_openbastion.conf
 ```
 
 ### Step 4: Configure NSS
@@ -424,15 +424,15 @@ chmod 644 /etc/nss_llng.conf
 # Change:
 #   passwd: files
 # To:
-#   passwd: files llng
+#   passwd: files openbastion
 
-sed -i 's/^passwd:.*/passwd: files llng/' /etc/nsswitch.conf
+sed -i 's/^passwd:.*/passwd: files openbastion/' /etc/nsswitch.conf
 ```
 
 ### Step 5: Enroll Server
 
 ```bash
-llng-pam-enroll -g production
+ob-enroll -g production
 ```
 
 ### Step 6: Configure PAM
@@ -443,11 +443,11 @@ cat > /etc/pam.d/sshd << 'EOF'
 auth       required     pam_permit.so
 
 # Authorization: LLNG required
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 # Session: Create user if needed
-session    required     pam_llng.so
+session    required     pam_openbastion.so
 session    required     pam_unix.so
 EOF
 ```
@@ -465,7 +465,7 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 
 # Accept bastion JWT environment variable
-AcceptEnv LLNG_BASTION_JWT
+AcceptEnv OB_BASTION_JWT
 
 # Accept connections from bastion only
 # (combine with firewall rules)
@@ -486,8 +486,8 @@ ufw enable
 ### Step 10: Test
 
 ```bash
-# From bastion, connect to backend using llng-ssh-proxy
-llng-ssh-proxy backend-server
+# From bastion, connect to backend using ob-ssh-proxy
+ob-ssh-proxy backend-server
 
 # Verify user was created
 grep $USER /etc/passwd
@@ -544,7 +544,7 @@ This setting protects against:
 
 **Important**: Ensure the PAM heartbeat timer is enabled to keep tokens active:
 ```bash
-systemctl enable --now pam-llng-heartbeat.timer
+systemctl enable --now libpam-openbastion-heartbeat.timer
 ```
 
 ### Other Recommended Security Settings
@@ -566,11 +566,11 @@ oidcRPMetaDataOptionsRefreshTokenRotation: 1
 
 ```bash
 # Check token file exists
-ls -la /etc/security/pam_llng.token
+ls -la /etc/open-bastion/token
 
 # Re-enroll if needed
-rm /etc/security/pam_llng.token
-llng-pam-enroll -g <server_group>
+rm /etc/open-bastion/token
+ob-enroll -g <server_group>
 ```
 
 ### Authentication Failures
@@ -580,7 +580,7 @@ llng-pam-enroll -g <server_group>
 journalctl -u sshd | grep pam_llng
 
 # Enable debug mode
-# In /etc/security/pam_llng.conf:
+# In /etc/open-bastion/openbastion.conf:
 log_level = debug
 
 # Test token introspection (using Basic Auth for simplicity)
@@ -600,14 +600,14 @@ getent passwd username
 grep passwd /etc/nsswitch.conf
 
 # Check NSS logs
-journalctl | grep nss_llng
+journalctl | grep nss_openbastion
 ```
 
 ### User Creation Issues
 
 ```bash
 # Check if create_user is enabled
-grep create_user /etc/security/pam_llng.conf
+grep create_user /etc/open-bastion/openbastion.conf
 
 # Check PAM session configuration
 grep session /etc/pam.d/sshd
@@ -623,23 +623,23 @@ ls -la /home/username
 
 | File | Purpose |
 |------|---------|
-| `/etc/security/pam_llng.conf` | PAM module configuration |
-| `/etc/security/pam_llng.token` | Server enrollment token |
-| `/etc/nss_llng.conf` | NSS module configuration |
-| `/etc/llng/session-recorder.conf` | Session recorder configuration |
-| `/etc/llng/ssh-proxy.conf` | SSH proxy configuration (bastion) |
-| `/var/lib/llng-sessions/` | Session recordings |
-| `/var/cache/pam_llng/jwks.json` | JWKS cache for JWT verification |
-| `/var/log/pam_llng/audit.json` | Audit log |
+| `/etc/open-bastion/openbastion.conf` | PAM module configuration |
+| `/etc/open-bastion/token` | Server enrollment token |
+| `/etc/open-bastion/nss_openbastion.conf` | NSS module configuration |
+| `/etc/open-bastion/session-recorder.conf` | Session recorder configuration |
+| `/etc/open-bastion/ssh-proxy.conf` | SSH proxy configuration (bastion) |
+| `/var/lib/open-bastion/sessions/` | Session recordings |
+| `/var/cache/open-bastion/jwks.json` | JWKS cache for JWT verification |
+| `/var/log/open-bastion/audit.json` | Audit log |
 
 ### Commands
 
 | Command | Purpose |
 |---------|---------|
-| `llng-pam-enroll` | Enroll server with LLNG |
-| `llng-pam-enroll -g GROUP` | Enroll with specific server group |
-| `llng-session-recorder` | Record SSH session (ForceCommand) |
-| `llng-ssh-proxy HOST` | Connect to backend with bastion JWT |
+| `ob-enroll` | Enroll server with LLNG |
+| `ob-enroll -g GROUP` | Enroll with specific server group |
+| `ob-session-recorder` | Record SSH session (ForceCommand) |
+| `ob-ssh-proxy HOST` | Connect to backend with bastion JWT |
 
 ## See Also
 

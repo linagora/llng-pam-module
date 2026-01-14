@@ -1,9 +1,9 @@
-Source: pam-llng
+Source: open-bastion
 Maintainer: Xavier Guimard <xguimard@linagora.com>
 Section: admin
 Priority: optional
 Standards-Version: 4.7.0
-Homepage: https://lemonldap-ng.org/
+Homepage: https://github.com/linagora/open-bastion
 Build-Depends: debhelper-compat (= 13)
  , cmake
  , libcurl4-openssl-dev
@@ -12,7 +12,7 @@ Build-Depends: debhelper-compat (= 13)
  , libssl-dev
  , pkgconf
 
-Package: libpam-llng
+Package: libpam-openbastion
 Architecture: any
 Multi-Arch: same
 Pre-Depends: ${misc:Pre-Depends}
@@ -22,7 +22,7 @@ Depends: ${misc:Depends}
  , jq
  , nscd
  , debconf (>= 0.5) | debconf-2.0
-Description: PAM module for LemonLDAP::NG authentication
+Description: Open Bastion PAM/NSS module for SSH bastion authentication
  This PAM module enables Linux servers to authenticate users via
- LemonLDAP::NG, supporting both token-based authentication and
+ Open Bastion, supporting both token-based authentication and
  key-based authorization with server groups support.

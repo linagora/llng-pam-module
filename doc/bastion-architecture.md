@@ -16,20 +16,20 @@ flowchart TB
     end
 
     subgraph ZoneA["Zone A"]
-        BastionA["Bastion A<br/>pam_llng.so<br/>nss_llng.so<br/>recorder"]
+        BastionA["Bastion A<br/>pam_openbastion.so<br/>nss_openbastion.so<br/>recorder"]
         Backend1["Backend 1"]
         Backend2["Backend 2"]
         Backend3["Backend 3"]
     end
 
     subgraph ZoneB["Zone B"]
-        BastionB["Bastion B<br/>pam_llng.so<br/>nss_llng.so<br/>recorder"]
+        BastionB["Bastion B<br/>pam_openbastion.so<br/>nss_openbastion.so<br/>recorder"]
         Backend4["Backend 4"]
         Backend5["Backend 5"]
     end
 
     subgraph ZoneC["Zone C"]
-        BastionC["Bastion C<br/>pam_llng.so<br/>nss_llng.so<br/>recorder"]
+        BastionC["Bastion C<br/>pam_openbastion.so<br/>nss_openbastion.so<br/>recorder"]
         Backend6["Backend 6"]
         Backend7["Backend 7"]
     end
@@ -67,9 +67,9 @@ Jump servers that users connect to first:
 
 | Component | Purpose |
 |-----------|---------|
-| `pam_llng.so` | Authenticate users via LLNG tokens or authorize SSH key users |
-| `libnss_llng.so` | Resolve LLNG users before local account exists |
-| `llng-session-recorder` | Record all SSH sessions for audit |
+| `pam_openbastion.so` | Authenticate users via LLNG tokens or authorize SSH key users |
+| `libnss_openbastion.so` | Resolve LLNG users before local account exists |
+| `ob-session-recorder` | Record all SSH sessions for audit |
 | SSH CA | Optional: sign user certificates |
 
 ### Backend Servers
@@ -78,8 +78,8 @@ Internal servers accessed through bastions:
 
 | Component | Purpose |
 |-----------|---------|
-| `pam_llng.so` | Authorize access based on server_group |
-| `libnss_llng.so` | Resolve users, auto-create accounts |
+| `pam_openbastion.so` | Authorize access based on server_group |
+| `libnss_openbastion.so` | Resolve users, auto-create accounts |
 | Standard SSH | ProxyJump through bastion |
 
 ## Authentication Flow
@@ -129,12 +129,12 @@ sequenceDiagram
     participant LLNG as LLNG Portal
     participant Backend
 
-    User->>Bastion: SSH to backend (via llng-ssh-proxy)
+    User->>Bastion: SSH to backend (via ob-ssh-proxy)
 
     Bastion->>LLNG: POST /pam/bastion-token
     LLNG-->>Bastion: {token: "JWT..."}
 
-    Bastion->>Backend: SSH + LLNG_BASTION_JWT env var
+    Bastion->>Backend: SSH + OB_BASTION_JWT env var
 
     Note over Backend: Verify JWT signature<br/>(using JWKS cache)
 
@@ -177,18 +177,18 @@ Each server enrolls with its server_group:
 
 ```bash
 # On production servers
-llng-pam-enroll -g production
+ob-enroll -g production
 
 # On staging servers
-llng-pam-enroll -g staging
+ob-enroll -g staging
 
 # On bastions
-llng-pam-enroll -g bastion
+ob-enroll -g bastion
 ```
 
 ## NSS Integration
 
-The NSS module (`libnss_llng`) enables user resolution before account creation:
+The NSS module (`libnss_openbastion`) enables user resolution before account creation:
 
 ```mermaid
 sequenceDiagram
@@ -217,7 +217,7 @@ shadow: files
 
 ### NSS Configuration
 
-`/etc/nss_llng.conf`:
+`/etc/open-bastion/nss_openbastion.conf`:
 ```ini
 portal_url = https://auth.example.com
 server_token_file = /etc/llng/server_token
@@ -232,7 +232,7 @@ default_gid = 100
 
 When a user connects for the first time:
 
-1. **NSS resolution**: `libnss_llng` queries LLNG for user info
+1. **NSS resolution**: `libnss_openbastion` queries LLNG for user info
 2. **SSH accepts**: User appears to exist (virtual passwd entry)
 3. **PAM session**: `pam_sm_open_session` creates real account
 4. **Home directory**: Created with skel files
@@ -240,7 +240,7 @@ When a user connects for the first time:
 
 ### Configuration
 
-In `/etc/security/pam_llng.conf`:
+In `/etc/open-bastion/openbastion.conf`:
 ```ini
 create_user = true
 create_user_home_base = /home
@@ -250,7 +250,7 @@ create_user_skel = /etc/skel
 
 In `/etc/pam.d/sshd`:
 ```
-session required pam_llng.so
+session required pam_openbastion.so
 session required pam_unix.so
 ```
 
@@ -271,7 +271,7 @@ All sessions through bastions are recorded:
 
 ```sshd_config
 Match Group *,!admin
-    ForceCommand /usr/sbin/llng-session-recorder
+    ForceCommand /usr/sbin/ob-session-recorder
 ```
 
 See [session-recording.md](session-recording.md) for details.
@@ -327,10 +327,10 @@ flowchart TB
 
 ### Bastion Setup
 
-Use `llng-bastion-setup` to automate bastion configuration:
+Use `ob-bastion-setup` to automate bastion configuration:
 
 ```bash
-sudo llng-bastion-setup --portal https://auth.example.com --server-group bastion
+sudo ob-bastion-setup --portal https://auth.example.com --server-group bastion
 ```
 
 This script:
@@ -351,10 +351,10 @@ Options:
 
 ### Backend Setup
 
-Use `llng-backend-setup` to automate backend server configuration:
+Use `ob-backend-setup` to automate backend server configuration:
 
 ```bash
-sudo llng-backend-setup --portal https://auth.example.com --server-group production
+sudo ob-backend-setup --portal https://auth.example.com --server-group production
 ```
 
 This script:
@@ -378,10 +378,10 @@ Options:
 
 ## SSH Certificates
 
-Users can obtain SSH certificates from LLNG using `llng-ssh-cert`:
+Users can obtain SSH certificates from LLNG using `ob-ssh-cert`:
 
 ```bash
-llng-ssh-cert --portal https://auth.example.com --validity 60
+ob-ssh-cert --portal https://auth.example.com --validity 60
 ```
 
 This uses the Device Authorization Grant to authenticate and sign the user's public key.
@@ -399,12 +399,12 @@ This uses the Device Authorization Grant to authenticate and sign the user's pub
 ### Bastion Hosts
 
 ```bash
-sudo llng-bastion-setup --portal https://auth.example.com
+sudo ob-bastion-setup --portal https://auth.example.com
 ```
 
 Or manually:
-- [ ] `pam_llng.so` installed
-- [ ] Server enrolled (`llng-pam-enroll`)
+- [ ] `pam_openbastion.so` installed
+- [ ] Server enrolled (`ob-enroll`)
 - [ ] PAM configured in `/etc/pam.d/sshd`
 - [ ] SSH CA key configured (`TrustedUserCAKeys`)
 - [ ] Session recorder configured (`ForceCommand`)
@@ -413,12 +413,12 @@ Or manually:
 ### Backend Servers
 
 ```bash
-sudo llng-backend-setup --portal https://auth.example.com -g production
+sudo ob-backend-setup --portal https://auth.example.com -g production
 ```
 
 Or manually:
-- [ ] `pam_llng.so` installed
-- [ ] `libnss_llng.so` installed
+- [ ] `pam_openbastion.so` installed
+- [ ] `libnss_openbastion.so` installed
 - [ ] Server enrolled with correct server_group
 - [ ] `create_user = true` if auto-provisioning needed
 - [ ] PAM, NSS, and sudo configured
@@ -447,7 +447,7 @@ With bastion JWT:
 ```mermaid
 flowchart LR
     subgraph Bastion["Bastion Server"]
-        proxy["llng-ssh-proxy"]
+        proxy["ob-ssh-proxy"]
     end
 
     subgraph LLNG["LLNG Portal"]
@@ -456,7 +456,7 @@ flowchart LR
     end
 
     subgraph Backend["Backend Server"]
-        pam["pam_llng.so"]
+        pam["pam_openbastion.so"]
         cache["JWKS Cache"]
     end
 
@@ -475,7 +475,7 @@ flowchart LR
 ```bash
 # /etc/llng/ssh-proxy.conf
 PORTAL_URL=https://auth.example.com
-SERVER_TOKEN_FILE=/etc/security/pam_llng.token
+SERVER_TOKEN_FILE=/etc/open-bastion/token
 SERVER_GROUP=bastion
 TARGET_GROUP=backend
 ```
@@ -483,11 +483,11 @@ TARGET_GROUP=backend
 #### On Backend
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 bastion_jwt_required = true
 bastion_jwt_issuer = https://auth.example.com
 bastion_jwt_jwks_url = https://auth.example.com/.well-known/jwks.json
-bastion_jwt_jwks_cache = /var/cache/pam_llng/jwks.json
+bastion_jwt_jwks_cache = /var/cache/open-bastion/jwks.json
 bastion_jwt_cache_ttl = 3600
 bastion_jwt_clock_skew = 60
 # bastion_jwt_allowed_bastions = bastion-01,bastion-02
@@ -495,7 +495,7 @@ bastion_jwt_clock_skew = 60
 
 ```bash
 # /etc/ssh/sshd_config.d/llng.conf
-AcceptEnv LLNG_BASTION_JWT
+AcceptEnv OB_BASTION_JWT
 ```
 
 ### Offline Verification

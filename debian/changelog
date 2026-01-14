@@ -1,5 +1,6 @@
-pam-llng (1.0.0) unstable; urgency=medium
+open-bastion (1.0.0) unstable; urgency=medium
 
   * Initial release
+  * Renamed project from pam-llng to open-bastion
 
  -- Xavier Guimard <xguimard@linagora.com>  Sat, 14 Dec 2025 12:00:00 +0000

@@ -12,7 +12,7 @@ This Docker Compose demo demonstrates SSH authentication using LLNG tokens as pa
 
 ```mermaid
 flowchart LR
-    subgraph Docker["Docker Network (llng-token-net)"]
+    subgraph Docker["Docker Network (ob-token-net)"]
         SSO["SSO<br/>(LLNG)<br/>:80"]
         Bastion["Bastion<br/>(SSH)<br/>:2222"]
         Backend["Backend<br/>(SSH)<br/>:22"]
@@ -171,14 +171,14 @@ sequenceDiagram
 
 ### Check container logs
 ```bash
-docker logs llng-token-sso
-docker logs llng-token-bastion
-docker logs llng-token-backend
+docker logs ob-token-sso
+docker logs ob-token-bastion
+docker logs ob-token-backend
 ```
 
 ### Test PAM authorization manually
 ```bash
-docker exec llng-token-bastion curl -s http://sso/pam/authorize \
+docker exec ob-token-bastion curl -s http://sso/pam/authorize \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"user":"dwho","server_group":"bastion"}'

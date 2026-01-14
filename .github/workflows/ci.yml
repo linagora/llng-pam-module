@@ -51,11 +51,11 @@ jobs:
     - name: Check PAM module symbols
       run: |
         echo "Checking exported PAM symbols..."
-        nm -D build/pam_llng.so.* | grep -E "pam_sm_(authenticate|setcred|acct_mgmt)" || exit 1
+        nm -D build/pam_openbastion.so.* | grep -E "pam_sm_(authenticate|setcred|acct_mgmt)" || exit 1
         echo "All required PAM symbols found"
 
     - name: Verify enrollment script syntax
-      run: bash -n scripts/llng-pam-enroll
+      run: bash -n scripts/ob-enroll
 
   build-debug:
     name: Build Debug with Sanitizers
@@ -165,10 +165,10 @@ jobs:
     - name: Build RPM
       run: |
         mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-        tar czf ~/rpmbuild/SOURCES/pam-llng-1.0.0.tar.gz \
-          --transform 's,^,pam-llng-1.0.0/,' \
+        tar czf ~/rpmbuild/SOURCES/open-bastion-1.0.0.tar.gz \
+          --transform 's,^,open-bastion-1.0.0/,' \
           --exclude='.git' .
-        rpmbuild -ba rpm/pam-llng.spec
+        rpmbuild -ba rpm/open-bastion.spec
 
     - name: Upload RPM package
       uses: actions/upload-artifact@v4

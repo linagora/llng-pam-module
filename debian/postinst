@@ -3,8 +3,8 @@ set -e
 
 . /usr/share/debconf/confmodule
 
-CONF_FILE="/etc/security/pam_llng.conf"
-BACKUP_DIR="/var/backups/libpam-llng"
+CONF_FILE="/etc/open-bastion/openbastion.conf"
+BACKUP_DIR="/var/backups/open-bastion"
 PAM_SSHD="/etc/pam.d/sshd"
 PAM_SUDO="/etc/pam.d/sudo"
 
@@ -23,7 +23,7 @@ generate_pam_sshd() {
     mode="$1"
     server_group="$2"
     cat << EOF
-# /etc/pam.d/sshd - Configured by libpam-llng
+# /etc/pam.d/sshd - Configured by libpam-openbastion
 # Mode: $mode
 # Server group: $server_group
 #
@@ -31,15 +31,15 @@ EOF
     case "$mode" in
         mode-a)
             cat << EOF
-# AUTHENTICATION: Only LLNG tokens accepted
-auth       sufficient   pam_llng.so server_group=$server_group
+# AUTHENTICATION: Only Open Bastion tokens accepted
+auth       sufficient   pam_openbastion.so server_group=$server_group
 auth       required     pam_deny.so
 EOF
             ;;
         mode-b|mode-d)
             cat << EOF
-# AUTHENTICATION: LLNG token OR Unix password
-auth       sufficient   pam_llng.so server_group=$server_group
+# AUTHENTICATION: Open Bastion token OR Unix password
+auth       sufficient   pam_openbastion.so server_group=$server_group
 auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 EOF
@@ -53,12 +53,12 @@ EOF
     esac
     cat << EOF
 
-# AUTHORIZATION: LLNG checks if user can access this server
-account    required     pam_llng.so server_group=$server_group
+# AUTHORIZATION: Open Bastion checks if user can access this server
+account    required     pam_openbastion.so server_group=$server_group
 account    required     pam_unix.so
 
-# SESSION (pam_llng creates Unix account if needed)
-session    required     pam_llng.so server_group=$server_group
+# SESSION (pam_openbastion creates Unix account if needed)
+session    required     pam_openbastion.so server_group=$server_group
 session    required     pam_unix.so
 EOF
 }
@@ -68,7 +68,7 @@ generate_pam_sudo() {
     mode="$1"
     server_group="$2"
     cat << EOF
-# /etc/pam.d/sudo - Configured by libpam-llng
+# /etc/pam.d/sudo - Configured by libpam-openbastion
 # Mode: $mode
 # Server group: $server_group
 #
@@ -76,15 +76,15 @@ EOF
     case "$mode" in
         mode-a)
             cat << EOF
-# AUTHENTICATION: Only LLNG tokens accepted
-auth       sufficient   pam_llng.so server_group=$server_group
+# AUTHENTICATION: Only Open Bastion tokens accepted
+auth       sufficient   pam_openbastion.so server_group=$server_group
 auth       required     pam_deny.so
 EOF
             ;;
         mode-b|mode-d)
             cat << EOF
-# AUTHENTICATION: LLNG token OR Unix password
-auth       sufficient   pam_llng.so server_group=$server_group
+# AUTHENTICATION: Open Bastion token OR Unix password
+auth       sufficient   pam_openbastion.so server_group=$server_group
 auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 EOF
@@ -99,17 +99,17 @@ EOF
     cat << EOF
 
 # AUTHORIZATION
-account    required     pam_llng.so server_group=$server_group
+account    required     pam_openbastion.so server_group=$server_group
 account    required     pam_unix.so
 
-# SESSION (pam_llng creates Unix account if needed)
-session    required     pam_llng.so server_group=$server_group
+# SESSION (pam_openbastion creates Unix account if needed)
+session    required     pam_openbastion.so server_group=$server_group
 session    required     pam_unix.so
 EOF
 }
 
-# Generate pam_llng.conf
-generate_llng_conf() {
+# Generate openbastion.conf
+generate_openbastion_conf() {
     portal_url="$1"
     client_id="$2"
     client_secret="$3"
@@ -117,11 +117,11 @@ generate_llng_conf() {
     create_user="$5"
 
     cat << EOF
-# /etc/security/pam_llng.conf
-# Configured by libpam-llng debconf
-# Run 'dpkg-reconfigure libpam-llng' to modify
+# /etc/open-bastion/openbastion.conf
+# Configured by libpam-openbastion debconf
+# Run 'dpkg-reconfigure libpam-openbastion' to modify
 
-# LemonLDAP::NG portal URL
+# Open Bastion portal URL
 portal_url = $portal_url
 
 # OIDC client credentials
@@ -129,7 +129,7 @@ client_id = $client_id
 client_secret = $client_secret
 
 # Server authentication
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 server_group = $server_group
 
 # HTTP settings
@@ -138,7 +138,7 @@ verify_ssl = true
 
 # Cache settings
 cache_enabled = true
-cache_dir = /var/cache/pam_llng
+cache_dir = /var/cache/open-bastion
 cache_ttl = 300
 
 # Logging: error, warn, info, debug
@@ -151,24 +151,28 @@ EOF
 
 case "$1" in
     configure)
-        db_get libpam-llng/pam-mode
+        # Create config directory
+        mkdir -p /etc/open-bastion
+        chmod 755 /etc/open-bastion
+
+        db_get libpam-openbastion/pam-mode
         MODE="$RET"
 
         if [ "$MODE" != "none" ] && [ -n "$MODE" ]; then
             # Get debconf values
-            db_get libpam-llng/portal-url
+            db_get libpam-openbastion/portal-url
             PORTAL_URL="$RET"
-            db_get libpam-llng/client-id
+            db_get libpam-openbastion/client-id
             CLIENT_ID="$RET"
-            db_get libpam-llng/client-secret
+            db_get libpam-openbastion/client-secret
             CLIENT_SECRET="$RET"
-            db_get libpam-llng/server-group
+            db_get libpam-openbastion/server-group
             SERVER_GROUP="$RET"
-            db_get libpam-llng/configure-sudo
+            db_get libpam-openbastion/configure-sudo
             CONFIGURE_SUDO="$RET"
-            db_get libpam-llng/sudo-server-group
+            db_get libpam-openbastion/sudo-server-group
             SUDO_SERVER_GROUP="$RET"
-            db_get libpam-llng/create-user
+            db_get libpam-openbastion/create-user
             CREATE_USER="$RET"
 
             # Use main server group for sudo if not specified
@@ -176,9 +180,9 @@ case "$1" in
                 SUDO_SERVER_GROUP="$SERVER_GROUP"
             fi
 
-            # Generate pam_llng.conf if portal URL is provided
+            # Generate openbastion.conf if portal URL is provided
             if [ -n "$PORTAL_URL" ]; then
-                generate_llng_conf "$PORTAL_URL" "$CLIENT_ID" "$CLIENT_SECRET" "$SERVER_GROUP" "$CREATE_USER" > "$CONF_FILE"
+                generate_openbastion_conf "$PORTAL_URL" "$CLIENT_ID" "$CLIENT_SECRET" "$SERVER_GROUP" "$CREATE_USER" > "$CONF_FILE"
                 chmod 600 "$CONF_FILE"
                 chown root:root "$CONF_FILE"
             fi
@@ -194,15 +198,15 @@ case "$1" in
             fi
 
             # Create cache directory
-            mkdir -p /var/cache/pam_llng
-            chmod 700 /var/cache/pam_llng
+            mkdir -p /var/cache/open-bastion
+            chmod 700 /var/cache/open-bastion
 
-            # Create stats directory
-            mkdir -p /var/lib/pam_llng
-            chmod 700 /var/lib/pam_llng
+            # Create state directory
+            mkdir -p /var/lib/open-bastion
+            chmod 700 /var/lib/open-bastion
 
             # Clear secret from debconf database for security
-            db_set libpam-llng/client-secret ""
+            db_set libpam-openbastion/client-secret ""
         fi
         ;;
 

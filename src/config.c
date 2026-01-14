@@ -1,5 +1,5 @@
 /*
- * config.c - Configuration parsing for LemonLDAP::NG PAM module
+ * config.c - Configuration parsing for Open Bastion PAM module
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -54,19 +54,19 @@ static int check_file_permissions_fd(int fd)
 #define DEFAULT_TIMEOUT                 10
 #define DEFAULT_CACHE_TTL               300
 #define DEFAULT_CACHE_TTL_HIGH_RISK     60
-#define DEFAULT_CACHE_DIR               "/var/cache/pam_llng"
-#define DEFAULT_AUTH_CACHE_DIR          "/var/cache/pam_llng/auth"
-#define DEFAULT_AUTH_CACHE_FORCE_ONLINE "/etc/security/pam_llng.force_online"
+#define DEFAULT_CACHE_DIR               "/var/cache/open-bastion"
+#define DEFAULT_AUTH_CACHE_DIR          "/var/cache/open-bastion/auth"
+#define DEFAULT_AUTH_CACHE_FORCE_ONLINE "/etc/open-bastion/force_online"
 #define DEFAULT_SERVER_GROUP            "default"
-#define DEFAULT_AUDIT_LOG_FILE          "/var/log/pam_llng/audit.json"
-#define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/pam_llng/ratelimit"
-#define DEFAULT_KEYRING_NAME            "pam_llng"
+#define DEFAULT_AUDIT_LOG_FILE          "/var/log/open-bastion/audit.json"
+#define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/open-bastion/ratelimit"
+#define DEFAULT_KEYRING_NAME            "open-bastion"
 
 /* TLS version constants for min_tls_version configuration */
 #define TLS_VERSION_1_2 12
 #define TLS_VERSION_1_3 13
 
-void config_init(pam_llng_config_t *config)
+void config_init(pam_openbastion_config_t *config)
 {
     memset(config, 0, sizeof(*config));
 
@@ -150,7 +150,7 @@ static void secure_free_str(char *ptr)
     }
 }
 
-void config_free(pam_llng_config_t *config)
+void config_free(pam_openbastion_config_t *config)
 {
     if (!config) return;
 
@@ -335,7 +335,7 @@ static int url_contains_dangerous_chars(const char *url)
 }
 
 /* Parse a single config line */
-static int parse_line(const char *key, const char *value, pam_llng_config_t *config)
+static int parse_line(const char *key, const char *value, pam_openbastion_config_t *config)
 {
     /* Basic settings */
     if (strcmp(key, "portal_url") == 0 || strcmp(key, "portal") == 0) {
@@ -584,7 +584,7 @@ static int parse_line(const char *key, const char *value, pam_llng_config_t *con
     return 0;
 }
 
-int config_load(const char *filename, pam_llng_config_t *config)
+int config_load(const char *filename, pam_openbastion_config_t *config)
 {
     /*
      * Security: open file with O_NOFOLLOW to prevent symlink attacks,
@@ -661,7 +661,7 @@ int config_load(const char *filename, pam_llng_config_t *config)
     return 0;
 }
 
-int config_parse_args(int argc, const char **argv, pam_llng_config_t *config)
+int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *config)
 {
     for (int i = 0; i < argc; i++) {
         const char *arg = argv[i];
@@ -778,7 +778,7 @@ static void ensure_parent_dir(const char *filepath)
     free(path_copy);
 }
 
-int config_validate(const pam_llng_config_t *config)
+int config_validate(const pam_openbastion_config_t *config)
 {
     if (!config->portal_url || strlen(config->portal_url) == 0) {
         return -1;  /* portal_url is required */

@@ -1,14 +1,14 @@
-# PAM Module for LemonLDAP::NG
+# Open Bastion
 
-**Control SSH access and sudo privileges on your Linux servers through [LemonLDAP::NG Web-SSO](https://lemonldap-ng.org).**
+**Control SSH access and sudo privileges on your Linux servers through a centralized bastion server.**
 
-This PAM module integrates your servers with [LemonLDAP::NG](https://lemonldap-ng.org) (LLNG)
+Open Bastion integrates your servers with [LemonLDAP::NG](https://lemonldap-ng.org) (LLNG)
 to centrally manage who can SSH into which servers and who can use [sudo](https://en.wikipedia.org/wiki/Sudo).
-Administrators define access rules in the LLNG portal, and the PAM module enforces them on each server.
+Administrators define access rules in the portal, and the PAM/NSS modules enforce them on each server.
 
 The module supports two authentication methods:
 
-- **Token-based authentication**: Users generate temporary access tokens from the LLNG portal to use as SSH passwords
+- **Token-based authentication**: Users generate temporary access tokens from the portal to use as SSH passwords
 - **Key-based authorization**: When users connect via SSH keys, the module checks if they're authorized to access this server
 
 ## Features
@@ -18,12 +18,12 @@ The module supports two authentication methods:
 - Server groups support for granular access control
 - Token caching to reduce server load
 - Secure communication with SSL/TLS support
-- Easy server enrollment with `llng-pam-enroll` script
+- Easy server enrollment with `ob-enroll` script
 - **Bastion-to-backend authentication**:
   - JWT-based proof of connection origin
   - Backends only accept SSH from authorized bastions
   - Offline verification via cached JWKS public keys
-  - `llng-ssh-proxy` script for seamless bastion connections
+  - `ob-ssh-proxy` script for seamless bastion connections
 - **Security hardening**:
   - Structured JSON audit logging with correlation IDs
   - Rate limiting with exponential backoff
@@ -68,10 +68,10 @@ Copy the plugins from the [`llng-plugin`](./llng-plugin) directory to your Lemon
 sudo cp -r llng-plugin/usr/share/* /usr/share/
 ```
 
-This installs:
-- **PamAccess** - Main plugin: token generation interface and authorization endpoints
+This installs the 3 Open Bastion plugins for LemonLDAP::NG:
+- **PamAccess** - Main plugin: token generation interface and authorization endpoints (`/pam/authorize`, `/pam/bastion-token`)
 - **OIDCDeviceAuthorization** - Server enrollment via OAuth 2.0 Device Authorization Grant (RFC 8628)
-- **SSHCA** *(optional)* - SSH Certificate Authority for key-based authentication
+- **SSHCA** *(optional)* - SSH Certificate Authority for certificate-based authentication
 
 ### Step 2: Create the OIDC Relying Party
 
@@ -201,18 +201,18 @@ sudo make install
 ```
 
 This installs:
-- `/usr/lib/security/pam_llng.so` - The PAM module
-- `/usr/sbin/llng-pam-enroll` - Server enrollment script
-- `/etc/security/pam_llng.conf.example` - Example configuration
+- `/usr/lib/security/pam_openbastion.so` - The PAM module
+- `/usr/sbin/ob-enroll` - Server enrollment script
+- `/etc/open-bastion/openbastion.conf.example` - Example configuration
 
 ## Quick Start
 
 ### Step 1: Create the Configuration File
 
 ```bash
-sudo cp /etc/security/pam_llng.conf.example /etc/security/pam_llng.conf
-sudo chmod 600 /etc/security/pam_llng.conf
-sudo nano /etc/security/pam_llng.conf
+sudo cp /etc/open-bastion/openbastion.conf.example /etc/open-bastion/openbastion.conf
+sudo chmod 600 /etc/open-bastion/openbastion.conf
+sudo nano /etc/open-bastion/openbastion.conf
 ```
 
 Configure at minimum:
@@ -228,14 +228,14 @@ server_group = default
 Run the enrollment script as root:
 
 ```bash
-sudo llng-pam-enroll
+sudo ob-enroll
 ```
 
 The script will:
 1. Initiate a Device Authorization request
 2. Display a user code for administrator approval
 3. Wait for the administrator to approve the server
-4. Save the server token to `/etc/security/pam_llng.token`
+4. Save the server token to `/etc/open-bastion/token`
 
 **Administrator approval**: An administrator must visit the LLNG portal, go to the device verification page, and enter the displayed code to approve this server.
 
@@ -260,10 +260,10 @@ This is the most secure mode: users must authenticate via LemonLDAP::NG.
 # - LLNG tokens: ACCEPTED
 # - SSH keys: depends on sshd_config (PubkeyAuthentication)
 
-auth       sufficient   pam_llng.so
+auth       sufficient   pam_openbastion.so
 auth       required     pam_deny.so
 
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 session    required     pam_unix.so
@@ -283,11 +283,11 @@ Useful for transition periods or when some users don't have LLNG accounts.
 # - LLNG tokens: ACCEPTED (tried first)
 # - SSH keys: depends on sshd_config
 
-auth       sufficient   pam_llng.so
+auth       sufficient   pam_openbastion.so
 auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 session    required     pam_unix.so
@@ -312,7 +312,7 @@ but LLNG verifies the user has permission to access this server.
 
 auth       required     pam_permit.so
 
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 session    required     pam_unix.so
@@ -341,11 +341,11 @@ in LLNG to access this server.
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       sufficient   pam_llng.so
+auth       sufficient   pam_openbastion.so
 auth       sufficient   pam_unix.so nullok try_first_pass
 auth       required     pam_deny.so
 
-account    required     pam_llng.so
+account    required     pam_openbastion.so
 account    required     pam_unix.so
 
 session    required     pam_unix.so
@@ -421,12 +421,12 @@ ssh -i ~/.ssh/id_rsa user@server
 
 ## Server Enrollment Script
 
-The `llng-pam-enroll` script automates the Device Authorization Grant flow.
+The `ob-enroll` script automates the Device Authorization Grant flow.
 
 ### Usage
 
 ```bash
-sudo llng-pam-enroll [OPTIONS]
+sudo ob-enroll [OPTIONS]
 ```
 
 ### Options
@@ -437,8 +437,8 @@ sudo llng-pam-enroll [OPTIONS]
 | `-c, --client-id ID` | OIDC client ID (default: pam-access) |
 | `-s, --client-secret SECRET` | OIDC client secret |
 | `-g, --server-group GROUP` | Server group name (default: default) |
-| `-t, --token-file FILE` | Where to save the token (default: /etc/security/pam_llng.token) |
-| `-C, --config FILE` | Configuration file (default: /etc/security/pam_llng.conf) |
+| `-t, --token-file FILE` | Where to save the token (default: /etc/open-bastion/token) |
+| `-C, --config FILE` | Configuration file (default: /etc/open-bastion/openbastion.conf) |
 | `-k, --insecure` | Skip SSL certificate verification |
 | `-q, --quiet` | Quiet mode |
 | `-h, --help` | Show help |
@@ -447,16 +447,16 @@ sudo llng-pam-enroll [OPTIONS]
 
 ```bash
 # Enroll using settings from config file
-sudo llng-pam-enroll
+sudo ob-enroll
 
 # Enroll with explicit parameters
-sudo llng-pam-enroll -p https://auth.example.com -s mysecret
+sudo ob-enroll -p https://auth.example.com -s mysecret
 
 # Enroll for a specific server group
-sudo llng-pam-enroll -g production
+sudo ob-enroll -g production
 
 # Enroll with custom token file location
-sudo llng-pam-enroll -t /etc/pam_llng/server.token
+sudo ob-enroll -t /etc/open-bastion/server.token
 ```
 
 ### Manual Enrollment (Without Script)
@@ -498,13 +498,13 @@ curl -X POST https://auth.example.com/oauth2/token \
 #### 4. Save the token
 
 ```bash
-echo "<access_token>" | sudo tee /etc/security/pam_llng.token
-sudo chmod 600 /etc/security/pam_llng.token
+echo "<access_token>" | sudo tee /etc/open-bastion/token
+sudo chmod 600 /etc/open-bastion/token
 ```
 
 ## Configuration Reference
 
-### /etc/security/pam_llng.conf
+### /etc/open-bastion/openbastion.conf
 
 ```ini
 # Required: LemonLDAP::NG portal URL
@@ -515,7 +515,7 @@ client_id = pam-access
 client_secret = your-secret
 
 # Server token file (created by enrollment)
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Server group for authorization rules
 server_group = default
@@ -527,7 +527,7 @@ verify_ssl = true
 
 # Cache settings
 cache_enabled = true
-cache_dir = /var/cache/pam_llng
+cache_dir = /var/cache/open-bastion
 cache_ttl = 300
 cache_ttl_high_risk = 60
 high_risk_services = sudo,su
@@ -537,7 +537,7 @@ log_level = warn
 
 # Audit logging
 audit_enabled = true
-audit_log_file = /var/log/pam_llng/audit.json
+audit_log_file = /var/log/open-bastion/audit.json
 audit_to_syslog = true
 audit_level = 1  # 0=critical, 1=auth events, 2=all
 
@@ -558,7 +558,7 @@ rate_limit_max_lockout = 3600
 Arguments can be passed directly in PAM configuration:
 
 ```
-auth required pam_llng.so portal_url=https://auth.example.com debug
+auth required pam_openbastion.so portal_url=https://auth.example.com debug
 ```
 
 | Argument | Description |
@@ -591,7 +591,7 @@ default    => 1
 
 ### Configure on Each Server
 
-In `/etc/security/pam_llng.conf`:
+In `/etc/open-bastion/openbastion.conf`:
 
 ```ini
 server_group = production
@@ -600,7 +600,7 @@ server_group = production
 Or during enrollment:
 
 ```bash
-sudo llng-pam-enroll -g production
+sudo ob-enroll -g production
 ```
 
 ## Bastion-to-Backend Authentication
@@ -626,15 +626,15 @@ sequenceDiagram
     Bastion->>LLNG: POST /pam/bastion-token
     LLNG-->>Bastion: Signed JWT
 
-    Bastion->>Backend: SSH + LLNG_BASTION_JWT
+    Bastion->>Backend: SSH + OB_BASTION_JWT
     Note over Backend: Verify JWT signature<br/>(using JWKS cache)
     Backend-->>Bastion: Access granted
 ```
 
 1. User connects to bastion via SSH (with certificate or token)
-2. From bastion, user runs `llng-ssh-proxy backend-server`
+2. From bastion, user runs `ob-ssh-proxy backend-server`
 3. The proxy requests a signed JWT from LLNG `/pam/bastion-token` endpoint
-4. The proxy connects to backend with the JWT in `LLNG_BASTION_JWT` environment variable
+4. The proxy connects to backend with the JWT in `OB_BASTION_JWT` environment variable
 5. Backend's PAM module verifies the JWT signature using cached JWKS public keys
 6. If valid and not expired, SSH connection proceeds; otherwise, denied
 
@@ -643,14 +643,14 @@ sequenceDiagram
 On the **bastion server**, install the SSH proxy script and configure it:
 
 ```bash
-# Install llng-ssh-proxy (included with the PAM module)
-sudo cp scripts/llng-ssh-proxy /usr/bin/
-sudo chmod 755 /usr/bin/llng-ssh-proxy
+# Install ob-ssh-proxy (included with the PAM module)
+sudo cp scripts/ob-ssh-proxy /usr/bin/
+sudo chmod 755 /usr/bin/ob-ssh-proxy
 
 # Create configuration
-sudo tee /etc/llng/ssh-proxy.conf << 'EOF'
+sudo tee /etc/open-bastion/ssh-proxy.conf << 'EOF'
 PORTAL_URL=https://auth.example.com
-SERVER_TOKEN_FILE=/etc/security/pam_llng.token
+SERVER_TOKEN_FILE=/etc/open-bastion/token
 SERVER_GROUP=bastion
 TARGET_GROUP=backend
 TIMEOUT=10
@@ -662,12 +662,12 @@ Users can then connect to backends using:
 
 ```bash
 # From bastion, connect to backend
-llng-ssh-proxy backend-server
+ob-ssh-proxy backend-server
 
 # Or configure SSH to use the proxy automatically
 # In ~/.ssh/config on bastion:
 Host backend-*
-    ProxyCommand llng-ssh-proxy %h %p
+    ProxyCommand ob-ssh-proxy %h %p
 ```
 
 ### Backend Configuration
@@ -675,7 +675,7 @@ Host backend-*
 On the **backend server**, enable bastion JWT verification:
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 
 # ... other settings ...
 
@@ -683,7 +683,7 @@ On the **backend server**, enable bastion JWT verification:
 bastion_jwt_required = true
 bastion_jwt_issuer = https://auth.example.com
 bastion_jwt_jwks_url = https://auth.example.com/.well-known/jwks.json
-bastion_jwt_jwks_cache = /var/cache/pam_llng/jwks.json
+bastion_jwt_jwks_cache = /var/cache/open-bastion/jwks.json
 bastion_jwt_cache_ttl = 3600
 bastion_jwt_clock_skew = 60
 # bastion_jwt_allowed_bastions = bastion-01,bastion-02  # Optional whitelist
@@ -692,8 +692,8 @@ bastion_jwt_clock_skew = 60
 Also configure sshd to accept the JWT environment variable:
 
 ```bash
-# /etc/ssh/sshd_config.d/llng-backend.conf
-AcceptEnv LLNG_BASTION_JWT
+# /etc/ssh/sshd_config.d/open-bastion.conf
+AcceptEnv OB_BASTION_JWT
 ```
 
 ### Security Benefits
@@ -711,7 +711,7 @@ AcceptEnv LLNG_BASTION_JWT
 | `bastion_jwt_required` | `false` | Enable bastion JWT verification |
 | `bastion_jwt_issuer` | (portal_url) | Expected JWT issuer |
 | `bastion_jwt_jwks_url` | (auto) | URL to fetch public keys |
-| `bastion_jwt_jwks_cache` | `/var/cache/pam_llng/jwks.json` | Local JWKS cache file |
+| `bastion_jwt_jwks_cache` | `/var/cache/open-bastion/jwks.json` | Local JWKS cache file |
 | `bastion_jwt_cache_ttl` | `3600` | JWKS cache TTL in seconds |
 | `bastion_jwt_clock_skew` | `60` | Allowed clock skew in seconds |
 | `bastion_jwt_allowed_bastions` | (none) | Comma-separated list of allowed bastion IDs |
@@ -756,7 +756,7 @@ sudo journalctl -u sshd -f
 
 ### Enable Debug Mode
 
-In `/etc/security/pam_llng.conf`:
+In `/etc/open-bastion/openbastion.conf`:
 ```ini
 log_level = debug
 ```
@@ -773,7 +773,7 @@ curl -X POST https://auth.example.com/oauth2/introspect \
 
 ```bash
 curl -X POST https://auth.example.com/pam/authorize \
-  -H "Authorization: Bearer $(sudo cat /etc/security/pam_llng.token)" \
+  -H "Authorization: Bearer $(sudo cat /etc/open-bastion/token)" \
   -H "Content-Type: application/json" \
   -d '{"user": "testuser", "host": "'$(hostname)'", "server_group": "default"}'
 ```
@@ -784,7 +784,7 @@ curl -X POST https://auth.example.com/pam/authorize \
 |-------|-------|----------|
 | `PAM unable to load module` | Module not in path | Check `/lib/security/` or `/lib64/security/` |
 | `Token introspection failed` | Wrong credentials | Verify client_id and client_secret |
-| `Server not enrolled` | Missing/invalid token | Run `llng-pam-enroll` |
+| `Server not enrolled` | Missing/invalid token | Run `ob-enroll` |
 | `User not authorized` | Server group rules | Check LLNG Manager configuration |
 | `Connection refused` | Portal unreachable | Check network and portal_url |
 
@@ -793,15 +793,15 @@ curl -X POST https://auth.example.com/pam/authorize \
 If the server token expires or is compromised:
 
 ```bash
-sudo rm /etc/security/pam_llng.token
-sudo llng-pam-enroll
+sudo rm /etc/open-bastion/token
+sudo ob-enroll
 ```
 
 ## Security Considerations
 
-1. **Protect configuration files**: `/etc/security/pam_llng.conf` and `.token` should be readable only by root
+1. **Protect configuration files**: `/etc/open-bastion/openbastion.conf` and `token` should be readable only by root
 2. **Use TLS**: Always use HTTPS for portal_url
-3. **Server tokens**: Server tokens are automatically rotated via refresh token mechanism (`token_rotate_refresh = true` by default). If you suspect compromise, re-enroll the server with `llng-pam-enroll`
+3. **Server tokens**: Server tokens are automatically rotated via refresh token mechanism (`token_rotate_refresh = true` by default). If you suspect compromise, re-enroll the server with `ob-enroll`
 4. **Backup access**: Keep a root password or console access as fallback
 
 ## License

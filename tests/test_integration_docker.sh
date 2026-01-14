@@ -200,7 +200,7 @@ wait_for_bastion() {
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         # Check if bastion has enrolled (token file exists)
-        if docker exec llng-cert-bastion test -f /etc/security/llng_server_token 2>/dev/null; then
+        if docker exec ob-cert-bastion test -f /etc/open-bastion/server_token.json 2>/dev/null; then
             log "Bastion enrolled after ${waited}s"
             return 0
         fi
@@ -210,7 +210,7 @@ wait_for_bastion() {
     done
 
     log_error "Bastion did not enroll within ${max_wait}s"
-    docker logs llng-cert-bastion
+    docker logs ob-cert-bastion
     return 1
 }
 
@@ -324,7 +324,7 @@ test_pam_authorize_endpoint() {
 
     # Get server token from bastion
     local server_token
-    server_token=$(docker exec llng-cert-bastion cat /etc/security/llng_server_token 2>/dev/null | jq -r '.access_token // empty') || true
+    server_token=$(docker exec ob-cert-bastion cat /etc/open-bastion/server_token.json 2>/dev/null | jq -r '.access_token // empty') || true
 
     if [[ -z "$server_token" ]]; then
         fail "Could not get server token from bastion"
@@ -437,7 +437,7 @@ test_nss_user_resolution() {
 
     # Check if bastion can resolve user via NSS
     local output
-    output=$(docker exec llng-cert-bastion getent passwd "$TEST_USER" 2>&1) || true
+    output=$(docker exec ob-cert-bastion getent passwd "$TEST_USER" 2>&1) || true
 
     log_verbose "NSS output: $output"
 
@@ -456,12 +456,12 @@ test_pam_cache() {
 
     # Check if cache directory exists and has entries
     local cache_files
-    cache_files=$(docker exec llng-cert-bastion ls -la /var/cache/pam_llng/ 2>&1) || true
+    cache_files=$(docker exec ob-cert-bastion ls -la /var/cache/open-bastion/ 2>&1) || true
 
     log_verbose "Cache files: $cache_files"
 
     # Cache may be empty if no PAM auth happened yet, that's OK
-    if docker exec llng-cert-bastion test -d /var/cache/pam_llng; then
+    if docker exec ob-cert-bastion test -d /var/cache/open-bastion; then
         pass "PAM cache directory exists"
         return 0
     else

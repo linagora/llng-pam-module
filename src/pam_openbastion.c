@@ -1,9 +1,9 @@
 /*
- * pam_llng.c - PAM module for LemonLDAP::NG authentication
+ * pam_openbastion.c - PAM module for Open Bastion authentication
  *
  * This module provides:
- * - pam_sm_authenticate: Validates user password (LLNG access token)
- * - pam_sm_acct_mgmt: Checks user authorization via LLNG server
+ * - pam_sm_authenticate: Validates user password (access token)
+ * - pam_sm_acct_mgmt: Checks user authorization via server
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -33,7 +33,7 @@
 #include <fcntl.h>
 
 #include "config.h"
-#include "llng_client.h"
+#include "ob_client.h"
 #include "audit_log.h"
 #include "rate_limiter.h"
 #include "auth_cache.h"
@@ -46,10 +46,10 @@
 #endif
 
 /* Default configuration file */
-#define DEFAULT_CONFIG_FILE "/etc/security/pam_llng.conf"
+#define DEFAULT_CONFIG_FILE "/etc/open-bastion/openbastion.conf"
 
 /* Module data key for storing client between calls */
-#define PAM_LLNG_DATA "pam_llng_data"
+#define PAM_OPENBASTION_DATA "pam_openbastion_data"
 
 /* Time constants */
 #define SECONDS_PER_DAY 86400
@@ -57,8 +57,8 @@
 
 /* Internal data structure */
 typedef struct {
-    pam_llng_config_t config;
-    llng_client_t *client;
+    pam_openbastion_config_t config;
+    ob_client_t *client;
     audit_context_t *audit;
     rate_limiter_t *rate_limiter;
     auth_cache_t *auth_cache;  /* Authorization cache for offline mode */
@@ -72,19 +72,19 @@ typedef struct {
     ino_t token_file_inode;
     time_t token_file_mtime;
     time_t last_token_check;
-} pam_llng_data_t;
+} pam_openbastion_data_t;
 
 /* How often to re-verify token file permissions (in seconds) */
 #define TOKEN_RECHECK_INTERVAL 300  /* 5 minutes */
 
 /* Logging macros - prefixed to avoid conflict with syslog constants */
-#define LLNG_LOG_ERR(handle, fmt, ...) \
+#define OB_LOG_ERR(handle, fmt, ...) \
     pam_syslog(handle, LOG_ERR, fmt, ##__VA_ARGS__)
-#define LLNG_LOG_WARN(handle, fmt, ...) \
+#define OB_LOG_WARN(handle, fmt, ...) \
     pam_syslog(handle, LOG_WARNING, fmt, ##__VA_ARGS__)
-#define LLNG_LOG_INFO(handle, fmt, ...) \
+#define OB_LOG_INFO(handle, fmt, ...) \
     pam_syslog(handle, LOG_INFO, fmt, ##__VA_ARGS__)
-#define LLNG_LOG_DEBUG(handle, fmt, ...) \
+#define OB_LOG_DEBUG(handle, fmt, ...) \
     pam_syslog(handle, LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 /* Forward declaration */
@@ -94,7 +94,7 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status);
  * Security: Re-verify token file permissions periodically (fixes #46)
  * Returns 0 if OK, -1 if security violation detected
  */
-static int verify_token_file_security(pam_handle_t *pamh, pam_llng_data_t *data)
+static int verify_token_file_security(pam_handle_t *pamh, pam_openbastion_data_t *data)
 {
     if (!data || !data->config.server_token_file) {
         return 0;  /* No token file configured, nothing to verify */
@@ -115,14 +115,14 @@ static int verify_token_file_security(pam_handle_t *pamh, pam_llng_data_t *data)
     /* Re-verify token file security */
     int token_fd = open(data->config.server_token_file, O_RDONLY | O_NOFOLLOW);
     if (token_fd < 0) {
-        LLNG_LOG_ERR(pamh, "Security: token file %s no longer accessible",
+        OB_LOG_ERR(pamh, "Security: token file %s no longer accessible",
                 data->config.server_token_file);
         return -1;
     }
 
     struct stat st;
     if (fstat(token_fd, &st) != 0) {
-        LLNG_LOG_ERR(pamh, "Security: cannot stat token file %s",
+        OB_LOG_ERR(pamh, "Security: cannot stat token file %s",
                 data->config.server_token_file);
         close(token_fd);
         return -1;
@@ -131,14 +131,14 @@ static int verify_token_file_security(pam_handle_t *pamh, pam_llng_data_t *data)
 
     /* Check if file was replaced (different inode) */
     if (data->token_file_inode != 0 && st.st_ino != data->token_file_inode) {
-        LLNG_LOG_ERR(pamh, "Security: token file %s was replaced (inode changed)",
+        OB_LOG_ERR(pamh, "Security: token file %s was replaced (inode changed)",
                 data->config.server_token_file);
         return -1;
     }
 
     /* Check if file was modified */
     if (data->token_file_mtime != 0 && st.st_mtime != data->token_file_mtime) {
-        LLNG_LOG_WARN(pamh, "Security: token file %s was modified since startup",
+        OB_LOG_WARN(pamh, "Security: token file %s was modified since startup",
                 data->config.server_token_file);
         /* Update mtime but continue - modification alone is not a security violation */
         data->token_file_mtime = st.st_mtime;
@@ -146,14 +146,14 @@ static int verify_token_file_security(pam_handle_t *pamh, pam_llng_data_t *data)
 
     /* Re-verify ownership */
     if (st.st_uid != 0) {
-        LLNG_LOG_ERR(pamh, "Security: token file %s ownership changed (not root)",
+        OB_LOG_ERR(pamh, "Security: token file %s ownership changed (not root)",
                 data->config.server_token_file);
         return -1;
     }
 
     /* Re-verify permissions */
     if (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
-        LLNG_LOG_ERR(pamh, "Security: token file %s permissions changed (too permissive)",
+        OB_LOG_ERR(pamh, "Security: token file %s permissions changed (too permissive)",
                 data->config.server_token_file);
         return -1;
     }
@@ -332,47 +332,47 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status)
     (void)pamh;
     (void)error_status;
 
-    pam_llng_data_t *llng_data = (pam_llng_data_t *)data;
-    if (llng_data) {
+    pam_openbastion_data_t *ob_data = (pam_openbastion_data_t *)data;
+    if (ob_data) {
 #ifdef ENABLE_CACHE
-        if (llng_data->cache) {
-            cache_destroy(llng_data->cache);
+        if (ob_data->cache) {
+            cache_destroy(ob_data->cache);
         }
 #endif
-        if (llng_data->auth_cache) {
-            auth_cache_destroy(llng_data->auth_cache);
+        if (ob_data->auth_cache) {
+            auth_cache_destroy(ob_data->auth_cache);
         }
-        if (llng_data->bastion_jwt_verifier) {
-            bastion_jwt_verifier_destroy(llng_data->bastion_jwt_verifier);
+        if (ob_data->bastion_jwt_verifier) {
+            bastion_jwt_verifier_destroy(ob_data->bastion_jwt_verifier);
         }
-        if (llng_data->jwks_cache) {
-            jwks_cache_destroy(llng_data->jwks_cache);
+        if (ob_data->jwks_cache) {
+            jwks_cache_destroy(ob_data->jwks_cache);
         }
-        if (llng_data->jti_cache) {
-            jti_cache_destroy(llng_data->jti_cache);
+        if (ob_data->jti_cache) {
+            jti_cache_destroy(ob_data->jti_cache);
         }
-        if (llng_data->client) {
-            llng_client_destroy(llng_data->client);
+        if (ob_data->client) {
+            ob_client_destroy(ob_data->client);
         }
-        if (llng_data->audit) {
-            audit_destroy(llng_data->audit);
+        if (ob_data->audit) {
+            audit_destroy(ob_data->audit);
         }
-        if (llng_data->rate_limiter) {
-            rate_limiter_destroy(llng_data->rate_limiter);
+        if (ob_data->rate_limiter) {
+            rate_limiter_destroy(ob_data->rate_limiter);
         }
-        config_free(&llng_data->config);
-        free(llng_data);
+        config_free(&ob_data->config);
+        free(ob_data);
     }
 }
 
 /* Initialize module data */
-static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
+static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
                                          int argc,
                                          const char **argv)
 {
-    pam_llng_data_t *data = calloc(1, sizeof(pam_llng_data_t));
+    pam_openbastion_data_t *data = calloc(1, sizeof(pam_openbastion_data_t));
     if (!data) {
-        LLNG_LOG_ERR(pamh, "Failed to allocate memory");
+        OB_LOG_ERR(pamh, "Failed to allocate memory");
         return NULL;
     }
 
@@ -391,36 +391,36 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
     /* Load configuration file */
     int config_result = config_load(config_file, &data->config);
     if (config_result == -2) {
-        LLNG_LOG_ERR(pamh, "Security error: config file %s is not owned by root", config_file);
+        OB_LOG_ERR(pamh, "Security error: config file %s is not owned by root", config_file);
         goto error;
     }
     if (config_result == -3) {
-        LLNG_LOG_ERR(pamh, "Security error: config file %s has insecure permissions (must be 0600 or 0700)", config_file);
+        OB_LOG_ERR(pamh, "Security error: config file %s has insecure permissions (must be 0600 or 0700)", config_file);
         goto error;
     }
     if (config_result != 0) {
-        LLNG_LOG_WARN(pamh, "Failed to load config file %s, using defaults", config_file);
+        OB_LOG_WARN(pamh, "Failed to load config file %s, using defaults", config_file);
     }
 
     /* Override with PAM arguments */
     if (config_parse_args(argc, argv, &data->config) != 0) {
-        LLNG_LOG_ERR(pamh, "Failed to parse PAM arguments");
+        OB_LOG_ERR(pamh, "Failed to parse PAM arguments");
         goto error;
     }
 
     /* Validate configuration */
     int validate_result = config_validate(&data->config);
     if (validate_result == -4) {
-        LLNG_LOG_ERR(pamh, "Security error: portal_url must use HTTPS (use verify_ssl=false to disable)");
+        OB_LOG_ERR(pamh, "Security error: portal_url must use HTTPS (use verify_ssl=false to disable)");
         goto error;
     }
     if (validate_result != 0) {
-        LLNG_LOG_ERR(pamh, "Invalid configuration");
+        OB_LOG_ERR(pamh, "Invalid configuration");
         goto error;
     }
 
     /* Initialize LLNG client */
-    llng_client_config_t client_config = {
+    ob_client_config_t client_config = {
         .portal_url = data->config.portal_url,
         .client_id = data->config.client_id,
         .client_secret = data->config.client_secret,
@@ -440,10 +440,10 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         int token_fd = open(data->config.server_token_file, O_RDONLY | O_NOFOLLOW);
         if (token_fd < 0) {
             if (errno == ELOOP) {
-                LLNG_LOG_ERR(pamh, "Security error: token file %s is a symlink",
+                OB_LOG_ERR(pamh, "Security error: token file %s is a symlink",
                         data->config.server_token_file);
             } else {
-                LLNG_LOG_ERR(pamh, "Security error: cannot open token file %s: %s",
+                OB_LOG_ERR(pamh, "Security error: cannot open token file %s: %s",
                         data->config.server_token_file, strerror(errno));
             }
             goto error;
@@ -451,25 +451,25 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
 
         struct stat st;
         if (fstat(token_fd, &st) != 0) {
-            LLNG_LOG_ERR(pamh, "Security error: cannot stat token file %s",
+            OB_LOG_ERR(pamh, "Security error: cannot stat token file %s",
                     data->config.server_token_file);
             close(token_fd);
             goto error;
         }
         if (st.st_uid != 0) {
-            LLNG_LOG_ERR(pamh, "Security error: token file %s is not owned by root",
+            OB_LOG_ERR(pamh, "Security error: token file %s is not owned by root",
                     data->config.server_token_file);
             close(token_fd);
             goto error;
         }
         if (st.st_mode & (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) {
-            LLNG_LOG_ERR(pamh, "Security error: token file %s has insecure permissions",
+            OB_LOG_ERR(pamh, "Security error: token file %s has insecure permissions",
                     data->config.server_token_file);
             close(token_fd);
             goto error;
         }
         if (!S_ISREG(st.st_mode)) {
-            LLNG_LOG_ERR(pamh, "Security error: token file %s is not a regular file",
+            OB_LOG_ERR(pamh, "Security error: token file %s is not a regular file",
                     data->config.server_token_file);
             close(token_fd);
             goto error;
@@ -491,16 +491,16 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             /* Securely free remaining sensitive fields */
             token_info_free(&token_info);
         } else {
-            LLNG_LOG_WARN(pamh, "Failed to read server token file: %s",
+            OB_LOG_WARN(pamh, "Failed to read server token file: %s",
                      data->config.server_token_file);
         }
     }
 
-    data->client = llng_client_init(&client_config);
+    data->client = ob_client_init(&client_config);
     free((void *)client_config.server_token);
 
     if (!data->client) {
-        LLNG_LOG_ERR(pamh, "Failed to initialize LLNG client");
+        OB_LOG_ERR(pamh, "Failed to initialize LLNG client");
         goto error;
     }
 
@@ -510,7 +510,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         data->cache = cache_init(data->config.cache_dir,
                                  data->config.cache_ttl);
         if (!data->cache) {
-            LLNG_LOG_WARN(pamh, "Failed to initialize cache, continuing without");
+            OB_LOG_WARN(pamh, "Failed to initialize cache, continuing without");
         }
     }
 #endif
@@ -525,7 +525,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         };
         data->audit = audit_init(&audit_cfg);
         if (!data->audit) {
-            LLNG_LOG_WARN(pamh, "Failed to initialize audit logging, continuing without");
+            OB_LOG_WARN(pamh, "Failed to initialize audit logging, continuing without");
         }
     }
 
@@ -541,7 +541,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         };
         data->rate_limiter = rate_limiter_init(&rl_cfg);
         if (!data->rate_limiter) {
-            LLNG_LOG_WARN(pamh, "Failed to initialize rate limiter, continuing without");
+            OB_LOG_WARN(pamh, "Failed to initialize rate limiter, continuing without");
         }
     }
 
@@ -549,7 +549,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
     if (data->config.auth_cache_enabled) {
         data->auth_cache = auth_cache_init(data->config.auth_cache_dir);
         if (!data->auth_cache) {
-            LLNG_LOG_WARN(pamh, "Failed to initialize auth cache, offline mode disabled");
+            OB_LOG_WARN(pamh, "Failed to initialize auth cache, offline mode disabled");
         }
     }
 
@@ -569,7 +569,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
         char jwks_cache_buf[256] = {0};
         if (!jwks_cache_file) {
             snprintf(jwks_cache_buf, sizeof(jwks_cache_buf),
-                     "%s/jwks.json", data->config.cache_dir ? data->config.cache_dir : "/var/cache/pam_llng");
+                     "%s/jwks.json", data->config.cache_dir ? data->config.cache_dir : "/var/cache/open-bastion");
             jwks_cache_file = jwks_cache_buf;
         }
 
@@ -585,7 +585,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             };
             data->jwks_cache = jwks_cache_init(&jwks_cfg);
             if (!data->jwks_cache) {
-                LLNG_LOG_WARN(pamh, "Failed to initialize JWKS cache for bastion JWT");
+                OB_LOG_WARN(pamh, "Failed to initialize JWKS cache for bastion JWT");
             }
         }
 
@@ -598,7 +598,7 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             };
             data->jti_cache = jti_cache_create(&jti_cfg);
             if (!data->jti_cache) {
-                LLNG_LOG_WARN(pamh, "Failed to initialize JTI cache for replay detection");
+                OB_LOG_WARN(pamh, "Failed to initialize JTI cache for replay detection");
             }
         }
 
@@ -620,19 +620,19 @@ static pam_llng_data_t *init_module_data(pam_handle_t *pamh,
             };
             data->bastion_jwt_verifier = bastion_jwt_verifier_init(&jwt_cfg);
             if (!data->bastion_jwt_verifier) {
-                LLNG_LOG_WARN(pamh, "Failed to initialize bastion JWT verifier");
+                OB_LOG_WARN(pamh, "Failed to initialize bastion JWT verifier");
             }
         }
 
         if (data->config.bastion_jwt_required && !data->bastion_jwt_verifier) {
-            LLNG_LOG_ERR(pamh, "Bastion JWT verification required but failed to initialize");
+            OB_LOG_ERR(pamh, "Bastion JWT verification required but failed to initialize");
             goto error;
         }
     }
 
     /* Store data for later calls */
-    if (pam_set_data(pamh, PAM_LLNG_DATA, data, cleanup_data) != PAM_SUCCESS) {
-        LLNG_LOG_ERR(pamh, "Failed to store module data");
+    if (pam_set_data(pamh, PAM_OPENBASTION_DATA, data, cleanup_data) != PAM_SUCCESS) {
+        OB_LOG_ERR(pamh, "Failed to store module data");
         goto error;
     }
 
@@ -644,13 +644,13 @@ error:
 }
 
 /* Get or create module data */
-static pam_llng_data_t *get_module_data(pam_handle_t *pamh,
+static pam_openbastion_data_t *get_module_data(pam_handle_t *pamh,
                                         int argc,
                                         const char **argv)
 {
-    pam_llng_data_t *data = NULL;
+    pam_openbastion_data_t *data = NULL;
 
-    if (pam_get_data(pamh, PAM_LLNG_DATA, (const void **)&data) == PAM_SUCCESS && data) {
+    if (pam_get_data(pamh, PAM_OPENBASTION_DATA, (const void **)&data) == PAM_SUCCESS && data) {
         return data;
     }
 
@@ -675,7 +675,7 @@ static const char *get_client_ip(pam_handle_t *pamh)
  *
  * Returns 1 if certificate info was found, 0 otherwise.
  */
-static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_info)
+static int extract_ssh_cert_info(pam_handle_t *pamh, ob_ssh_cert_info_t *cert_info)
 {
     if (!cert_info) return 0;
     memset(cert_info, 0, sizeof(*cert_info));
@@ -683,19 +683,19 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
     /* Get SSH_USER_AUTH from PAM environment */
     const char *ssh_auth = pam_getenv(pamh, "SSH_USER_AUTH");
     if (!ssh_auth || !*ssh_auth) {
-        LLNG_LOG_DEBUG(pamh, "No SSH_USER_AUTH in environment");
+        OB_LOG_DEBUG(pamh, "No SSH_USER_AUTH in environment");
         return 0;
     }
 
     /* Security: Check length before processing (fixes #45) */
     #define MAX_SSH_AUTH_LEN 8192
     if (strlen(ssh_auth) >= MAX_SSH_AUTH_LEN) {
-        LLNG_LOG_WARN(pamh, "SSH_USER_AUTH too long, ignoring");
+        OB_LOG_WARN(pamh, "SSH_USER_AUTH too long, ignoring");
         return 0;
     }
     #undef MAX_SSH_AUTH_LEN
 
-    LLNG_LOG_DEBUG(pamh, "SSH_USER_AUTH: %s", ssh_auth);
+    OB_LOG_DEBUG(pamh, "SSH_USER_AUTH: %s", ssh_auth);
 
     /*
      * Check if this is certificate authentication.
@@ -703,7 +703,7 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
      * Regular key auth shows as: "publickey <algo> ..."
      */
     if (strstr(ssh_auth, "-cert-") == NULL) {
-        LLNG_LOG_DEBUG(pamh, "SSH authentication is not certificate-based");
+        OB_LOG_DEBUG(pamh, "SSH authentication is not certificate-based");
         return 0;
     }
 
@@ -760,7 +760,7 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
             if ((src) && *(src) && strlen(src) < MAX_SSH_FIELD_LEN) { \
                 (dest) = strdup(src); \
                 if (!(dest)) { \
-                    LLNG_LOG_DEBUG(pamh, "strdup failed for SSH cert field (OOM)"); \
+                    OB_LOG_DEBUG(pamh, "strdup failed for SSH cert field (OOM)"); \
                     oom_error = 1; \
                 } \
             } \
@@ -810,20 +810,20 @@ static int extract_ssh_cert_info(pam_handle_t *pamh, llng_ssh_cert_info_t *cert_
             free(auth_copy);
         } else {
             /* Track OOM on initial SSH auth strdup as well */
-            LLNG_LOG_DEBUG(pamh, "strdup failed for ssh_auth during SSH cert parsing (OOM)");
+            OB_LOG_DEBUG(pamh, "strdup failed for ssh_auth during SSH cert parsing (OOM)");
             oom_error = 1;
         }
 
         /* Security: if OOM occurred during parsing, log warning */
         if (oom_error) {
-            LLNG_LOG_WARN(pamh, "Memory allocation failed during SSH cert parsing - "
+            OB_LOG_WARN(pamh, "Memory allocation failed during SSH cert parsing - "
                           "certificate validation may be incomplete");
         }
         #undef SAFE_FIELD_DUP
         #undef MAX_SSH_FIELD_LEN
     }
 
-    LLNG_LOG_DEBUG(pamh, "SSH cert info: key_id=%s serial=%s principals=%s",
+    OB_LOG_DEBUG(pamh, "SSH cert info: key_id=%s serial=%s principals=%s",
                    cert_info->key_id ? cert_info->key_id : "(none)",
                    cert_info->serial ? cert_info->serial : "(none)",
                    cert_info->principals ? cert_info->principals : "(none)");
@@ -889,21 +889,21 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
     /* Get username */
     ret = pam_get_user(pamh, &user, NULL);
     if (ret != PAM_SUCCESS || !user || !*user) {
-        LLNG_LOG_ERR(pamh, "Failed to get username");
+        OB_LOG_ERR(pamh, "Failed to get username");
         return PAM_USER_UNKNOWN;
     }
 
-    LLNG_LOG_DEBUG(pamh, "Authenticating user: %s", user);
+    OB_LOG_DEBUG(pamh, "Authenticating user: %s", user);
 
     /* Initialize module */
-    pam_llng_data_t *data = get_module_data(pamh, argc, argv);
+    pam_openbastion_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
         return PAM_SERVICE_ERR;
     }
 
     /* Security: Periodically re-verify token file permissions (#46) */
     if (verify_token_file_security(pamh, data) != 0) {
-        LLNG_LOG_ERR(pamh, "Token file security verification failed, refusing authentication");
+        OB_LOG_ERR(pamh, "Token file security verification failed, refusing authentication");
         return PAM_SERVICE_ERR;
     }
 
@@ -935,7 +935,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
 
         int lockout_remaining = rate_limiter_check(data->rate_limiter, rate_key);
         if (lockout_remaining > 0) {
-            LLNG_LOG_WARN(pamh, "User %s is rate limited for %d seconds", user, lockout_remaining);
+            OB_LOG_WARN(pamh, "User %s is rate limited for %d seconds", user, lockout_remaining);
 
             if (audit_initialized) {
                 audit_event.event_type = AUDIT_RATE_LIMITED;
@@ -953,14 +953,14 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
 
     /* If authorize_only mode, skip password check */
     if (data->config.authorize_only) {
-        LLNG_LOG_DEBUG(pamh, "authorize_only mode, skipping password check");
+        OB_LOG_DEBUG(pamh, "authorize_only mode, skipping password check");
         return PAM_SUCCESS;
     }
 
     /* Get password (the LLNG token) */
     ret = pam_get_authtok(pamh, PAM_AUTHTOK, &password, NULL);
     if (ret != PAM_SUCCESS || !password || !*password) {
-        LLNG_LOG_DEBUG(pamh, "No password provided for user %s", user);
+        OB_LOG_DEBUG(pamh, "No password provided for user %s", user);
 
         /* Record failure for rate limiting */
         if (data->rate_limiter) {
@@ -980,7 +980,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
     /* Security: validate token length to prevent DoS via memory exhaustion */
     #define MAX_TOKEN_LENGTH 8192
     if (strlen(password) > MAX_TOKEN_LENGTH) {
-        LLNG_LOG_WARN(pamh, "Token too long (max %d chars)", MAX_TOKEN_LENGTH);
+        OB_LOG_WARN(pamh, "Token too long (max %d chars)", MAX_TOKEN_LENGTH);
 
         if (data->rate_limiter) {
             rate_limiter_record_failure(data->rate_limiter, rate_key);
@@ -1001,15 +1001,15 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
      * The token is destroyed after successful verification (single-use).
      * Note: Cache is not used for one-time tokens.
      */
-    llng_response_t response = {0};
-    if (llng_verify_token(data->client, password, &response) != 0) {
-        LLNG_LOG_ERR(pamh, "Token verification failed: %s",
-                llng_client_error(data->client));
+    ob_response_t response = {0};
+    if (ob_verify_token(data->client, password, &response) != 0) {
+        OB_LOG_ERR(pamh, "Token verification failed: %s",
+                ob_client_error(data->client));
 
         if (audit_initialized) {
             audit_event.event_type = AUDIT_SERVER_ERROR;
             audit_event.result_code = PAM_AUTHINFO_UNAVAIL;
-            audit_event.reason = llng_client_error(data->client);
+            audit_event.reason = ob_client_error(data->client);
             audit_event_set_end_time(&audit_event);
             audit_log_event(data->audit, &audit_event);
         }
@@ -1019,7 +1019,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
 
     /* Check if token is valid (active field from response) */
     if (!response.active) {
-        LLNG_LOG_INFO(pamh, "Token is not valid for user %s: %s", user,
+        OB_LOG_INFO(pamh, "Token is not valid for user %s: %s", user,
                  response.reason ? response.reason : "unknown reason");
         pam_result = PAM_AUTH_ERR;
 
@@ -1034,13 +1034,13 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
             audit_log_event(data->audit, &audit_event);
         }
 
-        llng_response_free(&response);
+        ob_response_free(&response);
         return pam_result;
     }
 
     /* Verify user matches */
     if (!response.user || strcmp(response.user, user) != 0) {
-        LLNG_LOG_WARN(pamh, "Token user mismatch: expected %s, got %s",
+        OB_LOG_WARN(pamh, "Token user mismatch: expected %s, got %s",
                  user, response.user ? response.user : "(null)");
         pam_result = PAM_AUTH_ERR;
 
@@ -1056,7 +1056,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
             audit_log_event(data->audit, &audit_event);
         }
 
-        llng_response_free(&response);
+        ob_response_free(&response);
         return pam_result;
     }
 
@@ -1069,19 +1069,19 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
     if (response.gecos) {
         char *gecos_copy = strdup(response.gecos);
         if (gecos_copy) {
-            pam_set_data(pamh, "llng_gecos", gecos_copy, cleanup_string);
+            pam_set_data(pamh, "ob_gecos", gecos_copy, cleanup_string);
         }
     }
     if (response.shell) {
         char *shell_copy = strdup(response.shell);
         if (shell_copy) {
-            pam_set_data(pamh, "llng_shell", shell_copy, cleanup_string);
+            pam_set_data(pamh, "ob_shell", shell_copy, cleanup_string);
         }
     }
     if (response.home) {
         char *home_copy = strdup(response.home);
         if (home_copy) {
-            pam_set_data(pamh, "llng_home", home_copy, cleanup_string);
+            pam_set_data(pamh, "ob_home", home_copy, cleanup_string);
         }
     }
 
@@ -1093,8 +1093,8 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
         audit_log_event(data->audit, &audit_event);
     }
 
-    LLNG_LOG_INFO(pamh, "User %s authenticated successfully via LLNG token", user);
-    llng_response_free(&response);
+    OB_LOG_INFO(pamh, "User %s authenticated successfully via LLNG token", user);
+    ob_response_free(&response);
     return PAM_SUCCESS;
 }
 
@@ -1139,21 +1139,21 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     /* Get username */
     ret = pam_get_user(pamh, &user, NULL);
     if (ret != PAM_SUCCESS || !user || !*user) {
-        LLNG_LOG_ERR(pamh, "Failed to get username");
+        OB_LOG_ERR(pamh, "Failed to get username");
         return PAM_USER_UNKNOWN;
     }
 
-    LLNG_LOG_DEBUG(pamh, "Checking authorization for user: %s", user);
+    OB_LOG_DEBUG(pamh, "Checking authorization for user: %s", user);
 
     /* Initialize module */
-    pam_llng_data_t *data = get_module_data(pamh, argc, argv);
+    pam_openbastion_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
         return PAM_SERVICE_ERR;
     }
 
     /* Security: Periodically re-verify token file permissions (#46) */
     if (verify_token_file_security(pamh, data) != 0) {
-        LLNG_LOG_ERR(pamh, "Token file security verification failed, refusing authorization");
+        OB_LOG_ERR(pamh, "Token file security verification failed, refusing authorization");
         return PAM_SERVICE_ERR;
     }
 
@@ -1185,7 +1185,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         const char *bastion_jwt = pam_getenv(pamh, "LLNG_BASTION_JWT");
 
         if (!bastion_jwt || !*bastion_jwt) {
-            LLNG_LOG_ERR(pamh, "Bastion JWT required but not provided for user %s", user);
+            OB_LOG_ERR(pamh, "Bastion JWT required but not provided for user %s", user);
 
             if (data->audit) {
                 audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);
@@ -1209,7 +1209,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
                 data->bastion_jwt_verifier, bastion_jwt, &claims);
 
             if (jwt_result != BASTION_JWT_OK) {
-                LLNG_LOG_ERR(pamh, "Bastion JWT verification failed for user %s: %s",
+                OB_LOG_ERR(pamh, "Bastion JWT verification failed for user %s: %s",
                              user, bastion_jwt_result_str(jwt_result));
 
                 if (data->audit) {
@@ -1230,7 +1230,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
 
             /* Verify the JWT subject matches the PAM user */
             if (!claims.sub || strcmp(claims.sub, user) != 0) {
-                LLNG_LOG_ERR(pamh, "Bastion JWT subject mismatch: expected %s, got %s",
+                OB_LOG_ERR(pamh, "Bastion JWT subject mismatch: expected %s, got %s",
                              user, claims.sub ? claims.sub : "(null)");
 
                 if (data->audit) {
@@ -1254,13 +1254,13 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
             /* Optionally verify the bastion IP matches the connecting client */
             if (claims.bastion_ip && client_ip && strcmp(client_ip, "local") != 0) {
                 if (strcmp(claims.bastion_ip, client_ip) != 0) {
-                    LLNG_LOG_WARN(pamh, "Bastion IP mismatch: JWT claims %s, connection from %s",
+                    OB_LOG_WARN(pamh, "Bastion IP mismatch: JWT claims %s, connection from %s",
                                   claims.bastion_ip, client_ip);
                     /* This is a warning, not an error - the bastion might be behind NAT */
                 }
             }
 
-            LLNG_LOG_INFO(pamh, "Bastion JWT verified for user %s from bastion %s",
+            OB_LOG_INFO(pamh, "Bastion JWT verified for user %s from bastion %s",
                           user, claims.bastion_id ? claims.bastion_id : "(unknown)");
 
             /* Store bastion info in PAM environment for potential use */
@@ -1269,10 +1269,10 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
                 int env_len = snprintf(env_buf, sizeof(env_buf),
                                        "LLNG_BASTION_ID=%s", claims.bastion_id);
                 if (env_len < 0) {
-                    LLNG_LOG_WARN(pamh,
+                    OB_LOG_WARN(pamh,
                                   "Failed to format LLNG_BASTION_ID environment variable");
                 } else if ((size_t)env_len >= sizeof(env_buf)) {
-                    LLNG_LOG_WARN(pamh,
+                    OB_LOG_WARN(pamh,
                                   "Truncated LLNG_BASTION_ID (length %d, buffer %zu)",
                                   env_len, sizeof(env_buf));
                 }
@@ -1285,7 +1285,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
              * No local verifier available - this shouldn't happen if
              * bastion_jwt_required is true, but handle it gracefully.
              */
-            LLNG_LOG_ERR(pamh, "Bastion JWT required but verifier not initialized");
+            OB_LOG_ERR(pamh, "Bastion JWT required but verifier not initialized");
             return PAM_SERVICE_ERR;
         }
     }
@@ -1294,7 +1294,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
      * Detect if this is an SSH connection with certificate authentication.
      * Extract certificate info to send to LLNG for authorization.
      */
-    llng_ssh_cert_info_t ssh_cert_info = {0};
+    ob_ssh_cert_info_t ssh_cert_info = {0};
     bool has_ssh_cert = false;
 
     if (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0) {
@@ -1318,23 +1318,23 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     bool use_cache = (data->auth_cache != NULL);
     if (use_cache && data->config.auth_cache_force_online) {
         if (auth_cache_force_online(data->config.auth_cache_force_online, user)) {
-            LLNG_LOG_INFO(pamh, "Force-online requested for user %s, skipping cache", user);
+            OB_LOG_INFO(pamh, "Force-online requested for user %s, skipping cache", user);
             use_cache = false;
         }
     }
 
     /* Call authorization endpoint (with or without SSH cert info) */
-    llng_response_t response = {0};
+    ob_response_t response = {0};
     int auth_result;
     bool from_cache = false;
 
     if (has_ssh_cert) {
-        LLNG_LOG_DEBUG(pamh, "Authorizing with SSH certificate info");
-        auth_result = llng_authorize_user_with_cert(data->client, user, hostname,
+        OB_LOG_DEBUG(pamh, "Authorizing with SSH certificate info");
+        auth_result = ob_authorize_user_with_cert(data->client, user, hostname,
                                                      service, &ssh_cert_info, &response);
-        llng_ssh_cert_info_free(&ssh_cert_info);
+        ob_ssh_cert_info_free(&ssh_cert_info);
     } else {
-        auth_result = llng_authorize_user(data->client, user, hostname, service, &response);
+        auth_result = ob_authorize_user(data->client, user, hostname, service, &response);
     }
 
     if (auth_result != 0) {
@@ -1346,7 +1346,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
             auth_cache_entry_t cache_entry = {0};
             if (auth_cache_lookup(data->auth_cache, user,
                                   data->config.server_group, hostname, &cache_entry)) {
-                LLNG_LOG_INFO(pamh, "Server unavailable, using cached authorization for %s", user);
+                OB_LOG_INFO(pamh, "Server unavailable, using cached authorization for %s", user);
 
                 /* Populate response from cache */
                 response.authorized = cache_entry.authorized;
@@ -1374,18 +1374,18 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
                 from_cache = true;
                 auth_result = 0;  /* Cache hit is success */
             } else {
-                LLNG_LOG_WARN(pamh, "Server unavailable and no valid cache for %s", user);
+                OB_LOG_WARN(pamh, "Server unavailable and no valid cache for %s", user);
             }
         }
 
         if (auth_result != 0) {
-            LLNG_LOG_ERR(pamh, "Authorization check failed: %s",
-                    llng_client_error(data->client));
+            OB_LOG_ERR(pamh, "Authorization check failed: %s",
+                    ob_client_error(data->client));
 
             if (audit_initialized) {
                 audit_event.event_type = AUDIT_SERVER_ERROR;
                 audit_event.result_code = PAM_AUTHINFO_UNAVAIL;
-                audit_event.reason = llng_client_error(data->client);
+                audit_event.reason = ob_client_error(data->client);
                 audit_event_set_end_time(&audit_event);
                 audit_log_event(data->audit, &audit_event);
             }
@@ -1396,7 +1396,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
 
     /* Check result */
     if (!response.authorized) {
-        LLNG_LOG_INFO(pamh, "User %s not authorized%s: %s", user,
+        OB_LOG_INFO(pamh, "User %s not authorized%s: %s", user,
                  from_cache ? " (from cache)" : "",
                  response.reason ? response.reason : "no reason given");
 
@@ -1407,7 +1407,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
             audit_log_event(data->audit, &audit_event);
         }
 
-        llng_response_free(&response);
+        ob_response_free(&response);
         return PAM_PERM_DENIED;
     }
 
@@ -1434,9 +1434,9 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
 
         if (auth_cache_store(data->auth_cache, user, data->config.server_group,
                              hostname, &cache_entry, ttl) == 0) {
-            LLNG_LOG_DEBUG(pamh, "Cached authorization for %s (TTL: %d seconds)", user, ttl);
+            OB_LOG_DEBUG(pamh, "Cached authorization for %s (TTL: %d seconds)", user, ttl);
         } else {
-            LLNG_LOG_WARN(pamh, "Failed to cache authorization for %s", user);
+            OB_LOG_WARN(pamh, "Failed to cache authorization for %s", user);
         }
     }
 
@@ -1447,7 +1447,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
      */
     if (strcmp(service, "sudo") == 0) {
         if (response.has_permissions && !response.permissions.sudo_allowed) {
-            LLNG_LOG_INFO(pamh, "User %s authorized for SSH but not for sudo%s", user,
+            OB_LOG_INFO(pamh, "User %s authorized for SSH but not for sudo%s", user,
                      from_cache ? " (from cache)" : "");
 
             if (audit_initialized) {
@@ -1457,14 +1457,14 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
                 audit_log_event(data->audit, &audit_event);
             }
 
-            llng_response_free(&response);
+            ob_response_free(&response);
             return PAM_PERM_DENIED;
         }
 
         /* Store sudo_nopasswd flag if applicable */
         if (response.has_permissions && response.permissions.sudo_nopasswd) {
             pam_putenv(pamh, "LLNG_SUDO_NOPASSWD=1");
-            LLNG_LOG_DEBUG(pamh, "User %s granted sudo without password", user);
+            OB_LOG_DEBUG(pamh, "User %s granted sudo without password", user);
         }
     }
 
@@ -1483,17 +1483,17 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_log_event(data->audit, &audit_event);
     }
 
-    LLNG_LOG_INFO(pamh, "User %s authorized for access%s%s", user,
+    OB_LOG_INFO(pamh, "User %s authorized for access%s%s", user,
                   (response.has_permissions && response.permissions.sudo_allowed) ?
                   " (sudo allowed)" : "",
                   from_cache ? " (from cache)" : "");
-    llng_response_free(&response);
+    ob_response_free(&response);
     return PAM_SUCCESS;
 }
 
 /*
  * Create Unix user account by writing directly to /etc/passwd and /etc/shadow
- * This bypasses NSS checks that would otherwise fail because libnss_llng
+ * This bypasses NSS checks that would otherwise fail because libnss_openbastion
  * reports the user as already existing.
  *
  * Uses file locking to prevent race conditions with concurrent logins.
@@ -1501,7 +1501,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
  */
 static int create_unix_user(pam_handle_t *pamh,
                             const char *user,
-                            const pam_llng_config_t *config,
+                            const pam_openbastion_config_t *config,
                             const char *gecos,
                             const char *shell,
                             const char *home)
@@ -1519,23 +1519,23 @@ static int create_unix_user(pam_handle_t *pamh,
 
     /* Validate username before any file operations */
     if (!validate_username(user)) {
-        LLNG_LOG_ERR(pamh, "Invalid username for user creation: %s", user);
+        OB_LOG_ERR(pamh, "Invalid username for user creation: %s", user);
         return -1;
     }
 
-    /* Get UID/GID from NSS (libnss_llng) */
+    /* Get UID/GID from NSS (libnss_openbastion) */
     struct passwd *nss_pw = getpwnam(user);
     if (nss_pw) {
         uid = nss_pw->pw_uid;
         gid = nss_pw->pw_gid;
     } else {
-        LLNG_LOG_ERR(pamh, "Cannot get user info from NSS for %s", user);
+        OB_LOG_ERR(pamh, "Cannot get user info from NSS for %s", user);
         return -1;
     }
 
     /* Verify that the primary group exists */
     if (!group_exists_locally(gid)) {
-        LLNG_LOG_ERR(pamh, "Primary group %d does not exist for user %s", gid, user);
+        OB_LOG_ERR(pamh, "Primary group %d does not exist for user %s", gid, user);
         return -1;
     }
 
@@ -1545,7 +1545,7 @@ static int create_unix_user(pam_handle_t *pamh,
     } else {
         /* Use default home base if provided path is invalid or empty */
         if (home && *home) {
-            LLNG_LOG_WARN(pamh, "Invalid home path '%s' for user %s, using default", home, user);
+            OB_LOG_WARN(pamh, "Invalid home path '%s' for user %s, using default", home, user);
         }
         if (config->create_user_home_base) {
             snprintf(home_dir, sizeof(home_dir), "%s/%s", config->create_user_home_base, user);
@@ -1560,7 +1560,7 @@ static int create_unix_user(pam_handle_t *pamh,
         user_shell = shell;
     } else {
         if (shell && *shell) {
-            LLNG_LOG_WARN(pamh, "Invalid shell '%s' for user %s, using default", shell, user);
+            OB_LOG_WARN(pamh, "Invalid shell '%s' for user %s, using default", shell, user);
         }
         /* Try config default shell */
         if (config->create_user_shell &&
@@ -1576,11 +1576,11 @@ static int create_unix_user(pam_handle_t *pamh,
     /* Sanitize GECOS to prevent /etc/passwd corruption */
     safe_gecos = sanitize_gecos(gecos);
     if (!safe_gecos) {
-        LLNG_LOG_ERR(pamh, "Failed to sanitize GECOS for user %s", user);
+        OB_LOG_ERR(pamh, "Failed to sanitize GECOS for user %s", user);
         goto cleanup;
     }
 
-    LLNG_LOG_INFO(pamh, "Creating Unix user: %s (uid=%d, gid=%d)", user, uid, gid);
+    OB_LOG_INFO(pamh, "Creating Unix user: %s (uid=%d, gid=%d)", user, uid, gid);
 
     /*
      * Open and lock both files before writing to ensure atomicity.
@@ -1589,30 +1589,30 @@ static int create_unix_user(pam_handle_t *pamh,
      */
     passwd_fd = open("/etc/passwd", O_RDWR | O_APPEND);
     if (passwd_fd < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot open /etc/passwd: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot open /etc/passwd: %s", strerror(errno));
         goto cleanup;
     }
 
     shadow_fd = open("/etc/shadow", O_RDWR | O_APPEND);
     if (shadow_fd < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot open /etc/shadow: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot open /etc/shadow: %s", strerror(errno));
         goto cleanup;
     }
 
     /* Acquire exclusive locks on both files */
     if (flock(passwd_fd, LOCK_EX) < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot lock /etc/passwd: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot lock /etc/passwd: %s", strerror(errno));
         goto cleanup;
     }
 
     if (flock(shadow_fd, LOCK_EX) < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot lock /etc/shadow: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot lock /etc/shadow: %s", strerror(errno));
         goto cleanup;
     }
 
     /* Re-check if user exists after acquiring locks (TOCTOU protection) */
     if (user_exists_locally(user)) {
-        LLNG_LOG_DEBUG(pamh, "User %s was created by another process", user);
+        OB_LOG_DEBUG(pamh, "User %s was created by another process", user);
         ret = 0;  /* Not an error - user exists now */
         goto cleanup;
     }
@@ -1620,14 +1620,14 @@ static int create_unix_user(pam_handle_t *pamh,
     /* Convert file descriptors to FILE* for fprintf */
     passwd_file = fdopen(passwd_fd, "a");
     if (!passwd_file) {
-        LLNG_LOG_ERR(pamh, "Cannot fdopen /etc/passwd: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot fdopen /etc/passwd: %s", strerror(errno));
         goto cleanup;
     }
     passwd_fd = -1;  /* fdopen took ownership */
 
     shadow_file = fdopen(shadow_fd, "a");
     if (!shadow_file) {
-        LLNG_LOG_ERR(pamh, "Cannot fdopen /etc/shadow: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot fdopen /etc/shadow: %s", strerror(errno));
         goto cleanup;
     }
     shadow_fd = -1;  /* fdopen took ownership */
@@ -1635,12 +1635,12 @@ static int create_unix_user(pam_handle_t *pamh,
     /* Write to /etc/passwd */
     if (fprintf(passwd_file, "%s:x:%d:%d:%s:%s:%s\n",
                 user, uid, gid, safe_gecos, home_dir, user_shell) < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot write to /etc/passwd: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot write to /etc/passwd: %s", strerror(errno));
         goto cleanup;
     }
 
     if (fflush(passwd_file) != 0) {
-        LLNG_LOG_ERR(pamh, "Cannot flush /etc/passwd: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot flush /etc/passwd: %s", strerror(errno));
         goto cleanup;
     }
 
@@ -1648,9 +1648,9 @@ static int create_unix_user(pam_handle_t *pamh,
     /* Format: username:!:days_since_epoch:0:99999:7::: */
     long days = time(NULL) / SECONDS_PER_DAY;
     if (fprintf(shadow_file, "%s:!:%ld:0:99999:7:::\n", user, days) < 0) {
-        LLNG_LOG_ERR(pamh, "Cannot write to /etc/shadow: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot write to /etc/shadow: %s", strerror(errno));
         /* passwd was written but shadow failed - attempt rollback via userdel */
-        LLNG_LOG_WARN(pamh, "Attempting rollback of partial user creation");
+        OB_LOG_WARN(pamh, "Attempting rollback of partial user creation");
         pid_t pid = fork();
         if (pid == 0) {
             execl("/usr/sbin/userdel", "userdel", user, NULL);
@@ -1663,7 +1663,7 @@ static int create_unix_user(pam_handle_t *pamh,
     }
 
     if (fflush(shadow_file) != 0) {
-        LLNG_LOG_ERR(pamh, "Cannot flush /etc/shadow: %s", strerror(errno));
+        OB_LOG_ERR(pamh, "Cannot flush /etc/shadow: %s", strerror(errno));
         goto cleanup;
     }
 
@@ -1678,13 +1678,13 @@ static int create_unix_user(pam_handle_t *pamh,
     bool home_dir_safe = false;  /* Track if we verified the directory is safe */
 
     if (mkdir(home_dir, 0700) != 0 && errno != EEXIST) {
-        LLNG_LOG_WARN(pamh, "Cannot create home directory %s: %s", home_dir, strerror(errno));
+        OB_LOG_WARN(pamh, "Cannot create home directory %s: %s", home_dir, strerror(errno));
         /* Continue anyway - user is created */
     } else {
         /* Open directory to get fd for secure ownership change */
         int home_fd = open(home_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         if (home_fd < 0) {
-            LLNG_LOG_WARN(pamh, "Cannot open home directory %s for chown: %s",
+            OB_LOG_WARN(pamh, "Cannot open home directory %s for chown: %s",
                           home_dir, strerror(errno));
             /* Security: don't proceed with skel/chown if we can't verify the directory */
         } else {
@@ -1697,11 +1697,11 @@ static int create_unix_user(pam_handle_t *pamh,
                     if (fchown(home_fd, uid, gid) == 0) {
                         home_dir_safe = true;  /* Directory verified and ownership set */
                     } else {
-                        LLNG_LOG_WARN(pamh, "Cannot set ownership of home directory: %s",
+                        OB_LOG_WARN(pamh, "Cannot set ownership of home directory: %s",
                                       strerror(errno));
                     }
                 } else {
-                    LLNG_LOG_WARN(pamh, "Home directory %s owned by unexpected user %d, skipping chown",
+                    OB_LOG_WARN(pamh, "Home directory %s owned by unexpected user %d, skipping chown",
                                   home_dir, st.st_uid);
                 }
             }
@@ -1724,7 +1724,7 @@ static int create_unix_user(pam_handle_t *pamh,
                         waitpid(pid, &status, 0);
                     }
                 } else {
-                    LLNG_LOG_WARN(pamh, "Skel path validation failed for %s, skipping",
+                    OB_LOG_WARN(pamh, "Skel path validation failed for %s, skipping",
                                   config->create_user_skel);
                 }
             }
@@ -1747,7 +1747,7 @@ static int create_unix_user(pam_handle_t *pamh,
         }
     }
 
-    LLNG_LOG_INFO(pamh, "Successfully created Unix user: %s", user);
+    OB_LOG_INFO(pamh, "Successfully created Unix user: %s", user);
 
     /* Invalidate nscd cache so the new user is visible immediately */
     invalidate_nscd_cache();
@@ -1784,7 +1784,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
     /* Get username */
     ret = pam_get_user(pamh, &user, NULL);
     if (ret != PAM_SUCCESS || !user || !*user) {
-        LLNG_LOG_ERR(pamh, "Failed to get username for session");
+        OB_LOG_ERR(pamh, "Failed to get username for session");
         return PAM_SESSION_ERR;
     }
 
@@ -1796,28 +1796,28 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
      */
     char *session_user = strdup(user);
     if (!session_user) {
-        LLNG_LOG_ERR(pamh, "Out of memory storing session user");
+        OB_LOG_ERR(pamh, "Out of memory storing session user");
         return PAM_BUF_ERR;
     }
-    pam_set_data(pamh, "llng_session_user", session_user, cleanup_string);
+    pam_set_data(pamh, "ob_session_user", session_user, cleanup_string);
 
     /* Initialize module */
-    pam_llng_data_t *data = get_module_data(pamh, argc, argv);
+    pam_openbastion_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
         return PAM_SESSION_ERR;
     }
 
     /* Check if user creation is enabled */
     if (!data->config.create_user_enabled) {
-        LLNG_LOG_DEBUG(pamh, "User creation disabled, skipping for %s", user);
+        OB_LOG_DEBUG(pamh, "User creation disabled, skipping for %s", user);
         return PAM_SUCCESS;
     }
 
     /* Check if user already exists in local /etc/passwd (not via NSS)
-     * This is important because libnss_llng may report the user as existing
+     * This is important because libnss_openbastion may report the user as existing
      * even though no local Unix account has been created yet. */
     if (user_exists_locally(user)) {
-        LLNG_LOG_DEBUG(pamh, "User %s already exists locally", user);
+        OB_LOG_DEBUG(pamh, "User %s already exists locally", user);
         return PAM_SUCCESS;
     }
 
@@ -1827,23 +1827,23 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
     const char *home = NULL;
 
     /* Try to get LLNG user info stored during authentication */
-    const void *llng_gecos = NULL;
-    const void *llng_shell = NULL;
-    const void *llng_home = NULL;
+    const void *ob_gecos = NULL;
+    const void *ob_shell = NULL;
+    const void *ob_home = NULL;
 
-    pam_get_data(pamh, "llng_gecos", &llng_gecos);
-    pam_get_data(pamh, "llng_shell", &llng_shell);
-    pam_get_data(pamh, "llng_home", &llng_home);
+    pam_get_data(pamh, "ob_gecos", &ob_gecos);
+    pam_get_data(pamh, "ob_shell", &ob_shell);
+    pam_get_data(pamh, "ob_home", &ob_home);
 
-    gecos = (const char *)llng_gecos;
-    shell = (const char *)llng_shell;
-    home = (const char *)llng_home;
+    gecos = (const char *)ob_gecos;
+    shell = (const char *)ob_shell;
+    home = (const char *)ob_home;
 
     /* Create the user */
-    LLNG_LOG_INFO(pamh, "User %s does not exist, creating account", user);
+    OB_LOG_INFO(pamh, "User %s does not exist, creating account", user);
 
     if (create_unix_user(pamh, user, &data->config, gecos, shell, home) != 0) {
-        LLNG_LOG_ERR(pamh, "Failed to create Unix user: %s", user);
+        OB_LOG_ERR(pamh, "Failed to create Unix user: %s", user);
         return PAM_SESSION_ERR;
     }
 
@@ -1890,10 +1890,10 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
      * This prevents cache invalidation attacks where close_session could
      * be called with a different username to invalidate another user's cache.
      */
-    if (pam_get_data(pamh, "llng_session_user", (const void **)&session_user) == PAM_SUCCESS
+    if (pam_get_data(pamh, "ob_session_user", (const void **)&session_user) == PAM_SUCCESS
         && session_user) {
         if (strcmp(user, session_user) != 0) {
-            LLNG_LOG_WARN(pamh,
+            OB_LOG_WARN(pamh,
                 "Security: close_session user mismatch (session=%s, request=%s), "
                 "refusing cache invalidation",
                 session_user, user);
@@ -1902,14 +1902,14 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
     }
 
     /* Initialize module to access cache */
-    pam_llng_data_t *data = get_module_data(pamh, argc, argv);
+    pam_openbastion_data_t *data = get_module_data(pamh, argc, argv);
     if (!data) {
         return PAM_SUCCESS;  /* No config, nothing to do */
     }
 
     /* Invalidate cache for this user if configured */
     if (data->config.cache_invalidate_on_logout && data->cache) {
-        LLNG_LOG_DEBUG(pamh, "Invalidating cache for user %s on session close", user);
+        OB_LOG_DEBUG(pamh, "Invalidating cache for user %s on session close", user);
         cache_invalidate_user(data->cache, user);
     }
 
