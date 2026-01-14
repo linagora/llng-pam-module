@@ -20,6 +20,10 @@ Pistes exploratoires pour améliorer la sécurité mais non implémentées.
 - **R-S9** : Replay d'un JWT bastion intercepté (P=1, I=2 - détection replay réduit P)
 - **R-S10** : Rotation des clés JWKS non propagée (P=1, I=1 - atténué par publication anticipée LLNG)
 
+**Amélioration par intégration CrowdSec :**
+- **R-S1** : Protection renforcée contre brute-force (blocage IPs communautaires + auto-ban local)
+- **R-S6** : Détection comportementale sur le bastion (alertes centralisables via Crowdsieve)
+
 Voir [01-enrollment.md](01-enrollment.md) et [02-ssh-connection.md](02-ssh-connection.md) pour les détails des risques et remédiations.
 
 Voir [03-offboarding.md](03-offboarding.md) pour la procédure de révocation des accès administrateurs.
@@ -146,6 +150,57 @@ Piste supplémentaire (optionnelle) :
 ---
 
 ## Sécurités Implémentées (valorisation)
+
+### Intégration CrowdSec - **IMPLÉMENTÉ**
+
+Le module PAM intègre CrowdSec pour la détection et le blocage des menaces :
+
+**Bouncer (pré-authentification) :**
+```c
+// src/crowdsec.c - Vérifie si l'IP est bannie avant auth
+crowdsec_result_t result = crowdsec_check_ip(ctx, client_ip);
+if (result == CS_DENY) {
+    // Bloquer ou avertir selon crowdsec_action
+}
+```
+
+**Watcher (post-authentification) :**
+```c
+// src/crowdsec.c - Reporte les échecs d'authentification
+crowdsec_report_failure(ctx, client_ip, username, service);
+// Auto-ban après max_failures dans block_delay secondes
+```
+
+**Configuration :**
+```ini
+# /etc/open-bastion/openbastion.conf
+crowdsec_enabled = true
+crowdsec_url = http://127.0.0.1:8080
+
+# Bouncer
+crowdsec_bouncer_key = <bouncer_key>
+crowdsec_action = reject  # ou warn
+crowdsec_fail_open = true
+
+# Watcher
+crowdsec_machine_id = <machine_id>
+crowdsec_password = <password>
+crowdsec_scenario = open-bastion/ssh-auth-failure
+crowdsec_send_all_alerts = true
+crowdsec_max_failures = 5
+crowdsec_block_delay = 180
+crowdsec_ban_duration = 4h
+```
+
+**Bénéfices sécurité :**
+- Protection collaborative : bénéficie de la base de données communautaire CrowdSec
+- Détection précoce : blocage des IPs malveillantes avant authentification
+- Auto-ban local : bannissement automatique après N échecs
+- Centralisation possible via [Crowdsieve](https://github.com/linagora/crowdsieve)
+
+**Risques impactés :**
+- **R-S1** : Réduction de P grâce au blocage des IPs de brute-force connues
+- **R-S6** : Détection des comportements anormaux sur le bastion
 
 ### Génération UUID cryptographiquement sécurisée
 

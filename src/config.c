@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <libgen.h>
 #include <fcntl.h>
+#include <syslog.h>
 
 #include "config.h"
 
@@ -139,6 +140,20 @@ void config_init(pam_openbastion_config_t *config)
     config->bastion_jwt_replay_detection = true;
     config->bastion_jwt_replay_cache_size = 10000;
     config->bastion_jwt_replay_cleanup_interval = 60;
+
+    /* CrowdSec integration - disabled by default */
+    config->crowdsec_enabled = false;
+    config->crowdsec_url = strdup("http://127.0.0.1:8080");
+    config->crowdsec_timeout = 5;
+    config->crowdsec_fail_open = true;
+    config->crowdsec_action = strdup("reject");
+    config->crowdsec_scenario = strdup("open-bastion/ssh-auth-failure");
+    config->crowdsec_send_all_alerts = true;
+    config->crowdsec_max_failures = 5;
+    config->crowdsec_block_delay = 180;
+    config->crowdsec_ban_duration = strdup("4h");
+
+    /* Note: strdup failures for defaults are checked by config_validate() */
 }
 
 /* Secure free: zero memory before freeing */
@@ -202,6 +217,15 @@ void config_free(pam_openbastion_config_t *config)
     free(config->bastion_jwt_jwks_url);
     free(config->bastion_jwt_jwks_cache);
     free(config->bastion_jwt_allowed_bastions);
+
+    /* CrowdSec integration */
+    free(config->crowdsec_url);
+    secure_free_str(config->crowdsec_bouncer_key);
+    free(config->crowdsec_action);
+    free(config->crowdsec_machine_id);
+    secure_free_str(config->crowdsec_password);
+    free(config->crowdsec_scenario);
+    free(config->crowdsec_ban_duration);
 
     explicit_bzero(config, sizeof(*config));
 }
@@ -579,6 +603,92 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "bastion_jwt_replay_cleanup_interval") == 0) {
         config->bastion_jwt_replay_cleanup_interval = parse_int(value, 60, 10, 3600);
     }
+    /* CrowdSec integration options */
+    else if (strcmp(key, "crowdsec_enabled") == 0 || strcmp(key, "crowdsec") == 0) {
+        config->crowdsec_enabled = parse_bool(value);
+    }
+    else if (strcmp(key, "crowdsec_url") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_url);
+            config->crowdsec_url = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
+    else if (strcmp(key, "crowdsec_timeout") == 0) {
+        config->crowdsec_timeout = parse_int(value, 5, 1, 60);
+    }
+    else if (strcmp(key, "crowdsec_fail_open") == 0) {
+        config->crowdsec_fail_open = parse_bool(value);
+    }
+    else if (strcmp(key, "crowdsec_bouncer_key") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_bouncer_key);
+            config->crowdsec_bouncer_key = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
+    else if (strcmp(key, "crowdsec_action") == 0) {
+        /* Validate: only "reject" or "warn" are valid */
+        if (strcmp(value, "reject") == 0 || strcmp(value, "warn") == 0) {
+            char *tmp = strdup(value);
+            if (tmp) {
+                free(config->crowdsec_action);
+                config->crowdsec_action = tmp;
+            } else {
+                syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+            }
+        }
+        /* Invalid values are silently ignored, keeping the default */
+    }
+    else if (strcmp(key, "crowdsec_machine_id") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_machine_id);
+            config->crowdsec_machine_id = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
+    else if (strcmp(key, "crowdsec_password") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_password);
+            config->crowdsec_password = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
+    else if (strcmp(key, "crowdsec_scenario") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_scenario);
+            config->crowdsec_scenario = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
+    else if (strcmp(key, "crowdsec_send_all_alerts") == 0) {
+        config->crowdsec_send_all_alerts = parse_bool(value);
+    }
+    else if (strcmp(key, "crowdsec_max_failures") == 0) {
+        config->crowdsec_max_failures = parse_int(value, 5, 0, 100);
+    }
+    else if (strcmp(key, "crowdsec_block_delay") == 0) {
+        config->crowdsec_block_delay = parse_int(value, 180, 10, 86400);
+    }
+    else if (strcmp(key, "crowdsec_ban_duration") == 0) {
+        char *tmp = strdup(value);
+        if (tmp) {
+            free(config->crowdsec_ban_duration);
+            config->crowdsec_ban_duration = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
+        }
+    }
     /* Unknown keys are silently ignored */
 
     return 0;
@@ -801,6 +911,20 @@ int config_validate(const pam_openbastion_config_t *config)
     /* Create directories for audit log file if needed */
     if (config->audit_enabled && config->audit_log_file) {
         ensure_parent_dir(config->audit_log_file);
+    }
+
+    /* Validate CrowdSec configuration if enabled */
+    if (config->crowdsec_enabled) {
+        /* These fields must not be NULL if CrowdSec is enabled */
+        if (!config->crowdsec_url || !config->crowdsec_scenario ||
+            !config->crowdsec_action || !config->crowdsec_ban_duration) {
+            return -5;  /* CrowdSec configuration incomplete */
+        }
+        /* Validate action is "reject" or "warn" */
+        if (strcmp(config->crowdsec_action, "reject") != 0 &&
+            strcmp(config->crowdsec_action, "warn") != 0) {
+            return -5;  /* Invalid crowdsec_action */
+        }
     }
 
     /* For account management, we need a server token */
