@@ -10,7 +10,7 @@ CLIENT_ID="${LLNG_CLIENT_ID:-pam-access}"
 CLIENT_SECRET="${LLNG_CLIENT_SECRET:-pamsecret}"
 ADMIN_USER="${LLNG_ADMIN_USER:-dwho}"
 ADMIN_PASSWORD="${LLNG_ADMIN_PASSWORD:-dwho}"
-TOKEN_FILE="/etc/security/llng_server_token"
+TOKEN_FILE="/etc/open-bastion/server_token.json"
 
 echo "=== LLNG Backend Starting (Token Auth Mode) ==="
 echo "Portal URL: $PORTAL_URL"

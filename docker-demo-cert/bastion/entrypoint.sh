@@ -11,7 +11,7 @@ CLIENT_SECRET="${LLNG_CLIENT_SECRET:-pamsecret}"
 ADMIN_USER="${LLNG_ADMIN_USER:-dwho}"
 ADMIN_PASSWORD="${LLNG_ADMIN_PASSWORD:-dwho}"
 SSH_CA_FILE="/etc/ssh/llng_ca.pub"
-TOKEN_FILE="/etc/security/llng_server_token"
+TOKEN_FILE="/etc/open-bastion/server_token.json"
 
 echo "=== LLNG Bastion Starting ==="
 echo "Portal URL: $PORTAL_URL"
@@ -56,7 +56,7 @@ KEY_B64="$3"
 # Create user if not exists (using LLNG PAM module's userinfo)
 if ! getent passwd "$USERNAME" >/dev/null 2>&1; then
     # Get user info from LLNG
-    TOKEN=$(cat /etc/security/llng_server_token 2>/dev/null)
+    TOKEN=$(jq -r '.access_token // empty' /etc/open-bastion/server_token.json 2>/dev/null)
     PORTAL_URL=$(grep portal_url /etc/open-bastion/nss_openbastion.conf | cut -d= -f2 | tr -d ' ')
 
     if [ -n "$TOKEN" ] && [ -n "$PORTAL_URL" ]; then
