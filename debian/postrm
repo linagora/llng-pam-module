@@ -1,13 +1,13 @@
 #!/bin/sh
 set -e
 
-CONF_FILE="/etc/security/pam_llng.conf"
-BACKUP_DIR="/var/backups/libpam-llng"
+CONF_FILE="/etc/open-bastion/openbastion.conf"
+BACKUP_DIR="/var/backups/open-bastion"
 PAM_SSHD="/etc/pam.d/sshd"
 PAM_SUDO="/etc/pam.d/sudo"
-TOKEN_FILE="/etc/security/pam_llng.token"
-CACHE_DIR="/var/cache/pam_llng"
-STATS_DIR="/var/lib/pam_llng"
+TOKEN_FILE="/etc/open-bastion/token"
+CACHE_DIR="/var/cache/open-bastion"
+STATS_DIR="/var/lib/open-bastion"
 
 case "$1" in
     purge)

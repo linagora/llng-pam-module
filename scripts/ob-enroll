@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# llng-pam-enroll - Enroll a server with LemonLDAP::NG for PAM authentication
+# ob-enroll - Enroll a server with Open Bastion for PAM authentication
 #
 # This script uses the Device Authorization Grant (RFC 8628) to obtain
 # a server token that allows the PAM module to check user authorizations.
@@ -14,8 +14,8 @@ VERSION="1.0.0"
 PROG_NAME=$(basename "$0")
 
 # Default values
-CONFIG_FILE="/etc/security/pam_llng.conf"
-TOKEN_FILE="/etc/security/pam_llng.token"
+CONFIG_FILE="/etc/open-bastion/openbastion.conf"
+TOKEN_FILE="/etc/open-bastion/token"
 SCOPE="pam:server"
 POLL_INTERVAL=5
 TIMEOUT=300

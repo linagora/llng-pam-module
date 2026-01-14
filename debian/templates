@@ -1,50 +1,51 @@
-Template: libpam-llng/pam-mode
+Template: libpam-openbastion/pam-mode
 Type: select
 Choices: none, mode-a, mode-b, mode-c, mode-d
 Default: none
-_Description: PAM authentication mode for LemonLDAP::NG:
+_Description: PAM authentication mode for Open Bastion:
  Choose how to configure PAM authentication:
  .
   * none: Do not configure PAM automatically
-  * mode-a: LLNG token only (strictest)
-  * mode-b: LLNG token OR Unix password (fallback)
-  * mode-c: SSH key with LLNG authorization only
-  * mode-d: All methods (SSH keys, LLNG tokens, Unix passwords)
+  * mode-a: Open Bastion token only (strictest)
+  * mode-b: Open Bastion token OR Unix password (fallback)
+  * mode-c: SSH key with Open Bastion authorization only
+  * mode-d: All methods (SSH keys, Open Bastion tokens, Unix passwords)
  .
- All modes require LLNG authorization to access this server.
+ All modes require Open Bastion authorization to access this server.
 
-Template: libpam-llng/portal-url
+Template: libpam-openbastion/portal-url
 Type: string
 Default:
 _Description: LemonLDAP::NG portal URL:
- Enter the URL of your LemonLDAP::NG portal (e.g., https://auth.example.com).
+ Enter the URL of your LemonLDAP::NG portal with Open Bastion plugins
+ (e.g., https://auth.example.com).
 
-Template: libpam-llng/client-id
+Template: libpam-openbastion/client-id
 Type: string
 Default: pam-access
 _Description: OIDC client ID:
  Enter the OIDC client ID configured in LemonLDAP::NG for PAM access.
 
-Template: libpam-llng/client-secret
+Template: libpam-openbastion/client-secret
 Type: password
 _Description: OIDC client secret:
  Enter the client secret for the OIDC client.
 
-Template: libpam-llng/server-group
+Template: libpam-openbastion/server-group
 Type: string
 Default: default
 _Description: Server group name:
  Enter the server group name for authorization rules.
- This must match a group defined in LLNG's pamAccessServerGroups.
+ This must match a group defined in LemonLDAP::NG's pamAccessServerGroups.
 
-Template: libpam-llng/configure-sudo
+Template: libpam-openbastion/configure-sudo
 Type: boolean
 Default: false
 _Description: Configure PAM for sudo?
- Set this to true if you want to configure /etc/pam.d/sudo with LLNG
- authentication. This allows using LLNG tokens for sudo commands.
+ Set this to true if you want to configure /etc/pam.d/sudo with Open Bastion
+ authentication. This allows using Open Bastion tokens for sudo commands.
 
-Template: libpam-llng/sudo-server-group
+Template: libpam-openbastion/sudo-server-group
 Type: string
 Default:
 _Description: Server group name for sudo:
@@ -53,12 +54,12 @@ _Description: Server group name for sudo:
  This allows different authorization rules for SSH access and sudo usage.
  Leave empty to use the same group as SSH.
 
-Template: libpam-llng/create-user
+Template: libpam-openbastion/create-user
 Type: boolean
 Default: false
 _Description: Auto-create Unix accounts on first login?
  If enabled, Unix accounts will be created automatically when a user
- authenticates for the first time via LemonLDAP::NG.
+ authenticates for the first time via Open Bastion.
  .
- User attributes (gecos, shell, home) can be exported from LLNG via
+ User attributes (gecos, shell, home) can be exported from LemonLDAP::NG via
  pamAccessExportedVars configuration.

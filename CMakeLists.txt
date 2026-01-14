@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(pam_llng VERSION 1.0.0 LANGUAGES C)
+project(open-bastion VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -28,8 +28,8 @@ endif()
 
 # Source files
 set(PAM_MODULE_SOURCES
-    src/pam_llng.c
-    src/llng_client.c
+    src/pam_openbastion.c
+    src/ob_client.c
     src/config.c
     src/audit_log.c
     src/rate_limiter.c
@@ -50,18 +50,18 @@ if(ENABLE_CACHE)
 endif()
 
 # Build the PAM module as a shared library
-add_library(pam_llng SHARED ${PAM_MODULE_SOURCES})
+add_library(pam_openbastion SHARED ${PAM_MODULE_SOURCES})
 
 # Set output name without "lib" prefix
-set_target_properties(pam_llng PROPERTIES
+set_target_properties(pam_openbastion PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "pam_llng"
+    OUTPUT_NAME "pam_openbastion"
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
 )
 
 # Include directories
-target_include_directories(pam_llng PRIVATE
+target_include_directories(pam_openbastion PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${PAM_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
@@ -70,7 +70,7 @@ target_include_directories(pam_llng PRIVATE
 )
 
 # Link libraries
-target_link_libraries(pam_llng
+target_link_libraries(pam_openbastion
     ${PAM_LIBRARY}
     ${CURL_LIBRARIES}
     ${JSON_C_LIBRARIES}
@@ -78,7 +78,7 @@ target_link_libraries(pam_llng
 )
 
 # Compiler flags
-target_compile_options(pam_llng PRIVATE
+target_compile_options(pam_openbastion PRIVATE
     -Wall -Wextra -Werror
     -fPIC
     -D_GNU_SOURCE
@@ -90,12 +90,12 @@ target_compile_options(pam_llng PRIVATE
 
 # _FORTIFY_SOURCE requires optimization (-O1 or higher) to be effective
 # Only enable for Release/RelWithDebInfo builds to avoid warnings in Debug
-target_compile_definitions(pam_llng PRIVATE
+target_compile_definitions(pam_openbastion PRIVATE
     $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:_FORTIFY_SOURCE=2>
 )
 
 # Linker security flags (Full RELRO = relro + now)
-target_link_options(pam_llng PRIVATE
+target_link_options(pam_openbastion PRIVATE
     -Wl,-z,relro                  # RELRO (with -z,now = Full RELRO)
     -Wl,-z,now                    # Resolve symbols at load time (completes Full RELRO)
     -Wl,-z,noexecstack            # Non-executable stack
@@ -105,14 +105,14 @@ target_link_options(pam_llng PRIVATE
 include(GNUInstallDirs)
 
 # Install PAM module
-install(TARGETS pam_llng
+install(TARGETS pam_openbastion
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/security
 )
 
 # Install configuration file
-install(FILES ${CMAKE_SOURCE_DIR}/config/pam_llng.conf.example
-    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/security
-    RENAME pam_llng.conf.example
+install(FILES ${CMAKE_SOURCE_DIR}/config/openbastion.conf.example
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/open-bastion
+    RENAME openbastion.conf.example
 )
 
 # Install documentation
@@ -121,70 +121,70 @@ install(FILES ${CMAKE_SOURCE_DIR}/README.md
 )
 
 # Install enrollment script
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-enroll
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-enroll
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Install heartbeat script
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-pam-heartbeat
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-heartbeat
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Install session recorder script
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-session-recorder
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-session-recorder
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Install session recorder config example
 install(FILES ${CMAKE_SOURCE_DIR}/scripts/session-recorder.conf.example
-    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/llng
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/open-bastion
 )
 
 # Install SSH proxy for bastion
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-ssh-proxy
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-ssh-proxy
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 # Install SSH proxy config example
 install(FILES ${CMAKE_SOURCE_DIR}/scripts/ssh-proxy.conf.example
-    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/llng
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/open-bastion
 )
 
 # Install SSH certificate tool (user-facing)
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-ssh-cert
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-ssh-cert
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 # Install setup scripts (admin-facing)
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-bastion-setup
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-bastion-setup
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
-install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/llng-backend-setup
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-backend-setup
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Install man pages (section 8 - admin commands)
 install(FILES
-    ${CMAKE_SOURCE_DIR}/man/llng-pam-enroll.8
-    ${CMAKE_SOURCE_DIR}/man/llng-pam-heartbeat.8
-    ${CMAKE_SOURCE_DIR}/man/llng-bastion-setup.8
-    ${CMAKE_SOURCE_DIR}/man/llng-backend-setup.8
-    ${CMAKE_SOURCE_DIR}/man/llng-session-recorder.8
+    ${CMAKE_SOURCE_DIR}/man/ob-enroll.8
+    ${CMAKE_SOURCE_DIR}/man/ob-heartbeat.8
+    ${CMAKE_SOURCE_DIR}/man/ob-bastion-setup.8
+    ${CMAKE_SOURCE_DIR}/man/ob-backend-setup.8
+    ${CMAKE_SOURCE_DIR}/man/ob-session-recorder.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
 )
 
 # Install man pages (section 1 - user commands)
 install(FILES
-    ${CMAKE_SOURCE_DIR}/man/llng-ssh-cert.1
-    ${CMAKE_SOURCE_DIR}/man/llng-ssh-proxy.1
+    ${CMAKE_SOURCE_DIR}/man/ob-ssh-cert.1
+    ${CMAKE_SOURCE_DIR}/man/ob-ssh-proxy.1
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
 )
 
 # Install systemd units
 install(FILES
-    ${CMAKE_SOURCE_DIR}/systemd/pam-llng-heartbeat.timer
-    ${CMAKE_SOURCE_DIR}/systemd/pam-llng-heartbeat.service
+    ${CMAKE_SOURCE_DIR}/systemd/ob-heartbeat.timer
+    ${CMAKE_SOURCE_DIR}/systemd/ob-heartbeat.service
     DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system
 )
 
@@ -198,11 +198,11 @@ if(BUILD_TESTING)
 endif()
 
 # Package configuration
-set(CPACK_PACKAGE_NAME "pam-llng")
+set(CPACK_PACKAGE_NAME "open-bastion")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "PAM module for LemonLDAP::NG authentication")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Open Bastion - Secure SSH bastion with PAM/NSS modules")
 set(CPACK_PACKAGE_VENDOR "Linagora")
-set(CPACK_PACKAGE_CONTACT "LemonLDAP::NG team <lemonldap-ng@ow2.org>")
+set(CPACK_PACKAGE_CONTACT "Open Bastion team <open-bastion@linagora.com>")
 
 # Debian package
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libpam0g, libcurl4, libjson-c5 | libjson-c5t64, libssl3 | libssl3t64, libkeyutils1, curl, jq")

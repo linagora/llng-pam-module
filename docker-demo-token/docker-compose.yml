@@ -1,4 +1,4 @@
-# LemonLDAP::NG Token-based SSH Authentication Demo
+# Open Bastion Token-based SSH Authentication Demo
 #
 # Architecture:
 #   - sso: LLNG Portal with PAM Access, Device Authorization (no SSH CA)
@@ -10,15 +10,15 @@
 #   docker compose up -d
 #   # Get a token: llng --llng-url http://localhost:80 --login dwho --password dwho llng_cookie
 #   # SSH to bastion: ssh -p 2222 dwho@localhost
-#   # Password: paste your LLNG access token
+#   # Password: paste your Open Bastion access token
 
 services:
   sso:
     build:
       context: ./sso
       dockerfile: Dockerfile
-    image: llng-token-sso
-    container_name: llng-token-sso
+    image: ob-token-sso
+    container_name: ob-token-sso
     ports:
       - "80:8080"
     volumes:
@@ -42,7 +42,7 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      llng-token-net:
+      ob-token-net:
         aliases:
           - sso
           - auth.example.com
@@ -51,8 +51,8 @@ services:
     build:
       context: ..
       dockerfile: docker-demo-token/bastion/Dockerfile
-    image: llng-token-bastion
-    container_name: llng-token-bastion
+    image: ob-token-bastion
+    container_name: ob-token-bastion
     ports:
       - "2222:22"
     depends_on:
@@ -70,14 +70,14 @@ services:
       - ..:/src/llng-pam-module:ro
       # No persistent volumes - fresh start for each demo
     networks:
-      - llng-token-net
+      - ob-token-net
 
   backend:
     build:
       context: ..
       dockerfile: docker-demo-token/backend/Dockerfile
-    image: llng-token-backend
-    container_name: llng-token-backend
+    image: ob-token-backend
+    container_name: ob-token-backend
     # No external port - only accessible via bastion
     expose:
       - "22"
@@ -95,15 +95,15 @@ services:
       # PAM module sources for build
       - ..:/src/llng-pam-module:ro
     networks:
-      - llng-token-net
+      - ob-token-net
 
   # Unconfigured backend for enrollment demo
   backend-new:
     build:
       context: ..
       dockerfile: docker-demo-token/backend-new/Dockerfile
-    image: llng-token-backend-new
-    container_name: llng-token-backend-new
+    image: ob-token-backend-new
+    container_name: ob-token-backend-new
     expose:
       - "22"
     depends_on:
@@ -114,8 +114,8 @@ services:
       - LLNG_SERVER_GROUP=backend-new
       # No LLNG_SERVER_TOKEN - must be enrolled manually
     networks:
-      - llng-token-net
+      - ob-token-net
 
 networks:
-  llng-token-net:
+  ob-token-net:
     driver: bridge

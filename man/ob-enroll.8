@@ -1,11 +1,11 @@
-.TH LLNG-PAM-ENROLL 8 "December 2025" "pam-llng 1.0.0" "System Administration"
+.TH OB-ENROLL 8 "December 2025" "open-bastion 1.0.0" "System Administration"
 .SH NAME
-llng-pam-enroll \- Enroll a server with LemonLDAP::NG for PAM authentication
+ob-enroll \- Enroll a server with LemonLDAP::NG for PAM authentication
 .SH SYNOPSIS
-.B llng-pam-enroll
+.B ob-enroll
 .RI [ OPTIONS ]
 .SH DESCRIPTION
-.B llng-pam-enroll
+.B ob-enroll
 uses the Device Authorization Grant (RFC 8628) to obtain a server token
 that allows the PAM module to check user authorizations against a
 LemonLDAP::NG server.
@@ -28,10 +28,10 @@ OIDC client secret (required if not in config file).
 Server group name for authorization rules. Default: default
 .TP
 .BR \-t ", " \-\-token\-file " " \fIFILE\fR
-Where to save the server token. Default: /etc/security/pam_llng.token
+Where to save the server token. Default: /etc/open-bastion/token
 .TP
 .BR \-C ", " \-\-config " " \fIFILE\fR
-Read settings from config file. Default: /etc/security/pam_llng.conf
+Read settings from config file. Default: /etc/open-bastion/openbastion.conf
 .TP
 .BR \-k ", " \-\-insecure
 Skip SSL certificate verification.
@@ -49,29 +49,29 @@ Show version and exit.
 Enroll using settings from config file:
 .RS
 .nf
-sudo llng-pam-enroll
+sudo ob-enroll
 .fi
 .RE
 .PP
 Enroll with explicit parameters:
 .RS
 .nf
-sudo llng-pam-enroll \-p https://auth.example.com \-s mysecret
+sudo ob-enroll \-p https://auth.example.com \-s mysecret
 .fi
 .RE
 .PP
 Enroll to a specific server group:
 .RS
 .nf
-sudo llng-pam-enroll \-g production
+sudo ob-enroll \-g production
 .fi
 .RE
 .SH FILES
 .TP
-.I /etc/security/pam_llng.conf
+.I /etc/open-bastion/openbastion.conf
 Main configuration file for the PAM module.
 .TP
-.I /etc/security/pam_llng.token
+.I /etc/open-bastion/token
 Server token file created by this script.
 .SH SECURITY
 .PP
@@ -99,7 +99,7 @@ Enrollment completed successfully.
 .B 1
 Enrollment failed (missing parameters, network error, authorization denied, etc.)
 .SH SEE ALSO
-.BR pam_llng (8),
+.BR pam_openbastion (8),
 .BR pam.d (5)
 .PP
 LemonLDAP::NG documentation: https://lemonldap-ng.org/

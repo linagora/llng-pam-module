@@ -1,7 +1,7 @@
 # SSH Session Recording
 
 This document describes how to set up SSH session recording on a bastion host
-using `llng-session-recorder`.
+using `ob-session-recorder`.
 
 ## Overview
 
@@ -9,10 +9,10 @@ The session recorder captures all terminal I/O during SSH sessions, creating
 an audit trail for compliance and incident investigation.
 
 ```
-User SSH → Bastion → [llng-session-recorder] → Backend Server
+User SSH → Bastion → [ob-session-recorder] → Backend Server
                               │
                               ▼
-                     /var/lib/llng-sessions/
+                     /var/lib/open-bastion/sessions/
                               │
                               ▼
                     (future: upload to LLNG)
@@ -20,7 +20,7 @@ User SSH → Bastion → [llng-session-recorder] → Backend Server
 
 ## Installation
 
-The `llng-session-recorder` script is installed to `/usr/sbin/` with the
+The `ob-session-recorder` script is installed to `/usr/sbin/` with the
 PAM module package.
 
 ### Dependencies
@@ -48,7 +48,7 @@ Create `/etc/llng/session-recorder.conf`:
 ```ini
 # Directory where recordings are stored
 # Structure: sessions_dir/<username>/<timestamp>_<session_id>.<format>
-sessions_dir = /var/lib/llng-sessions
+sessions_dir = /var/lib/open-bastion/sessions
 
 # Recording format:
 #   script    - Plain text typescript (default, always available)
@@ -71,7 +71,7 @@ Edit `/etc/ssh/sshd_config` to force all sessions through the recorder:
 ```sshd_config
 # Record all sessions except for emergency admin access
 Match User *,!root,!admin
-    ForceCommand /usr/sbin/llng-session-recorder
+    ForceCommand /usr/sbin/ob-session-recorder
 ```
 
 #### Option B: Record specific group only
@@ -79,14 +79,14 @@ Match User *,!root,!admin
 ```sshd_config
 # Only record sessions for users in the "recorded" group
 Match Group recorded
-    ForceCommand /usr/sbin/llng-session-recorder
+    ForceCommand /usr/sbin/ob-session-recorder
 ```
 
 #### Option C: Record all sessions
 
 ```sshd_config
 # Record all sessions (use with caution)
-ForceCommand /usr/sbin/llng-session-recorder
+ForceCommand /usr/sbin/ob-session-recorder
 ```
 
 Restart SSH after changes:
@@ -171,7 +171,7 @@ Each recording has an accompanying JSON metadata file (`.json`):
 ## Directory Structure
 
 ```
-/var/lib/llng-sessions/
+/var/lib/open-bastion/sessions/
 ├── dwho/
 │   ├── 20251216-103000_550e8400-...-440000.cast
 │   ├── 20251216-103000_550e8400-...-440000.json
@@ -193,7 +193,7 @@ Each recording has an accompanying JSON metadata file (`.json`):
 
 ```bash
 # Terminal replay
-asciinema play /var/lib/llng-sessions/dwho/20251216-103000_*.cast
+asciinema play /var/lib/open-bastion/sessions/dwho/20251216-103000_*.cast
 
 # Or use the web player (future LLNG integration)
 ```
@@ -201,14 +201,14 @@ asciinema play /var/lib/llng-sessions/dwho/20251216-103000_*.cast
 ### ttyrec format
 
 ```bash
-ttyplay /var/lib/llng-sessions/dwho/20251216-103000_*.ttyrec
+ttyplay /var/lib/open-bastion/sessions/dwho/20251216-103000_*.ttyrec
 ```
 
 ### Script format
 
 ```bash
 # View the raw typescript
-cat /var/lib/llng-sessions/dwho/20251216-103000_*.typescript
+cat /var/lib/open-bastion/sessions/dwho/20251216-103000_*.typescript
 
 # Replay with timing (if timing file exists)
 scriptreplay timing.txt recording.typescript
@@ -241,10 +241,10 @@ When uploading to LLNG (future feature):
 
 ```bash
 # Look for session files
-ls -la /var/lib/llng-sessions/$USER/
+ls -la /var/lib/open-bastion/sessions/$USER/
 
 # Check syslog
-journalctl -t llng-session-recorder
+journalctl -t ob-session-recorder
 ```
 
 ### Common Issues
@@ -253,14 +253,14 @@ journalctl -t llng-session-recorder
 |-------|-------|----------|
 | No recording created | ForceCommand not active | Check sshd_config Match rules |
 | Empty recording | Session ended immediately | Check for shell issues |
-| Permission denied | Wrong directory permissions | `chmod 700 /var/lib/llng-sessions` |
+| Permission denied | Wrong directory permissions | `chmod 700 /var/lib/open-bastion/sessions` |
 | Format not available | ttyrec not installed | Install ttyrec or use asciinema |
 
 ### Debug mode
 
 ```bash
 # Test the recorder manually
-/usr/sbin/llng-session-recorder --help
+/usr/sbin/ob-session-recorder --help
 
 # Check configuration
 cat /etc/llng/session-recorder.conf

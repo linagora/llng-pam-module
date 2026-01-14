@@ -1,4 +1,4 @@
-# LemonLDAP::NG SSH Certificate Authentication Demo
+# Open Bastion SSH Certificate Authentication Demo
 #
 # Architecture:
 #   - sso: LLNG Portal with SSH CA, PAM Access, Device Authorization
@@ -9,7 +9,7 @@
 # Usage:
 #   docker compose up -d
 #   # Test SSO: llng --llng-url http://localhost:80 --login dwho --password dwho llng_cookie
-#   # Get SSH cert: docker exec -it bastion llng-ssh-cert -p http://sso
+#   # Get SSH cert: docker exec -it bastion ob-ssh-cert -p http://sso
 #   # SSH to bastion: ssh -p 2222 dwho@localhost
 
 services:
@@ -17,8 +17,8 @@ services:
     build:
       context: ./sso
       dockerfile: Dockerfile
-    image: llng-cert-sso
-    container_name: llng-cert-sso
+    image: ob-cert-sso
+    container_name: ob-cert-sso
     ports:
       - "80:8080"
     volumes:
@@ -45,7 +45,7 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      llng-cert-net:
+      ob-cert-net:
         aliases:
           - sso
           - auth.example.com
@@ -54,8 +54,8 @@ services:
     build:
       context: ..
       dockerfile: docker-demo-cert/bastion/Dockerfile
-    image: llng-cert-bastion
-    container_name: llng-cert-bastion
+    image: ob-cert-bastion
+    container_name: ob-cert-bastion
     ports:
       - "2222:22"
     depends_on:
@@ -73,14 +73,14 @@ services:
       - ..:/src/llng-pam-module:ro
       # No persistent volumes - fresh start for each demo
     networks:
-      - llng-cert-net
+      - ob-cert-net
 
   backend:
     build:
       context: ..
       dockerfile: docker-demo-cert/backend/Dockerfile
-    image: llng-cert-backend
-    container_name: llng-cert-backend
+    image: ob-cert-backend
+    container_name: ob-cert-backend
     # No external port - only accessible via bastion
     expose:
       - "22"
@@ -98,15 +98,15 @@ services:
       # PAM module sources for build
       - ..:/src/llng-pam-module:ro
     networks:
-      - llng-cert-net
+      - ob-cert-net
 
   # Unconfigured backend for enrollment demo
   backend-new:
     build:
       context: ..
       dockerfile: docker-demo-cert/backend-new/Dockerfile
-    image: llng-cert-backend-new
-    container_name: llng-cert-backend-new
+    image: ob-cert-backend-new
+    container_name: ob-cert-backend-new
     expose:
       - "22"
     depends_on:
@@ -117,8 +117,8 @@ services:
       - LLNG_SERVER_GROUP=backend-new
       # No LLNG_SERVER_TOKEN - must be enrolled manually
     networks:
-      - llng-cert-net
+      - ob-cert-net
 
 networks:
-  llng-cert-net:
+  ob-cert-net:
     driver: bridge

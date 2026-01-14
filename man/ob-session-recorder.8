@@ -1,10 +1,10 @@
-.TH LLNG-SESSION-RECORDER 8 "December 2025" "pam-llng 1.0.0" "System Administration"
+.TH OB-SESSION-RECORDER 8 "December 2025" "open-bastion 1.0.0" "System Administration"
 .SH NAME
-llng-session-recorder \- Record SSH sessions for LemonLDAP::NG bastion
+ob-session-recorder \- Record SSH sessions for Open Bastion
 .SH SYNOPSIS
-.B llng-session-recorder
+.B ob-session-recorder
 .SH DESCRIPTION
-.B llng-session-recorder
+.B ob-session-recorder
 is used as a ForceCommand in SSH bastion configurations to record all
 user sessions. It captures terminal input/output using the
 .BR script (1)
@@ -17,12 +17,12 @@ Session recordings are stored in a directory organized by date and user,
 making it easy to audit user activity.
 .SH CONFIGURATION
 Configuration is read from
-.I /etc/llng/session-recorder.conf
+.I /etc/open-bastion/session-recorder.conf
 with the following options:
 .TP
 .B sessions_dir
 Directory where session recordings are stored.
-Default: /var/lib/llng-sessions
+Default: /var/lib/open-bastion/sessions
 .TP
 .B format
 Recording format. Currently only "script" is supported.
@@ -42,16 +42,16 @@ If SSH_ORIGINAL_COMMAND is set, executes that command.
 Otherwise, starts the user's login shell.
 .SH FILES
 .TP
-.I /etc/llng/session-recorder.conf
+.I /etc/open-bastion/session-recorder.conf
 Configuration file.
 .TP
-.I /var/lib/llng-sessions/
+.I /var/lib/open-bastion/sessions/
 Default session recordings directory.
 .TP
-.I /var/lib/llng-sessions/YYYY-MM-DD/USER/SESSION.typescript
+.I /var/lib/open-bastion/sessions/YYYY-MM-DD/USER/SESSION.typescript
 Session recording file.
 .TP
-.I /var/lib/llng-sessions/YYYY-MM-DD/USER/SESSION.timing
+.I /var/lib/open-bastion/sessions/YYYY-MM-DD/USER/SESSION.timing
 Timing data for session playback.
 .SH ENVIRONMENT
 .TP
@@ -81,7 +81,7 @@ The recordings directory should only be accessible by root.
 .SH EXIT STATUS
 Returns the exit status of the executed command or shell.
 .SH SEE ALSO
-.BR llng-bastion-setup (8),
+.BR ob-bastion-setup (8),
 .BR script (1),
 .BR scriptreplay (1),
 .BR sshd_config (5)

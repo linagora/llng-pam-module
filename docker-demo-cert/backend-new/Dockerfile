@@ -1,4 +1,4 @@
-# LLNG SSH Backend (Unconfigured) - For Enrollment Demo
+# Open Bastion SSH Backend (Unconfigured) - For Enrollment Demo
 #
 # This container is NOT pre-configured with a server token.
 # It must be enrolled manually using the Device Authorization flow.
@@ -24,27 +24,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create directories
 RUN mkdir -p /var/run/sshd \
-    /var/cache/pam_llng \
-    /var/cache/nss_llng \
-    && chmod 750 /var/cache/pam_llng \
-    && chmod 750 /var/cache/nss_llng
+    /var/cache/open-bastion \
+    && chmod 750 /var/cache/open-bastion
 
 # Build PAM and NSS modules from source
-COPY CMakeLists.txt /src/llng-pam-module/
-COPY src/ /src/llng-pam-module/src/
-COPY include/ /src/llng-pam-module/include/
-COPY nss/ /src/llng-pam-module/nss/
-COPY scripts/ /src/llng-pam-module/scripts/
-WORKDIR /src/llng-pam-module
+COPY CMakeLists.txt /src/open-bastion/
+COPY src/ /src/open-bastion/src/
+COPY include/ /src/open-bastion/include/
+COPY nss/ /src/open-bastion/nss/
+COPY scripts/ /src/open-bastion/scripts/
+WORKDIR /src/open-bastion
 RUN mkdir -p build && cd build && \
     cmake -DBUILD_TESTING=OFF .. && \
     make -j$(nproc) && \
-    cp pam_llng.so /usr/lib/x86_64-linux-gnu/security/ && \
-    cp nss/libnss_llng.so.2 /lib/x86_64-linux-gnu/ && \
-    cp ../scripts/llng-pam-enroll /usr/sbin/ && \
-    chmod 755 /usr/sbin/llng-pam-enroll && \
+    cp pam_openbastion.so /usr/lib/x86_64-linux-gnu/security/ && \
+    cp nss/libnss_openbastion.so.2 /lib/x86_64-linux-gnu/ && \
+    cp ../scripts/ob-enroll /usr/sbin/ && \
+    chmod 755 /usr/sbin/ob-enroll && \
     ldconfig && \
-    cd / && rm -rf /src/llng-pam-module/build
+    cd / && rm -rf /src/open-bastion/build
 
 # NO configuration is done here - this simulates a fresh installation
 # PAM, NSS, and SSHD must be configured manually following the README

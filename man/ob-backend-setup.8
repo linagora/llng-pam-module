@@ -1,24 +1,24 @@
-.TH LLNG-BACKEND-SETUP 8 "December 2025" "pam-llng 1.0.0" "System Administration"
+.TH OB-BACKEND-SETUP 8 "December 2025" "open-bastion 1.0.0" "System Administration"
 .SH NAME
-llng-backend-setup \- Configure a server as an SSH backend with LemonLDAP::NG
+ob-backend-setup \- Configure a server as an SSH backend with LemonLDAP::NG
 .SH SYNOPSIS
-.B llng-backend-setup
+.B ob-backend-setup
 .BI \-\-portal " URL"
 .RI [ OPTIONS ]
 .SH DESCRIPTION
-.B llng-backend-setup
+.B ob-backend-setup
 configures a Linux server as an SSH backend that:
 .IP \(bu 2
-Accepts SSH certificate authentication via LLNG CA
+Accepts SSH certificate authentication via LemonLDAP::NG CA
 .IP \(bu 2
-Creates Unix users automatically from LLNG attributes
+Creates Unix users automatically from LemonLDAP::NG attributes
 .IP \(bu 2
-Enables sudo authorization via LLNG
+Enables sudo authorization via LemonLDAP::NG
 .IP \(bu 2
 Uses NSS module for user/group resolution
 .PP
 Unlike bastion mode, backend mode allows direct shell access and can create
-local Unix users on-demand based on LLNG user attributes.
+local Unix users on-demand based on LemonLDAP::NG user attributes.
 .SH OPTIONS
 .TP
 .BR \-p ", " \-\-portal " " \fIURL\fR
@@ -59,38 +59,38 @@ Show version and exit.
 .SH CONFIGURATION
 The script performs the following configuration steps:
 .IP 1. 4
-Downloads SSH CA public key from LLNG portal (/ssh/ca endpoint).
+Downloads SSH CA public key from LemonLDAP::NG portal (/ssh/ca endpoint).
 .IP 2. 4
 Creates sshd configuration with TrustedUserCAKeys.
 .IP 3. 4
-Configures PAM for LLNG authorization with user creation.
+Configures PAM for Open Bastion authorization with user creation.
 .IP 4. 4
-Configures sudo to use LLNG authorization.
+Configures sudo to use Open Bastion authorization.
 .IP 5. 4
-Configures NSS to resolve users/groups from LLNG.
+Configures NSS to resolve users/groups from LemonLDAP::NG.
 .IP 6. 4
-Enrolls the server with LLNG (unless token provided).
+Enrolls the server with LemonLDAP::NG (unless token provided).
 .IP 7. 4
 Restarts SSH service.
 .SH USER CREATION
 When a user authenticates successfully and does not exist locally, the PAM
-module can automatically create the user with attributes from LLNG:
+module can automatically create the user with attributes from LemonLDAP::NG:
 .IP \(bu 2
 Username from SSH certificate principal
 .IP \(bu 2
-GECOS from LLNG user attributes
+GECOS from LemonLDAP::NG user attributes
 .IP \(bu 2
 Home directory created automatically
 .IP \(bu 2
-Shell from LLNG or system default
+Shell from LemonLDAP::NG or system default
 .IP \(bu 2
-Group memberships from LLNG
+Group memberships from LemonLDAP::NG
 .SH FILES
 .TP
 .I /etc/ssh/llng_ca.pub
-SSH CA public key downloaded from LLNG.
+SSH CA public key downloaded from LemonLDAP::NG.
 .TP
-.I /etc/ssh/sshd_config.d/50-llng-backend.conf
+.I /etc/ssh/sshd_config.d/50-open-bastion.conf
 SSH configuration for backend mode.
 .TP
 .I /etc/pam.d/sshd
@@ -99,27 +99,27 @@ PAM configuration for SSH.
 .I /etc/pam.d/sudo
 PAM configuration for sudo.
 .TP
-.I /etc/security/pam_llng.conf
+.I /etc/open-bastion/openbastion.conf
 PAM module configuration.
 .TP
-.I /etc/nss_llng.conf
+.I /etc/open-bastion/nss_openbastion.conf
 NSS module configuration.
 .TP
 .I /etc/nsswitch.conf
-NSS configuration (modified to include llng).
+NSS configuration (modified to include openbastion).
 .SH EXAMPLES
 .PP
 Interactive setup with all features:
 .RS
 .nf
-sudo llng-backend-setup \-\-portal https://auth.example.com
+sudo ob-backend-setup \-\-portal https://auth.example.com
 .fi
 .RE
 .PP
 Setup without automatic user creation:
 .RS
 .nf
-sudo llng-backend-setup \-\-portal https://auth.example.com \\
+sudo ob-backend-setup \-\-portal https://auth.example.com \\
     \-\-no-create-user
 .fi
 .RE
@@ -127,7 +127,7 @@ sudo llng-backend-setup \-\-portal https://auth.example.com \\
 Setup with password fallback allowed:
 .RS
 .nf
-sudo llng-backend-setup \-\-portal https://auth.example.com \\
+sudo ob-backend-setup \-\-portal https://auth.example.com \\
     \-\-allow-password
 .fi
 .RE
@@ -139,8 +139,8 @@ Setup completed successfully.
 .B 1
 Setup failed.
 .SH SEE ALSO
-.BR llng-bastion-setup (8),
-.BR llng-ssh-cert (1),
+.BR ob-bastion-setup (8),
+.BR ob-ssh-cert (1),
 .BR nsswitch.conf (5),
 .BR sshd_config (5)
 .PP

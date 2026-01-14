@@ -1,23 +1,23 @@
-.TH LLNG-BASTION-SETUP 8 "December 2025" "pam-llng 1.0.0" "System Administration"
+.TH OB-BASTION-SETUP 8 "December 2025" "open-bastion 1.0.0" "System Administration"
 .SH NAME
-llng-bastion-setup \- Configure a server as an SSH bastion with LemonLDAP::NG
+ob-bastion-setup \- Configure a server as an SSH bastion with LemonLDAP::NG
 .SH SYNOPSIS
-.B llng-bastion-setup
+.B ob-bastion-setup
 .BI \-\-portal " URL"
 .RI [ OPTIONS ]
 .SH DESCRIPTION
-.B llng-bastion-setup
+.B ob-bastion-setup
 configures a Linux server as an SSH bastion host that:
 .IP \(bu 2
-Accepts SSH certificate authentication via LLNG CA
+Accepts SSH certificate authentication via LemonLDAP::NG CA
 .IP \(bu 2
-Records all sessions using llng-session-recorder
+Records all sessions using ob-session-recorder
 .IP \(bu 2
-Authenticates users via LLNG PAM module
+Authenticates users via Open Bastion PAM module
 .IP \(bu 2
 Disables password authentication
 .PP
-The script downloads the SSH CA public key from LLNG, configures sshd to
+The script downloads the SSH CA public key from LemonLDAP::NG, configures sshd to
 trust certificates signed by that CA, and sets up session recording via
 ForceCommand.
 .SH OPTIONS
@@ -48,46 +48,46 @@ Show version and exit.
 .SH CONFIGURATION
 The script performs the following configuration steps:
 .IP 1. 4
-Downloads SSH CA public key from LLNG portal (/ssh/ca endpoint).
+Downloads SSH CA public key from LemonLDAP::NG portal (/ssh/ca endpoint).
 .IP 2. 4
 Creates sshd configuration with TrustedUserCAKeys.
 .IP 3. 4
-Configures PAM for LLNG authorization (certificate-aware mode).
+Configures PAM for Open Bastion authorization (certificate-aware mode).
 .IP 4. 4
 Enables session recording via ForceCommand.
 .IP 5. 4
-Enrolls the server with LLNG (unless token provided).
+Enrolls the server with LemonLDAP::NG (unless token provided).
 .IP 6. 4
 Restarts SSH service.
 .SH FILES
 .TP
 .I /etc/ssh/llng_ca.pub
-SSH CA public key downloaded from LLNG.
+SSH CA public key downloaded from LemonLDAP::NG.
 .TP
-.I /etc/ssh/sshd_config.d/50-llng-bastion.conf
+.I /etc/ssh/sshd_config.d/50-open-bastion.conf
 SSH configuration for bastion mode (on modern systems).
 .TP
 .I /etc/pam.d/sshd
 PAM configuration for SSH.
 .TP
-.I /etc/security/pam_llng.conf
+.I /etc/open-bastion/openbastion.conf
 PAM module configuration.
 .TP
-.I /var/lib/llng-sessions/
+.I /var/lib/open-bastion/sessions/
 Session recordings directory.
 .SH EXAMPLES
 .PP
 Interactive setup:
 .RS
 .nf
-sudo llng-bastion-setup \-\-portal https://auth.example.com
+sudo ob-bastion-setup \-\-portal https://auth.example.com
 .fi
 .RE
 .PP
 Non-interactive setup with pre-obtained token:
 .RS
 .nf
-sudo llng-bastion-setup \-\-portal https://auth.example.com \\
+sudo ob-bastion-setup \-\-portal https://auth.example.com \\
     \-\-token "server-token-here" \-\-yes
 .fi
 .RE
@@ -95,7 +95,7 @@ sudo llng-bastion-setup \-\-portal https://auth.example.com \\
 Dry-run to see what would be changed:
 .RS
 .nf
-sudo llng-bastion-setup \-\-portal https://auth.example.com \-\-dry-run
+sudo ob-bastion-setup \-\-portal https://auth.example.com \-\-dry-run
 .fi
 .RE
 .SH EXIT STATUS
@@ -106,9 +106,9 @@ Setup completed successfully.
 .B 1
 Setup failed.
 .SH SEE ALSO
-.BR llng-backend-setup (8),
-.BR llng-session-recorder (8),
-.BR llng-ssh-cert (1),
+.BR ob-backend-setup (8),
+.BR ob-session-recorder (8),
+.BR ob-ssh-cert (1),
 .BR sshd_config (5)
 .PP
 LemonLDAP::NG documentation: https://lemonldap-ng.org/

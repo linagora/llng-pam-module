@@ -8,7 +8,7 @@ L'enrôlement utilise le flux **OAuth2 Device Authorization Grant** (RFC 8628). 
 
 | Acteur                   | Rôle                                                               |
 | ------------------------ | ------------------------------------------------------------------ |
-| **Opérateur**            | Personne exécutant `llng-pam-enroll` sur le serveur à enrôler      |
+| **Opérateur**            | Personne exécutant `ob-enroll` sur le serveur à enrôler      |
 | **Administrateur LLNG**  | Personne habilitée à approuver les enrôlements sur le portail LLNG |
 | **Serveur cible**        | Machine à enrôler pour l'authentification PAM                      |
 | **Portail LLNG**         | Serveur LemonLDAP::NG fournissant les endpoints OAuth2             |
@@ -24,7 +24,7 @@ L'enrôlement utilise le flux **OAuth2 Device Authorization Grant** (RFC 8628). 
 
 ### Phase 0 : Initialisation par l'administrateur
 
-Avant de pouvoir exécuter `llng-pam-enroll`, l'administrateur système doit configurer le serveur cible avec les informations de connexion à LLNG. Cette étape est réalisée une seule fois par serveur (ou par `server_group`).
+Avant de pouvoir exécuter `ob-enroll`, l'administrateur système doit configurer le serveur cible avec les informations de connexion à LLNG. Cette étape est réalisée une seule fois par serveur (ou par `server_group`).
 
 **Informations à fournir :**
 
@@ -46,11 +46,11 @@ Avant de pouvoir exécuter `llng-pam-enroll`, l'administrateur système doit con
 
 **Création du fichier de configuration :**
 
-L'administrateur crée `/etc/security/pam_llng.conf` :
+L'administrateur crée `/etc/open-bastion/openbastion.conf` :
 
 ```bash
 # Création du fichier de configuration
-sudo tee /etc/security/pam_llng.conf > /dev/null << 'EOF'
+sudo tee /etc/open-bastion/openbastion.conf > /dev/null << 'EOF'
 portal_url = https://auth.example.com
 client_id = pam-access
 client_secret = s3cr3t-p@ssw0rd
@@ -59,8 +59,8 @@ verify_ssl = true
 EOF
 
 # Sécurisation des permissions
-sudo chmod 0600 /etc/security/pam_llng.conf
-sudo chown root:root /etc/security/pam_llng.conf
+sudo chmod 0600 /etc/open-bastion/openbastion.conf
+sudo chown root:root /etc/open-bastion/openbastion.conf
 ```
 
 **Points de sécurité :**
@@ -74,7 +74,7 @@ sudo chown root:root /etc/security/pam_llng.conf
 Si le secret n'est pas dans le fichier de configuration, l'opérateur peut le fournir au moment de l'exécution :
 
 ```bash
-sudo llng-pam-enroll --client-secret "$CLIENT_SECRET"
+sudo ob-enroll --client-secret "$CLIENT_SECRET"
 ```
 
 Dans ce cas, le secret est obtenu par l'opérateur via un canal sécurisé (gestionnaire de secrets, communication chiffrée avec l'admin LLNG).
@@ -90,7 +90,7 @@ sequenceDiagram
     participant LLNG as Portail LLNG
     participant Admin as Administrateur LLNG
 
-    Op->>Srv: 1. sudo llng-pam-enroll
+    Op->>Srv: 1. sudo ob-enroll
     Note over Srv: 1b. Génère PKCE:<br/>code_verifier=random<br/>code_challenge=SHA256(verifier)
     Srv->>LLNG: 2. POST /oauth2/device<br/>client_id, scope, code_challenge
     LLNG-->>Srv: 3. device_code, user_code,<br/>verification_uri
@@ -108,7 +108,7 @@ sequenceDiagram
     end
     Note over LLNG: 10b. Vérifie PKCE:<br/>SHA256(code_verifier) == code_challenge
     LLNG-->>Srv: 11. access_token, refresh_token
-    Note over Srv: 12. Sauvegarde token<br/>/etc/security/pam_llng.token
+    Note over Srv: 12. Sauvegarde token<br/>/etc/open-bastion/token
     Srv->>LLNG: 13. POST /pam/authorize (vérification)
     Srv-->>Op: 14. "Enrollment complete"
 ```
@@ -123,7 +123,7 @@ sequenceDiagram
 
 #### Étape 1-3 : Initiation du flux Device Authorization avec PKCE
 
-L'opérateur exécute `sudo llng-pam-enroll` sur le serveur. Le script génère d'abord les paramètres PKCE :
+L'opérateur exécute `sudo ob-enroll` sur le serveur. Le script génère d'abord les paramètres PKCE :
 
 ```bash
 # Génération PKCE (RFC 7636)
@@ -247,7 +247,7 @@ Le token est sauvegardé en JSON :
 }
 ```
 
-Fichier : `/etc/security/pam_llng.token`
+Fichier : `/etc/open-bastion/token`
 Permissions : `0600` (lecture/écriture root uniquement)
 Propriétaire : `root:root`
 
@@ -320,13 +320,13 @@ Le JWT d'authentification est généré à chaque requête avec un nouveau `jti`
 **Configuration :**
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 token_rotate_refresh = true   # Activé par défaut
 ```
 
 Ou en argument PAM :
 ```
-auth required pam_llng.so no_rotate_refresh  # Pour désactiver (non recommandé)
+auth required pam_openbastion.so no_rotate_refresh  # Pour désactiver (non recommandé)
 ```
 
 #### Diagramme du cycle de renouvellement
@@ -559,7 +559,7 @@ Le JWT (`client_assertion`) est signé avec le `client_secret` mais celui-ci n'e
 
 **Remédiation configuration :**
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 verify_ssl = true          # Ne JAMAIS mettre false en production
 min_tls_version = 1.3      # Imposer TLS 1.3
 cert_pin = sha256//...     # Pinning du certificat LLNG (recommandé)
@@ -588,7 +588,7 @@ oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
 | **Probabilité** |   3   |
 | **Impact**      |   4   |
 
-**Description :** Le fichier `/etc/security/pam_llng.token` contient l'`access_token` du serveur. Sa compromission permet d'usurper l'identité du serveur auprès de LLNG.
+**Description :** Le fichier `/etc/open-bastion/token` contient l'`access_token` du serveur. Sa compromission permet d'usurper l'identité du serveur auprès de LLNG.
 
 **Vecteurs d'attaque :**
 - Accès root compromis (malware, exploit, insider)
@@ -601,25 +601,25 @@ oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
 - Obtenir les attributs des utilisateurs (groupes, permissions sudo)
 
 **Remédiation embarquée :**
-- Création avec permissions 0600 (`scripts/llng-pam-enroll:447`)
-- Vérification propriétaire root à l'utilisation (`src/pam_llng.c:134-138`)
-- Vérification permissions à l'utilisation (`src/pam_llng.c:141-146`)
-- Re-vérification périodique toutes les 5 min (`src/pam_llng.c:96-100`)
-- Détection de remplacement de fichier via inode (`src/pam_llng.c:119-124`)
+- Création avec permissions 0600 (`scripts/ob-enroll:447`)
+- Vérification propriétaire root à l'utilisation (`src/pam_openbastion.c:134-138`)
+- Vérification permissions à l'utilisation (`src/pam_openbastion.c:141-146`)
+- Re-vérification périodique toutes les 5 min (`src/pam_openbastion.c:96-100`)
+- Détection de remplacement de fichier via inode (`src/pam_openbastion.c:119-124`)
 - Écriture atomique via fichier temporaire + rename (`src/token_manager.c:632-663`)
 
 **Remédiation configuration :**
 ```bash
 # Vérifier les permissions
-chmod 0600 /etc/security/pam_llng.token
-chown root:root /etc/security/pam_llng.token
+chmod 0600 /etc/open-bastion/token
+chown root:root /etc/open-bastion/token
 
 # SELinux context (si applicable)
-semanage fcontext -a -t pam_var_run_t "/etc/security/pam_llng.token"
-restorecon -v /etc/security/pam_llng.token
+semanage fcontext -a -t pam_var_run_t "/etc/open-bastion/token"
+restorecon -v /etc/open-bastion/token
 
 # Monitoring des accès
-auditctl -w /etc/security/pam_llng.token -p rwa -k pam_token_access
+auditctl -w /etc/open-bastion/token -p rwa -k pam_token_access
 ```
 
 **Remédiation infrastructure :**
@@ -664,7 +664,7 @@ auditctl -w /etc/security/pam_llng.token -p rwa -k pam_token_access
 
 **Remédiation configuration :**
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 portal_url = https://auth.example.com  # HTTPS obligatoire
 verify_ssl = true                       # Ne jamais désactiver
 cert_pin = sha256//XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=
@@ -701,7 +701,7 @@ openssl s_client -connect auth.example.com:443 2>/dev/null | \
 - Confusion : l'opérateur relance le script, créant plusieurs codes
 
 **Remédiation embarquée :**
-- Affichage du temps restant (`scripts/llng-pam-enroll:320`)
+- Affichage du temps restant (`scripts/ob-enroll:320`)
 - Message clair en cas d'expiration (`expired_token` → "Please run this script again")
 - Gestion de l'erreur `slow_down` (augmentation de l'intervalle de polling)
 
@@ -886,7 +886,7 @@ timedatectl set-ntp true
 | **Probabilité** |   2   |
 | **Impact**      |   4   |
 
-**Description :** Le `refresh_token` est stocké avec l'`access_token` dans `/etc/security/pam_llng.token`. Contrairement à l'`access_token` qui expire rapidement (ex: 1h), le `refresh_token` a une durée de vie longue et permet d'obtenir de nouveaux `access_token` sans ré-enrôlement.
+**Description :** Le `refresh_token` est stocké avec l'`access_token` dans `/etc/open-bastion/token`. Contrairement à l'`access_token` qui expire rapidement (ex: 1h), le `refresh_token` a une durée de vie longue et permet d'obtenir de nouveaux `access_token` sans ré-enrôlement.
 
 **Vecteurs d'attaque :**
 - Mêmes que R4 (vol du fichier token)
@@ -951,9 +951,9 @@ oidcRPMetaDataOptionsRtActivity: 2592000  # 30 jours en secondes (0 = désactiv�
 ```
 
 **Remédiation PAM :**
-- **Implémenté** : Heartbeat périodique via `pam-llng-heartbeat.timer` (toutes les 5 minutes)
+- **Implémenté** : Heartbeat périodique via `ob-heartbeat.timer` (toutes les 5 minutes)
 - Le heartbeat maintient le token actif et détecte les pertes de connectivité
-- Activation : `systemctl enable --now pam-llng-heartbeat.timer`
+- Activation : `systemctl enable --now ob-heartbeat.timer`
 
 **Remédiation procédurale :**
 - Procédure de dé-enrôlement lors du décommissionnement d'un serveur
@@ -985,7 +985,7 @@ oidcRPMetaDataOptionsRtActivity: 2592000  # 30 jours en secondes (0 = désactiv�
 **Conséquence :** L'attaquant obtient un token serveur valide, le serveur légitime échoue car le `device_code` a été consommé.
 
 **Remédiation embarquée :**
-- **PKCE (RFC 7636)** : Le script `llng-pam-enroll` génère un `code_verifier` secret qui n'est jamais transmis lors de la requête initiale. Seul le `code_challenge` (hash SHA256) est envoyé.
+- **PKCE (RFC 7636)** : Le script `ob-enroll` génère un `code_verifier` secret qui n'est jamais transmis lors de la requête initiale. Seul le `code_challenge` (hash SHA256) est envoyé.
 - Sans le `code_verifier`, l'attaquant ne peut pas échanger le `device_code` volé.
 
 **Remédiation configuration (côté LLNG) :**
@@ -1079,7 +1079,7 @@ sequenceDiagram
 ### Configuration minimale sécurisée
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 
 # Portal LLNG (HTTPS obligatoire)
 portal_url = https://auth.example.com
@@ -1093,13 +1093,13 @@ client_id = pam-access
 client_secret = <secret>
 
 # Fichier token
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 ```
 
 ### Configuration renforcée
 
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 
 portal_url = https://auth.example.com
 verify_ssl = true
@@ -1114,7 +1114,7 @@ ca_cert = /etc/ssl/certs/internal-ca.pem
 client_id = pam-access
 client_secret = <secret>
 
-server_token_file = /etc/security/pam_llng.token
+server_token_file = /etc/open-bastion/token
 
 # Segmentation par environnement
 server_group = production
@@ -1127,10 +1127,10 @@ server_group = production
 # Script de hardening pour le serveur PAM
 
 # Permissions strictes
-chmod 0600 /etc/security/pam_llng.conf
-chmod 0600 /etc/security/pam_llng.token
-chown root:root /etc/security/pam_llng.conf
-chown root:root /etc/security/pam_llng.token
+chmod 0600 /etc/open-bastion/openbastion.conf
+chmod 0600 /etc/open-bastion/token
+chown root:root /etc/open-bastion/openbastion.conf
+chown root:root /etc/open-bastion/token
 
 # Désactiver core dumps
 echo "* hard core 0" >> /etc/security/limits.conf
@@ -1143,8 +1143,8 @@ echo "kernel.yama.ptrace_scope = 1" >> /etc/sysctl.conf
 sysctl -p
 
 # Audit des accès au fichier token
-auditctl -w /etc/security/pam_llng.token -p rwa -k pam_token_access
-auditctl -w /etc/security/pam_llng.conf -p rwa -k pam_config_access
+auditctl -w /etc/open-bastion/token -p rwa -k pam_token_access
+auditctl -w /etc/open-bastion/openbastion.conf -p rwa -k pam_config_access
 
 # Synchronisation NTP
 timedatectl set-ntp true
@@ -1267,7 +1267,7 @@ oidcRPMetaDataOptions:
 **Configuration serveur (exemple production) :**
 
 ```ini
-# /etc/security/pam_llng.conf (serveur de production)
+# /etc/open-bastion/openbastion.conf (serveur de production)
 portal_url = https://auth.example.com
 client_id = pam-prod
 client_secret = <PROD_SECRET>
@@ -1350,7 +1350,7 @@ flowchart TB
 - [ ] `Hashed session storage` activé côté LLNG (recommandé)
 - [ ] Plugin CrowdSec activé pour le rate-limiting (R2)
 - [ ] Client OIDC `pam-access` créé avec scope `pam:server`
-- [ ] `client_secret` stocké dans `/etc/security/pam_llng.conf` (pas en CLI)
+- [ ] `client_secret` stocké dans `/etc/open-bastion/openbastion.conf` (pas en CLI)
 - [ ] Fichier de config en permissions 0600
 - [ ] Accès au Manager LLNG restreint (risque : accès à la clé privée SSH CA)
 - [ ] Canal de communication sécurisé avec l'administrateur LLNG établi
@@ -1465,7 +1465,7 @@ Bien que le RFC 8628 ne mentionne pas PKCE, le module PAM l'implémente comme ex
 
 ```mermaid
 flowchart TB
-    subgraph Etape1["1. Enrôlement (llng-pam-enroll)"]
+    subgraph Etape1["1. Enrôlement (ob-enroll)"]
         Gen["code_verifier = random(32 bytes) → base64url<br/>code_challenge = SHA256(code_verifier) → base64url"]
         Req1["POST /oauth2/device<br/>• client_id=pam-access<br/>• scope=pam:server<br/>• code_challenge=E9Melhoa...<br/>• code_challenge_method=S256"]
         Gen --> Req1

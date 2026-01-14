@@ -1,14 +1,14 @@
 # SOME DESCRIPTIVE TITLE.
 # Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
-# This file is distributed under the same license as the pam-llng package.
+# This file is distributed under the same license as the open-bastion package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 #
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: pam-llng\n"
-"Report-Msgid-Bugs-To: pam-llng@packages.debian.org\n"
-"POT-Creation-Date: 2025-12-16 22:18+0100\n"
+"Project-Id-Version: open-bastion\n"
+"Report-Msgid-Bugs-To: open-bastion@packages.debian.org\n"
+"POT-Creation-Date: 2026-01-14 06:32+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -20,7 +20,7 @@ msgstr ""
 #. Type: select
 #. Description
 #: ../templates:1001
-msgid "PAM authentication mode for LemonLDAP::NG:"
+msgid "PAM authentication mode for Open Bastion:"
 msgstr ""
 
 #. Type: select
@@ -34,16 +34,16 @@ msgstr ""
 #: ../templates:1001
 msgid ""
 " * none: Do not configure PAM automatically\n"
-" * mode-a: LLNG token only (strictest)\n"
-" * mode-b: LLNG token OR Unix password (fallback)\n"
-" * mode-c: SSH key with LLNG authorization only\n"
-" * mode-d: All methods (SSH keys, LLNG tokens, Unix passwords)"
+" * mode-a: Open Bastion token only (strictest)\n"
+" * mode-b: Open Bastion token OR Unix password (fallback)\n"
+" * mode-c: SSH key with Open Bastion authorization only\n"
+" * mode-d: All methods (SSH keys, Open Bastion tokens, Unix passwords)"
 msgstr ""
 
 #. Type: select
 #. Description
 #: ../templates:1001
-msgid "All modes require LLNG authorization to access this server."
+msgid "All modes require Open Bastion authorization to access this server."
 msgstr ""
 
 #. Type: string
@@ -56,7 +56,8 @@ msgstr ""
 #. Description
 #: ../templates:2001
 msgid ""
-"Enter the URL of your LemonLDAP::NG portal (e.g., https://auth.example.com)."
+"Enter the URL of your LemonLDAP::NG portal with Open Bastion plugins (e.g., "
+"https://auth.example.com)."
 msgstr ""
 
 #. Type: string
@@ -94,7 +95,7 @@ msgstr ""
 #: ../templates:5001
 msgid ""
 "Enter the server group name for authorization rules. This must match a group "
-"defined in LLNG's pamAccessServerGroups."
+"defined in LemonLDAP::NG's pamAccessServerGroups."
 msgstr ""
 
 #. Type: boolean
@@ -107,8 +108,8 @@ msgstr ""
 #. Description
 #: ../templates:6001
 msgid ""
-"Set this to true if you want to configure /etc/pam.d/sudo with LLNG "
-"authentication. This allows using LLNG tokens for sudo commands."
+"Set this to true if you want to configure /etc/pam.d/sudo with Open Bastion "
+"authentication. This allows using Open Bastion tokens for sudo commands."
 msgstr ""
 
 #. Type: string
@@ -142,13 +143,13 @@ msgstr ""
 #: ../templates:8001
 msgid ""
 "If enabled, Unix accounts will be created automatically when a user "
-"authenticates for the first time via LemonLDAP::NG."
+"authenticates for the first time via Open Bastion."
 msgstr ""
 
 #. Type: boolean
 #. Description
 #: ../templates:8001
 msgid ""
-"User attributes (gecos, shell, home) can be exported from LLNG via "
+"User attributes (gecos, shell, home) can be exported from LemonLDAP::NG via "
 "pamAccessExportedVars configuration."
 msgstr ""

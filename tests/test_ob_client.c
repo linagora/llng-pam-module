@@ -1,12 +1,12 @@
 /*
- * test_llng_client.c - Tests for llng_client functions
+ * test_ob_client.c - Tests for ob_client functions
  *
  * Tests the new structures and functions:
- * - llng_permissions_t parsing
- * - llng_ssh_cert_info_t handling
- * - llng_ssh_cert_info_free()
+ * - ob_permissions_t parsing
+ * - ob_ssh_cert_info_t handling
+ * - ob_ssh_cert_info_free()
  *
- * Note: Full integration tests require a running LLNG instance.
+ * Note: Full integration tests require a running Open Bastion instance.
  * These tests focus on unit testing the structures and helper functions.
  */
 
@@ -15,7 +15,7 @@
 #include <string.h>
 #include <assert.h>
 
-#include "llng_client.h"
+#include "ob_client.h"
 
 /* Test counter */
 static int tests_run = 0;
@@ -36,13 +36,13 @@ static int tests_passed = 0;
 } while(0)
 
 /*
- * Test llng_ssh_cert_info_free with populated structure
+ * Test ob_ssh_cert_info_free with populated structure
  */
 static void test_ssh_cert_info_free_populated(void)
 {
     TEST("ssh_cert_info_free with populated struct");
 
-    llng_ssh_cert_info_t cert = {0};
+    ob_ssh_cert_info_t cert = {0};
     cert.key_id = strdup("user@llng-123456");
     cert.serial = strdup("42");
     cert.principals = strdup("user,admin");
@@ -50,7 +50,7 @@ static void test_ssh_cert_info_free_populated(void)
     cert.valid = true;
 
     /* Should not crash and should zero the structure */
-    llng_ssh_cert_info_free(&cert);
+    ob_ssh_cert_info_free(&cert);
 
     if (cert.key_id == NULL && cert.serial == NULL &&
         cert.principals == NULL && cert.ca_fingerprint == NULL &&
@@ -62,41 +62,41 @@ static void test_ssh_cert_info_free_populated(void)
 }
 
 /*
- * Test llng_ssh_cert_info_free with empty structure
+ * Test ob_ssh_cert_info_free with empty structure
  */
 static void test_ssh_cert_info_free_empty(void)
 {
     TEST("ssh_cert_info_free with empty struct");
 
-    llng_ssh_cert_info_t cert = {0};
+    ob_ssh_cert_info_t cert = {0};
 
     /* Should not crash */
-    llng_ssh_cert_info_free(&cert);
+    ob_ssh_cert_info_free(&cert);
 
     PASS();
 }
 
 /*
- * Test llng_ssh_cert_info_free with NULL
+ * Test ob_ssh_cert_info_free with NULL
  */
 static void test_ssh_cert_info_free_null(void)
 {
     TEST("ssh_cert_info_free with NULL");
 
     /* Should not crash */
-    llng_ssh_cert_info_free(NULL);
+    ob_ssh_cert_info_free(NULL);
 
     PASS();
 }
 
 /*
- * Test llng_response_free with permissions
+ * Test ob_response_free with permissions
  */
 static void test_response_free_with_permissions(void)
 {
     TEST("response_free with permissions");
 
-    llng_response_t response = {0};
+    ob_response_t response = {0};
     response.authorized = true;
     response.user = strdup("testuser");
     response.reason = strdup("test reason");
@@ -111,7 +111,7 @@ static void test_response_free_with_permissions(void)
     response.groups[1] = strdup("group2");
 
     /* Should not crash and should zero the structure */
-    llng_response_free(&response);
+    ob_response_free(&response);
 
     if (response.user == NULL && response.reason == NULL &&
         response.groups == NULL && response.groups_count == 0 &&
@@ -129,7 +129,7 @@ static void test_permissions_default_values(void)
 {
     TEST("permissions default values");
 
-    llng_permissions_t perms = {0};
+    ob_permissions_t perms = {0};
 
     if (perms.sudo_allowed == false && perms.sudo_nopasswd == false) {
         PASS();
@@ -145,7 +145,7 @@ static void test_response_has_permissions_flag(void)
 {
     TEST("response has_permissions flag");
 
-    llng_response_t response = {0};
+    ob_response_t response = {0};
 
     /* Initially should be false */
     if (response.has_permissions != false) {
@@ -172,7 +172,7 @@ static void test_ssh_cert_info_structure(void)
 {
     TEST("ssh_cert_info structure layout");
 
-    llng_ssh_cert_info_t cert = {0};
+    ob_ssh_cert_info_t cert = {0};
 
     /* Verify we can access all fields */
     cert.key_id = NULL;
@@ -182,7 +182,7 @@ static void test_ssh_cert_info_structure(void)
     cert.valid = false;
 
     /* Structure should be reasonable size */
-    if (sizeof(llng_ssh_cert_info_t) >= sizeof(char *) * 4 + sizeof(bool)) {
+    if (sizeof(ob_ssh_cert_info_t) >= sizeof(char *) * 4 + sizeof(bool)) {
         PASS();
     } else {
         FAIL("Structure size seems wrong");
@@ -196,13 +196,13 @@ static void test_client_init_null_config(void)
 {
     TEST("client_init with NULL config");
 
-    llng_client_t *client = llng_client_init(NULL);
+    ob_client_t *client = ob_client_init(NULL);
 
     if (client == NULL) {
         PASS();
     } else {
         FAIL("Should return NULL for NULL config");
-        llng_client_destroy(client);
+        ob_client_destroy(client);
     }
 }
 
@@ -213,16 +213,16 @@ static void test_client_init_no_portal(void)
 {
     TEST("client_init without portal_url");
 
-    llng_client_config_t config = {0};
+    ob_client_config_t config = {0};
     config.portal_url = NULL;
 
-    llng_client_t *client = llng_client_init(&config);
+    ob_client_t *client = ob_client_init(&config);
 
     if (client == NULL) {
         PASS();
     } else {
         FAIL("Should return NULL when portal_url is missing");
-        llng_client_destroy(client);
+        ob_client_destroy(client);
     }
 }
 
@@ -233,17 +233,17 @@ static void test_client_init_valid(void)
 {
     TEST("client_init with valid config");
 
-    llng_client_config_t config = {0};
+    ob_client_config_t config = {0};
     config.portal_url = "https://auth.example.com";
     config.client_id = "test-client";
     config.client_secret = "secret";
     config.timeout = 10;
     config.verify_ssl = true;
 
-    llng_client_t *client = llng_client_init(&config);
+    ob_client_t *client = ob_client_init(&config);
 
     if (client != NULL) {
-        llng_client_destroy(client);
+        ob_client_destroy(client);
         PASS();
     } else {
         FAIL("Should succeed with valid config");
@@ -257,7 +257,7 @@ static void test_client_error_null(void)
 {
     TEST("client_error with NULL client");
 
-    const char *error = llng_client_error(NULL);
+    const char *error = ob_client_error(NULL);
 
     if (error != NULL && strcmp(error, "No client") == 0) {
         PASS();
@@ -273,46 +273,46 @@ static void test_introspect_token_null_params(void)
 {
     TEST("introspect_token with NULL params");
 
-    llng_client_config_t config = {0};
+    ob_client_config_t config = {0};
     config.portal_url = "https://auth.example.com";
     config.client_id = "test-client";
     config.client_secret = "secret";
     config.timeout = 1;
     config.verify_ssl = false;
 
-    llng_client_t *client = llng_client_init(&config);
+    ob_client_t *client = ob_client_init(&config);
     if (!client) {
         FAIL("Failed to init client");
         return;
     }
 
-    llng_response_t response = {0};
+    ob_response_t response = {0};
 
     /* NULL client should fail */
-    int ret = llng_introspect_token(NULL, "token", &response);
+    int ret = ob_introspect_token(NULL, "token", &response);
     if (ret != -1) {
         FAIL("Should fail with NULL client");
-        llng_client_destroy(client);
+        ob_client_destroy(client);
         return;
     }
 
     /* NULL token should fail */
-    ret = llng_introspect_token(client, NULL, &response);
+    ret = ob_introspect_token(client, NULL, &response);
     if (ret != -1) {
         FAIL("Should fail with NULL token");
-        llng_client_destroy(client);
+        ob_client_destroy(client);
         return;
     }
 
     /* NULL response should fail */
-    ret = llng_introspect_token(client, "token", NULL);
+    ret = ob_introspect_token(client, "token", NULL);
     if (ret != -1) {
         FAIL("Should fail with NULL response");
-        llng_client_destroy(client);
+        ob_client_destroy(client);
         return;
     }
 
-    llng_client_destroy(client);
+    ob_client_destroy(client);
     PASS();
 }
 
@@ -326,25 +326,25 @@ static void test_introspect_token_no_server(void)
 {
     TEST("introspect_token builds JWT request (no server)");
 
-    llng_client_config_t config = {0};
+    ob_client_config_t config = {0};
     config.portal_url = "https://localhost:1"; /* Invalid port, will fail quickly */
     config.client_id = "test-client";
     config.client_secret = "test-secret";
     config.timeout = 1;
     config.verify_ssl = false;
 
-    llng_client_t *client = llng_client_init(&config);
+    ob_client_t *client = ob_client_init(&config);
     if (!client) {
         FAIL("Failed to init client");
         return;
     }
 
-    llng_response_t response = {0};
-    int ret = llng_introspect_token(client, "test-token", &response);
+    ob_response_t response = {0};
+    int ret = ob_introspect_token(client, "test-token", &response);
 
     /* Should fail (no server) but not crash */
     /* The error should be a curl error, not a JWT generation error */
-    const char *error = llng_client_error(client);
+    const char *error = ob_client_error(client);
     if (ret == -1 && error != NULL && strstr(error, "Curl") != NULL) {
         /* Good: failed with curl error, meaning JWT was generated successfully */
         PASS();
@@ -355,12 +355,12 @@ static void test_introspect_token_no_server(void)
         PASS(); /* Any failure is acceptable here since there's no server */
     }
 
-    llng_client_destroy(client);
+    ob_client_destroy(client);
 }
 
 int main(void)
 {
-    printf("Running llng_client tests...\n\n");
+    printf("Running ob_client tests...\n\n");
 
     /* SSH cert info tests */
     test_ssh_cert_info_free_populated();

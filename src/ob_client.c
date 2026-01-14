@@ -1,5 +1,5 @@
 /*
- * llng_client.c - HTTP client for LemonLDAP::NG PAM module
+ * ob_client.c - HTTP client for Open Bastion PAM module
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -16,7 +16,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
-#include "llng_client.h"
+#include "ob_client.h"
 #include "jwt_utils.h"
 
 /* TLS version constants for min_tls_version configuration */
@@ -37,12 +37,12 @@ static inline char *safe_json_strdup(struct json_object *obj)
 }
 
 /* Forward declaration for internal authorize function */
-static int llng_authorize_user_internal(llng_client_t *client,
+static int ob_authorize_user_internal(ob_client_t *client,
                                          const char *user,
                                          const char *host,
                                          const char *service,
-                                         const llng_ssh_cert_info_t *ssh_cert,
-                                         llng_response_t *response);
+                                         const ob_ssh_cert_info_t *ssh_cert,
+                                         ob_response_t *response);
 
 /* Thread-safe curl initialization */
 static pthread_once_t curl_init_once = PTHREAD_ONCE_INIT;
@@ -52,7 +52,7 @@ static void curl_global_init_once(void)
 }
 
 /* Client structure */
-struct llng_client {
+struct ob_client {
     CURL *curl;
     char *portal_url;
     char *client_id;
@@ -397,13 +397,13 @@ static int validate_cert_pin_format(const char *pin)
     return valid;
 }
 
-llng_client_t *llng_client_init(const llng_client_config_t *config)
+ob_client_t *ob_client_init(const ob_client_config_t *config)
 {
     if (!config || !config->portal_url) {
         return NULL;
     }
 
-    llng_client_t *client = calloc(1, sizeof(llng_client_t));
+    ob_client_t *client = calloc(1, sizeof(ob_client_t));
     if (!client) {
         return NULL;
     }
@@ -433,7 +433,7 @@ llng_client_t *llng_client_init(const llng_client_config_t *config)
         if (!validate_cert_pin_format(config->cert_pin)) {
             snprintf(client->error, sizeof(client->error),
                      "Invalid certificate pin format. Expected sha256//base64 or file path");
-            llng_client_destroy(client);
+            ob_client_destroy(client);
             return NULL;
         }
         client->cert_pin = strdup(config->cert_pin);
@@ -451,7 +451,7 @@ static void secure_free(char *ptr)
     }
 }
 
-void llng_client_destroy(llng_client_t *client)
+void ob_client_destroy(ob_client_t *client)
 {
     if (!client) return;
 
@@ -471,13 +471,13 @@ void llng_client_destroy(llng_client_t *client)
     free(client);
 }
 
-const char *llng_client_error(llng_client_t *client)
+const char *ob_client_error(ob_client_t *client)
 {
     return client ? client->error : "No client";
 }
 
 /* Setup curl common options */
-static void setup_curl(llng_client_t *client)
+static void setup_curl(ob_client_t *client)
 {
     curl_easy_reset(client->curl);
     curl_easy_setopt(client->curl, CURLOPT_TIMEOUT, (long)client->timeout);
@@ -525,9 +525,9 @@ static void setup_curl(llng_client_t *client)
     curl_easy_setopt(client->curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate");
 }
 
-int llng_verify_token(llng_client_t *client,
+int ob_verify_token(ob_client_t *client,
                       const char *user_token,
-                      llng_response_t *response)
+                      ob_response_t *response)
 {
     if (!client || !user_token || !response) {
         if (client) snprintf(client->error, sizeof(client->error), "Invalid parameters");
@@ -701,9 +701,9 @@ int llng_verify_token(llng_client_t *client,
     return 0;
 }
 
-int llng_introspect_token(llng_client_t *client,
+int ob_introspect_token(ob_client_t *client,
                           const char *token,
-                          llng_response_t *response)
+                          ob_response_t *response)
 {
     if (!client || !token || !response) {
         if (client) snprintf(client->error, sizeof(client->error), "Invalid parameters");
@@ -829,25 +829,25 @@ int llng_introspect_token(llng_client_t *client,
     return 0;
 }
 
-int llng_authorize_user(llng_client_t *client,
+int ob_authorize_user(ob_client_t *client,
                         const char *user,
                         const char *host,
                         const char *service,
-                        llng_response_t *response)
+                        ob_response_t *response)
 {
     /* Delegate to internal function without SSH certificate info */
-    return llng_authorize_user_internal(client, user, host, service, NULL, response);
+    return ob_authorize_user_internal(client, user, host, service, NULL, response);
 }
 
 /*
  * Internal helper for authorize with optional SSH cert info
  */
-static int llng_authorize_user_internal(llng_client_t *client,
+static int ob_authorize_user_internal(ob_client_t *client,
                                          const char *user,
                                          const char *host,
                                          const char *service,
-                                         const llng_ssh_cert_info_t *ssh_cert,
-                                         llng_response_t *response)
+                                         const ob_ssh_cert_info_t *ssh_cert,
+                                         ob_response_t *response)
 {
     if (!client || !user || !response) {
         if (client) snprintf(client->error, sizeof(client->error), "Invalid parameters");
@@ -1065,17 +1065,17 @@ static int llng_authorize_user_internal(llng_client_t *client,
     return 0;
 }
 
-int llng_authorize_user_with_cert(llng_client_t *client,
+int ob_authorize_user_with_cert(ob_client_t *client,
                                    const char *user,
                                    const char *host,
                                    const char *service,
-                                   const llng_ssh_cert_info_t *ssh_cert,
-                                   llng_response_t *response)
+                                   const ob_ssh_cert_info_t *ssh_cert,
+                                   ob_response_t *response)
 {
-    return llng_authorize_user_internal(client, user, host, service, ssh_cert, response);
+    return ob_authorize_user_internal(client, user, host, service, ssh_cert, response);
 }
 
-void llng_ssh_cert_info_free(llng_ssh_cert_info_t *cert_info)
+void ob_ssh_cert_info_free(ob_ssh_cert_info_t *cert_info)
 {
     if (!cert_info) return;
     free(cert_info->key_id);
@@ -1085,13 +1085,13 @@ void llng_ssh_cert_info_free(llng_ssh_cert_info_t *cert_info)
     memset(cert_info, 0, sizeof(*cert_info));
 }
 
-void llng_response_init(llng_response_t *response)
+void ob_response_init(ob_response_t *response)
 {
     if (!response) return;
     memset(response, 0, sizeof(*response));
 }
 
-void llng_response_free(llng_response_t *response)
+void ob_response_free(ob_response_t *response)
 {
     if (!response) return;
 

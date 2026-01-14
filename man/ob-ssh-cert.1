@@ -1,11 +1,11 @@
-.TH LLNG-SSH-CERT 1 "December 2025" "pam-llng 1.0.0" "User Commands"
+.TH OB-SSH-CERT 1 "December 2025" "open-bastion 1.0.0" "User Commands"
 .SH NAME
-llng-ssh-cert \- Obtain SSH certificates from LemonLDAP::NG
+ob-ssh-cert \- Obtain SSH certificates from LemonLDAP::NG
 .SH SYNOPSIS
-.B llng-ssh-cert
+.B ob-ssh-cert
 .RI [ OPTIONS ]
 .SH DESCRIPTION
-.B llng-ssh-cert
+.B ob-ssh-cert
 allows users to obtain signed SSH certificates from LemonLDAP::NG,
 enabling passwordless SSH authentication to servers that trust the LLNG CA.
 .PP
@@ -13,7 +13,7 @@ The script uses the Device Authorization Grant (RFC 8628) to authenticate
 the user. A verification code is displayed that must be entered on the
 LemonLDAP::NG portal.
 .PP
-Once authenticated, the user's public key is signed by the LLNG SSH CA,
+Once authenticated, the user's public key is signed by the LemonLDAP::NG SSH CA,
 creating a certificate that can be used for SSH authentication.
 .SH OPTIONS
 .TP
@@ -48,34 +48,34 @@ Show help message and exit.
 Show version and exit.
 .SH ENVIRONMENT
 .TP
-.B LLNG_PORTAL_URL
+.B OB_PORTAL_URL
 Default portal URL if not specified with \-p.
 .TP
-.B LLNG_SSH_CERT_VALIDITY
+.B OB_SSH_CERT_VALIDITY
 Default certificate validity in minutes.
 .TP
-.B LLNG_SSH_CERT_CLIENT_ID
+.B OB_SSH_CERT_CLIENT_ID
 Default OIDC client ID.
 .SH EXAMPLES
 .PP
 Get a 1-hour certificate using key from SSH agent:
 .RS
 .nf
-llng-ssh-cert \-p https://auth.example.com \-v 60
+ob-ssh-cert \-p https://auth.example.com \-v 60
 .fi
 .RE
 .PP
 Sign a specific public key:
 .RS
 .nf
-llng-ssh-cert \-p https://auth.example.com \-k ~/.ssh/id_ed25519.pub
+ob-ssh-cert \-p https://auth.example.com \-k ~/.ssh/id_ed25519.pub
 .fi
 .RE
 .PP
 Save certificate to file:
 .RS
 .nf
-llng-ssh-cert \-p https://auth.example.com \-o ~/.ssh/id_ed25519-cert.pub
+ob-ssh-cert \-p https://auth.example.com \-o ~/.ssh/id_ed25519-cert.pub
 .fi
 .RE
 .SH FILES
@@ -92,7 +92,7 @@ Failed (network error, authorization denied, invalid key, etc.)
 .SH SEE ALSO
 .BR ssh (1),
 .BR ssh-add (1),
-.BR llng-bastion-setup (8)
+.BR ob-bastion-setup (8)
 .PP
 LemonLDAP::NG documentation: https://lemonldap-ng.org/
 .SH AUTHOR

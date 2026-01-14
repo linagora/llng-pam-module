@@ -114,7 +114,7 @@ if (result == JTI_CACHE_REPLAY_DETECTED) {
 
 **Configuration :**
 ```ini
-# /etc/security/pam_llng.conf
+# /etc/open-bastion/openbastion.conf
 bastion_jwt_replay_detection = true   # Activé par défaut
 bastion_jwt_replay_cache_size = 10000 # Max entrées
 bastion_jwt_replay_cleanup_interval = 60  # Nettoyage automatique
@@ -155,7 +155,7 @@ Le `jti` (JWT ID) des tokens bastion est généré avec :
 
 → Protection contre les collisions et la prédictibilité.
 
-### Vérification permissions fichier config (llng-ssh-proxy)
+### Vérification permissions fichier config (ob-ssh-proxy)
 
 Le script vérifie avant de sourcer le fichier de configuration :
 - Propriétaire = root (uid 0)

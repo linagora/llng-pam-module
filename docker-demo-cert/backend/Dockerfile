@@ -1,10 +1,10 @@
-# LLNG SSH Backend - Certificate Authentication with User Creation
+# Open Bastion SSH Backend - Certificate Authentication with User Creation
 #
 # This container provides:
-# - SSH certificate authentication via LLNG CA
-# - Automatic user creation from LLNG attributes
+# - SSH certificate authentication via Open Bastion CA
+# - Automatic user creation from Open Bastion attributes
 # - NSS module for user/group resolution
-# - Sudo authorization via LLNG
+# - Sudo authorization via Open Bastion
 
 FROM debian:13-slim
 
@@ -27,49 +27,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create directories
 RUN mkdir -p /var/run/sshd \
-    /var/cache/pam_llng \
-    /var/cache/nss_llng \
-    && chmod 750 /var/cache/pam_llng \
-    && chmod 750 /var/cache/nss_llng
+    /var/cache/open-bastion \
+    && chmod 750 /var/cache/open-bastion
 
-# Build PAM and NSS modules from source (context is llng-pam-module/)
-COPY CMakeLists.txt /src/llng-pam-module/
-COPY src/ /src/llng-pam-module/src/
-COPY include/ /src/llng-pam-module/include/
-COPY nss/ /src/llng-pam-module/nss/
-COPY scripts/ /src/llng-pam-module/scripts/
-WORKDIR /src/llng-pam-module
+# Build PAM and NSS modules from source (context is open-bastion/)
+COPY CMakeLists.txt /src/open-bastion/
+COPY src/ /src/open-bastion/src/
+COPY include/ /src/open-bastion/include/
+COPY nss/ /src/open-bastion/nss/
+COPY scripts/ /src/open-bastion/scripts/
+WORKDIR /src/open-bastion
 RUN mkdir -p build && cd build && \
     cmake -DBUILD_TESTING=OFF .. && \
     make -j$(nproc) && \
-    cp pam_llng.so /usr/lib/x86_64-linux-gnu/security/ && \
-    cp nss/libnss_llng.so.2 /lib/x86_64-linux-gnu/ && \
+    cp pam_openbastion.so /usr/lib/x86_64-linux-gnu/security/ && \
+    cp nss/libnss_openbastion.so.2 /lib/x86_64-linux-gnu/ && \
     ldconfig && \
-    cd / && rm -rf /src/llng-pam-module/build
+    cd / && rm -rf /src/open-bastion/build
 
 # Configure PAM for SSH (backend mode with user creation)
-RUN echo '# PAM configuration for SSH Backend with LemonLDAP::NG\n\
+RUN echo '# PAM configuration for SSH Backend with Open Bastion\n\
 # Authentication via SSH certificates (not PAM)\n\
 auth       required     pam_permit.so\n\
 \n\
-# Authorization - check with LLNG\n\
-account    required     pam_llng.so\n\
+# Authorization - check with Open Bastion\n\
+account    required     pam_openbastion.so\n\
 \n\
 # Session - create user if needed, then standard Unix\n\
-session    required     pam_llng.so create_user=true\n\
+session    required     pam_openbastion.so create_user=true\n\
 session    required     pam_unix.so\n\
 ' > /etc/pam.d/sshd
 
-# Configure PAM for sudo (LLNG authorization)
-RUN echo '# PAM configuration for sudo with LemonLDAP::NG\n\
-auth       required     pam_llng.so service_type=sudo\n\
-account    required     pam_llng.so service_type=sudo\n\
+# Configure PAM for sudo (Open Bastion authorization)
+RUN echo '# PAM configuration for sudo with Open Bastion\n\
+auth       required     pam_openbastion.so service_type=sudo\n\
+account    required     pam_openbastion.so service_type=sudo\n\
 session    required     pam_unix.so\n\
 ' > /etc/pam.d/sudo
 
-# Configure NSS to use LLNG for passwd/group resolution
-RUN sed -i 's/^passwd:.*/passwd:         files llng/' /etc/nsswitch.conf && \
-    sed -i 's/^group:.*/group:          files llng/' /etc/nsswitch.conf
+# Configure NSS to use Open Bastion for passwd/group resolution
+RUN sed -i 's/^passwd:.*/passwd:         files openbastion/' /etc/nsswitch.conf && \
+    sed -i 's/^group:.*/group:          files openbastion/' /etc/nsswitch.conf
 
 # Allow all users to sudo (PAM handles authorization)
 RUN echo "ALL ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers

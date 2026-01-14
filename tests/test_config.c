@@ -29,7 +29,7 @@ static int tests_passed = 0;
 /* Test default initialization */
 static int test_init_defaults(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     int ok = 1;
@@ -46,7 +46,7 @@ static int test_init_defaults(void)
 /* Test argument parsing */
 static int test_parse_args(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     const char *argv[] = {
@@ -75,7 +75,7 @@ static int test_parse_args(void)
 /* Test configuration validation */
 static int test_validate_missing_portal(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     /* Missing portal_url should fail validation */
@@ -87,7 +87,7 @@ static int test_validate_missing_portal(void)
 
 static int test_validate_missing_credentials(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     config.portal_url = strdup("https://test.example.com");
@@ -101,7 +101,7 @@ static int test_validate_missing_credentials(void)
 
 static int test_validate_authorize_only(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     config.portal_url = strdup("https://test.example.com");
@@ -116,7 +116,7 @@ static int test_validate_authorize_only(void)
 
 static int test_validate_complete(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     config.portal_url = strdup("https://test.example.com");
@@ -132,7 +132,7 @@ static int test_validate_complete(void)
 /* Test HTTPS requirement */
 static int test_validate_https_required(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     config.portal_url = strdup("http://test.example.com");  /* HTTP, not HTTPS */
@@ -148,7 +148,7 @@ static int test_validate_https_required(void)
 
 static int test_validate_http_allowed_insecure(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     config.portal_url = strdup("http://test.example.com");  /* HTTP */
@@ -165,7 +165,7 @@ static int test_validate_http_allowed_insecure(void)
 /* Test create_user defaults */
 static int test_create_user_defaults(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     int ok = 1;
@@ -182,7 +182,7 @@ static int test_create_user_defaults(void)
 /* Test create_user argument parsing */
 static int test_parse_create_user_args(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     const char *argv[] = {
@@ -208,7 +208,7 @@ static int test_parse_create_user_args(void)
 /* Test no_create_user flag */
 static int test_parse_no_create_user(void)
 {
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
     config.create_user_enabled = true;  /* Enable first */
 
@@ -232,7 +232,7 @@ static int test_parse_no_create_user(void)
 static int test_load_config_file(void)
 {
     /* Create a temp config file with secure permissions from the start */
-    const char *filename = "/tmp/test_pam_llng.conf";
+    const char *filename = "/tmp/test_openbastion.conf";
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return 0;
 
@@ -251,7 +251,7 @@ static int test_load_config_file(void)
     fprintf(f, "verify_ssl = false\n");
     fclose(f);  /* Also closes fd */
 
-    pam_llng_config_t config;
+    pam_openbastion_config_t config;
     config_init(&config);
 
     int ret = config_load(filename, &config);
