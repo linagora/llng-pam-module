@@ -127,3 +127,75 @@ log_level = warn
 # Cleanup interval for expired JTI entries (seconds)
 # Default: 60
 # bastion_jwt_replay_cleanup_interval = 60
+
+# ==============================================================================
+# CrowdSec Integration (optional)
+# ==============================================================================
+# CrowdSec provides collaborative threat detection and IP blocking.
+# See https://www.crowdsec.net/ for more information.
+# For centralized management, consider using Crowdsieve:
+# https://github.com/linagora/crowdsieve
+
+# Enable CrowdSec integration
+# Default: false
+# crowdsec_enabled = false
+
+# CrowdSec LAPI URL
+# Default: http://127.0.0.1:8080
+# crowdsec_url = http://127.0.0.1:8080
+
+# HTTP timeout for CrowdSec requests (seconds)
+# Default: 5
+# crowdsec_timeout = 5
+
+# Fail-open behavior when CrowdSec is unavailable
+# true = allow authentication if CrowdSec cannot be reached
+# false = deny authentication if CrowdSec cannot be reached
+# Default: true
+# crowdsec_fail_open = true
+
+# ------------------------------------------------------------------------------
+# Bouncer settings (pre-authentication IP blocking)
+# ------------------------------------------------------------------------------
+
+# Bouncer API key from: cscli bouncers add open-bastion
+# Required for IP blocking functionality
+# crowdsec_bouncer_key = your-bouncer-api-key
+
+# Action when IP is banned: reject or warn
+# reject = block authentication
+# warn = log warning but allow authentication
+# Default: reject
+# crowdsec_action = reject
+
+# ------------------------------------------------------------------------------
+# Watcher settings (post-authentication alert reporting)
+# ------------------------------------------------------------------------------
+
+# Machine ID and password from: cscli machines add open-bastion --password <pw>
+# Required for sending alerts to CrowdSec
+# crowdsec_machine_id = open-bastion
+# crowdsec_password = your-machine-password
+
+# Scenario name for alerts
+# Default: open-bastion/ssh-auth-failure
+# crowdsec_scenario = open-bastion/ssh-auth-failure
+
+# Send all alerts or only ban decisions
+# true = send every authentication failure as an alert
+# false = only send alerts when auto-ban threshold is reached
+# Default: true
+# crowdsec_send_all_alerts = true
+
+# Auto-ban threshold: ban IP after N failures in time window
+# Set to 0 to disable auto-banning (only report alerts)
+# Default: 5
+# crowdsec_max_failures = 5
+
+# Time window for counting failures (seconds)
+# Default: 180 (3 minutes)
+# crowdsec_block_delay = 180
+
+# Ban duration (e.g., 4h, 1d, 1w)
+# Default: 4h
+# crowdsec_ban_duration = 4h

@@ -427,6 +427,25 @@ ChallengeResponseAuthentication no
 PubkeyAuthentication yes
 ```
 
+**Remédiation complémentaire (CrowdSec) :**
+
+L'intégration CrowdSec du module PAM offre une protection supplémentaire contre le brute-force :
+
+```ini
+# /etc/open-bastion/openbastion.conf
+crowdsec_enabled = true
+crowdsec_bouncer_key = <bouncer_key>    # Bloquer les IPs bannies
+crowdsec_machine_id = <machine_id>       # Reporter les échecs
+crowdsec_password = <password>
+crowdsec_max_failures = 5                # Auto-ban après 5 échecs
+crowdsec_block_delay = 180               # Fenêtre de 3 minutes
+```
+
+Avec CrowdSec activé :
+- Les IPs connues pour attaques SSH sont bloquées avant toute tentative (via la communauté CrowdSec)
+- Les échecs d'authentification déclenchent un auto-ban local
+- Les alertes peuvent être centralisées via [Crowdsieve](https://github.com/linagora/crowdsieve)
+
 |                 | Score résiduel             |
 | --------------- | :------------------------: |
 | **Probabilité** | 1 (avec clés uniquement)   |

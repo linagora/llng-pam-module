@@ -641,6 +641,110 @@ ls -la /home/username
 | `ob-session-recorder` | Record SSH session (ForceCommand) |
 | `ob-ssh-proxy HOST` | Connect to backend with bastion JWT |
 
+## CrowdSec Integration
+
+Open Bastion can integrate with [CrowdSec](https://www.crowdsec.net/) for collaborative
+threat detection and IP blocking. This is particularly useful for bastions exposed to
+the internet.
+
+### Overview
+
+```mermaid
+flowchart LR
+    User -->|SSH| Server
+    Server -->|Check IP| CrowdSec[CrowdSec LAPI]
+    Server -->|Report failures| CrowdSec
+    CrowdSec -->|Decisions| Crowdsieve[Crowdsieve]
+    Crowdsieve -->|Filtered alerts| CAPI[CrowdSec CAPI]
+```
+
+### Prerequisites
+
+1. Install CrowdSec: https://docs.crowdsec.net/docs/getting_started/install_crowdsec
+2. Create a bouncer: `cscli bouncers add open-bastion`
+3. Create a machine: `cscli machines add open-bastion --password <password>`
+
+### Bastion Configuration with CrowdSec
+
+For bastions exposed to the internet, CrowdSec provides defense in depth:
+
+```bash
+cat >> /etc/open-bastion/openbastion.conf << 'EOF'
+
+# CrowdSec integration
+crowdsec_enabled = true
+crowdsec_url = http://127.0.0.1:8080
+
+# Bouncer: block banned IPs
+crowdsec_bouncer_key = your-bouncer-key
+crowdsec_action = reject
+crowdsec_fail_open = true
+
+# Watcher: report failures
+crowdsec_machine_id = bastion-01
+crowdsec_password = your-password
+crowdsec_scenario = open-bastion/ssh-auth-failure
+crowdsec_send_all_alerts = true
+crowdsec_max_failures = 5
+crowdsec_block_delay = 180
+crowdsec_ban_duration = 4h
+EOF
+```
+
+### Backend Configuration with CrowdSec
+
+For backends behind a bastion, you may only want the watcher (reporting) without
+the bouncer (blocking), since traffic already comes from trusted bastions:
+
+```bash
+cat >> /etc/open-bastion/openbastion.conf << 'EOF'
+
+# CrowdSec integration (watcher only)
+crowdsec_enabled = true
+crowdsec_url = http://127.0.0.1:8080
+
+# No bouncer key = no IP blocking (bastion already filters)
+# crowdsec_bouncer_key =
+
+# Watcher: report suspicious activity
+crowdsec_machine_id = backend-01
+crowdsec_password = your-password
+crowdsec_scenario = open-bastion/ssh-auth-failure
+crowdsec_send_all_alerts = true
+crowdsec_max_failures = 0  # 0 = don't auto-ban (bastion handles this)
+EOF
+```
+
+### Using Crowdsieve
+
+[Crowdsieve](https://github.com/linagora/crowdsieve) is a filtering proxy that sits
+between your local CrowdSec instances and the Central API (CAPI). Benefits:
+
+- **Alert filtering**: Filter alerts before they reach the cloud
+- **Local dashboard**: Visualize and manage security events locally
+- **Decision sync**: Query decisions across multiple CrowdSec servers
+- **Manual banning**: Ban IPs directly from the web interface
+
+To use Crowdsieve, point all your servers to it instead of local LAPI:
+
+```ini
+crowdsec_url = http://crowdsieve.internal:8080
+```
+
+### Monitoring
+
+Check CrowdSec decisions:
+```bash
+# List current bans
+cscli decisions list
+
+# Check alerts
+cscli alerts list
+
+# Check a specific IP
+cscli decisions list --ip 1.2.3.4
+```
+
 ## See Also
 
 - [bastion-architecture.md](bastion-architecture.md) - Architecture overview
