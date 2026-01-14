@@ -67,6 +67,7 @@ typedef struct {
     jti_cache_t *jti_cache;    /* JTI cache for bastion JWT replay detection */
     bastion_jwt_verifier_t *bastion_jwt_verifier;  /* Bastion JWT verifier */
     crowdsec_context_t *crowdsec;  /* CrowdSec bouncer/watcher */
+    crowdsec_action_t crowdsec_action;  /* Parsed CrowdSec action (reject/warn) */
 #ifdef ENABLE_CACHE
     token_cache_t *cache;
 #endif
@@ -560,10 +561,10 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
 
     /* Initialize CrowdSec integration */
     if (data->config.crowdsec_enabled) {
-        crowdsec_action_t cs_action = CS_ACTION_REJECT;
+        data->crowdsec_action = CS_ACTION_REJECT;
         if (data->config.crowdsec_action &&
             strcmp(data->config.crowdsec_action, "warn") == 0) {
-            cs_action = CS_ACTION_WARN;
+            data->crowdsec_action = CS_ACTION_WARN;
         }
 
         crowdsec_config_t cs_cfg = {
@@ -574,7 +575,7 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
             .verify_ssl = data->config.verify_ssl,
             .ca_cert = data->config.ca_cert,
             .bouncer_key = data->config.crowdsec_bouncer_key,
-            .action = cs_action,
+            .action = data->crowdsec_action,
             .machine_id = data->config.crowdsec_machine_id,
             .password = data->config.crowdsec_password,
             .scenario = data->config.crowdsec_scenario,
@@ -993,8 +994,7 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
 
         if (cs_result == CS_DENY) {
             /* Check action mode: reject or warn */
-            if (data->config.crowdsec_action &&
-                strcmp(data->config.crowdsec_action, "warn") == 0) {
+            if (data->crowdsec_action == CS_ACTION_WARN) {
                 /* Warn mode: log but continue */
                 OB_LOG_WARN(pamh, "User %s from %s flagged by CrowdSec (warn mode)", user, client_ip);
                 if (audit_initialized) {

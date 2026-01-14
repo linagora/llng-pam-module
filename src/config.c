@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <libgen.h>
 #include <fcntl.h>
+#include <syslog.h>
 
 #include "config.h"
 
@@ -611,6 +612,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_url);
             config->crowdsec_url = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     else if (strcmp(key, "crowdsec_timeout") == 0) {
@@ -624,6 +627,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_bouncer_key);
             config->crowdsec_bouncer_key = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     else if (strcmp(key, "crowdsec_action") == 0) {
@@ -633,6 +638,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
             if (tmp) {
                 free(config->crowdsec_action);
                 config->crowdsec_action = tmp;
+            } else {
+                syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
             }
         }
         /* Invalid values are silently ignored, keeping the default */
@@ -642,6 +649,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_machine_id);
             config->crowdsec_machine_id = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     else if (strcmp(key, "crowdsec_password") == 0) {
@@ -649,6 +658,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_password);
             config->crowdsec_password = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     else if (strcmp(key, "crowdsec_scenario") == 0) {
@@ -656,6 +667,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_scenario);
             config->crowdsec_scenario = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     else if (strcmp(key, "crowdsec_send_all_alerts") == 0) {
@@ -672,6 +685,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (tmp) {
             free(config->crowdsec_ban_duration);
             config->crowdsec_ban_duration = tmp;
+        } else {
+            syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key);
         }
     }
     /* Unknown keys are silently ignored */

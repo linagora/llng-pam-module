@@ -46,6 +46,7 @@ static int test_init_disabled(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,
         .password = NULL,
         .scenario = NULL,
@@ -78,6 +79,7 @@ static int test_init_defaults(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,
         .password = NULL,
         .scenario = NULL,  /* Should use default */
@@ -103,6 +105,7 @@ static int test_check_ip_no_bouncer_key(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,  /* No bouncer key */
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,
         .password = NULL,
         .scenario = "test-scenario",
@@ -135,6 +138,7 @@ static int test_check_ip_null_ip(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = "test-key",
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,
         .password = NULL,
         .scenario = "test-scenario",
@@ -174,6 +178,7 @@ static int test_report_no_credentials(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,  /* No machine_id */
         .password = NULL,    /* No password */
         .scenario = "test-scenario",
@@ -214,6 +219,7 @@ static int test_report_disabled(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,
+        .action = CS_ACTION_REJECT,
         .machine_id = "machine",
         .password = "password",
         .scenario = "test-scenario",
@@ -255,6 +261,7 @@ static int test_error_function(void)
         .fail_open = true,
         .verify_ssl = false,
         .bouncer_key = NULL,
+        .action = CS_ACTION_REJECT,
         .machine_id = NULL,
         .password = NULL,
         .scenario = NULL,

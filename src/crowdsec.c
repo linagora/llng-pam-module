@@ -29,6 +29,22 @@
 /* Initial buffer size for responses */
 #define INITIAL_BUFFER_SIZE 4096
 
+/* Decision cache TTL in seconds (avoid hammering LAPI) */
+#define DECISION_CACHE_TTL 30
+
+/* Maximum cached IPs */
+#define DECISION_CACHE_SIZE 16
+
+/* Minimum interval between failed login attempts (avoid hammering LAPI) */
+#define TOKEN_RETRY_INTERVAL 30
+
+/* Cached decision entry */
+typedef struct {
+    char ip[46];                /* IPv4 or IPv6 address */
+    crowdsec_result_t result;   /* Cached decision */
+    time_t timestamp;           /* When the decision was cached */
+} decision_cache_entry_t;
+
 /* CrowdSec context */
 struct crowdsec_context {
     crowdsec_config_t config;
@@ -36,6 +52,11 @@ struct crowdsec_context {
     char error_buf[256];
     char *token;                /* JWT token from watcher login */
     time_t token_exp;           /* Token expiration time */
+    time_t last_login_failure;  /* Timestamp of last failed login attempt */
+
+    /* Decision cache to avoid hammering LAPI */
+    decision_cache_entry_t decision_cache[DECISION_CACHE_SIZE];
+    int decision_cache_idx;     /* Next index to use (circular) */
 };
 
 /* Response buffer for curl */
@@ -154,6 +175,44 @@ static void get_timestamp(char *buf, size_t size)
     strftime(buf, size, "%Y-%m-%dT%H:%M:%SZ", &tm);
 }
 
+/* Check if IP is in decision cache (returns 1 if found and result is set) */
+static int cache_lookup(crowdsec_context_t *ctx, const char *ip,
+                        crowdsec_result_t *result)
+{
+    time_t now = time(NULL);
+
+    for (int i = 0; i < DECISION_CACHE_SIZE; i++) {
+        if (ctx->decision_cache[i].ip[0] != '\0' &&
+            strcmp(ctx->decision_cache[i].ip, ip) == 0) {
+            /* Check TTL */
+            if (now - ctx->decision_cache[i].timestamp < DECISION_CACHE_TTL) {
+                *result = ctx->decision_cache[i].result;
+                return 1;
+            }
+            /* Entry expired, invalidate it */
+            ctx->decision_cache[i].ip[0] = '\0';
+            break;
+        }
+    }
+    return 0;
+}
+
+/* Store decision in cache */
+static void cache_store(crowdsec_context_t *ctx, const char *ip,
+                        crowdsec_result_t result)
+{
+    /* Use circular buffer, overwrite oldest entry */
+    int idx = ctx->decision_cache_idx;
+
+    strncpy(ctx->decision_cache[idx].ip, ip,
+            sizeof(ctx->decision_cache[idx].ip) - 1);
+    ctx->decision_cache[idx].ip[sizeof(ctx->decision_cache[idx].ip) - 1] = '\0';
+    ctx->decision_cache[idx].result = result;
+    ctx->decision_cache[idx].timestamp = time(NULL);
+
+    ctx->decision_cache_idx = (idx + 1) % DECISION_CACHE_SIZE;
+}
+
 /* Login to CrowdSec LAPI to get JWT token (watcher role) */
 static int watcher_login(crowdsec_context_t *ctx)
 {
@@ -164,8 +223,12 @@ static int watcher_login(crowdsec_context_t *ctx)
     }
 
     /* Build URL */
-    char url[512];
-    snprintf(url, sizeof(url), "%s/v1/watchers/login", ctx->config.url);
+    char url[1024];
+    int url_len = snprintf(url, sizeof(url), "%s/v1/watchers/login", ctx->config.url);
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf), "URL too long");
+        return -1;
+    }
 
     /* Build JSON body */
     struct json_object *req = json_object_new_object();
@@ -259,10 +322,28 @@ static int watcher_login(crowdsec_context_t *ctx)
 /* Ensure we have a valid token */
 static int ensure_token(crowdsec_context_t *ctx)
 {
-    if (ctx->token && ctx->token_exp > time(NULL) + 10) {
+    time_t now = time(NULL);
+
+    if (ctx->token && ctx->token_exp > now + 10) {
         return 0;  /* Token still valid */
     }
-    return watcher_login(ctx);
+
+    /* Avoid hammering LAPI if login recently failed */
+    if (ctx->last_login_failure > 0 &&
+        now - ctx->last_login_failure < TOKEN_RETRY_INTERVAL) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf),
+                 "Token refresh skipped (recent failure)");
+        return -1;
+    }
+
+    int result = watcher_login(ctx);
+    if (result != 0) {
+        ctx->last_login_failure = now;
+    } else {
+        ctx->last_login_failure = 0;  /* Clear failure state on success */
+    }
+
+    return result;
 }
 
 /* Get count of alerts for IP in the time window */
@@ -272,16 +353,44 @@ static int get_alerts_count(crowdsec_context_t *ctx, const char *ip)
         return 0;  /* Can't get count, assume 0 */
     }
 
-    /* Build URL */
-    char url[512];
-    snprintf(url, sizeof(url), "%s/v1/alerts", ctx->config.url);
+    /* Build URL with server-side filtering */
+    char url[1024];
+    char *escaped_ip = curl_easy_escape(ctx->curl, ip, 0);
+    char *escaped_scenario = curl_easy_escape(ctx->curl, ctx->config.scenario, 0);
+    if (!escaped_ip || !escaped_scenario) {
+        curl_free(escaped_ip);
+        curl_free(escaped_scenario);
+        return 0;
+    }
+
+    /* Calculate since timestamp for block_delay window */
+    time_t since = time(NULL) - ctx->config.block_delay;
+    struct tm tm;
+    char since_str[32];
+    gmtime_r(&since, &tm);
+    strftime(since_str, sizeof(since_str), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+    int written = snprintf(url, sizeof(url),
+                           "%s/v1/alerts?ip=%s&scenario=%s&since=%s",
+                           ctx->config.url, escaped_ip, escaped_scenario, since_str);
+    curl_free(escaped_ip);
+    curl_free(escaped_scenario);
+
+    if (written < 0 || (size_t)written >= sizeof(url)) {
+        return 0;  /* URL truncated */
+    }
 
     /* Setup curl */
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Accept: application/json");
 
-    char auth_header[1024];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", ctx->token);
+    char auth_header[4096];
+    int auth_len = snprintf(auth_header, sizeof(auth_header),
+                            "Authorization: Bearer %s", ctx->token);
+    if (auth_len < 0 || (size_t)auth_len >= sizeof(auth_header)) {
+        curl_slist_free_all(headers);
+        return 0;  /* Token too long */
+    }
     headers = curl_slist_append(headers, auth_header);
 
     response_buffer_t buf;
@@ -644,15 +753,27 @@ crowdsec_result_t crowdsec_check_ip(crowdsec_context_t *ctx, const char *ip)
 
     ctx->error_buf[0] = '\0';
 
+    /* Check cache first to avoid hammering LAPI */
+    crowdsec_result_t cached_result;
+    if (cache_lookup(ctx, ip, &cached_result)) {
+        return cached_result;
+    }
+
     /* Build URL */
-    char url[512];
+    char url[1024];
     char *escaped_ip = curl_easy_escape(ctx->curl, ip, 0);
     if (!escaped_ip) {
         snprintf(ctx->error_buf, sizeof(ctx->error_buf), "Failed to escape IP");
         return CS_ERROR;
     }
-    snprintf(url, sizeof(url), "%s/v1/decisions?ip=%s", ctx->config.url, escaped_ip);
+    int url_len = snprintf(url, sizeof(url), "%s/v1/decisions?ip=%s",
+                           ctx->config.url, escaped_ip);
     curl_free(escaped_ip);
+
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf), "URL too long");
+        return CS_ERROR;
+    }
 
     /* Setup headers */
     struct curl_slist *headers = NULL;
@@ -716,6 +837,7 @@ crowdsec_result_t crowdsec_check_ip(crowdsec_context_t *ctx, const char *ip)
     /* "null" or empty means no decisions = allow */
     if (buf.size == 0 || strcmp(buf.data, "null") == 0) {
         free_buffer(&buf);
+        cache_store(ctx, ip, CS_ALLOW);
         return CS_ALLOW;
     }
 
@@ -729,6 +851,7 @@ crowdsec_result_t crowdsec_check_ip(crowdsec_context_t *ctx, const char *ip)
 
     if (!json_object_is_type(json, json_type_array)) {
         json_object_put(json);
+        cache_store(ctx, ip, CS_ALLOW);
         return CS_ALLOW;
     }
 
@@ -742,12 +865,14 @@ crowdsec_result_t crowdsec_check_ip(crowdsec_context_t *ctx, const char *ip)
             const char *type = json_object_get_string(type_obj);
             if (type && strcmp(type, "ban") == 0) {
                 json_object_put(json);
+                cache_store(ctx, ip, CS_DENY);
                 return CS_DENY;
             }
         }
     }
 
     json_object_put(json);
+    cache_store(ctx, ip, CS_ALLOW);
     return CS_ALLOW;
 }
 
@@ -798,16 +923,28 @@ int crowdsec_report_failure(crowdsec_context_t *ctx,
     }
 
     /* Build URL */
-    char url[512];
-    snprintf(url, sizeof(url), "%s/v1/alerts", ctx->config.url);
+    char url[1024];
+    int url_len = snprintf(url, sizeof(url), "%s/v1/alerts", ctx->config.url);
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf), "URL too long");
+        free(payload);
+        return -1;
+    }
 
     /* Setup headers */
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "Accept: application/json");
 
-    char auth_header[1024];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", ctx->token);
+    char auth_header[4096];
+    int auth_len = snprintf(auth_header, sizeof(auth_header),
+                            "Authorization: Bearer %s", ctx->token);
+    if (auth_len < 0 || (size_t)auth_len >= sizeof(auth_header)) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf), "Token too long");
+        curl_slist_free_all(headers);
+        free(payload);
+        return -1;
+    }
     headers = curl_slist_append(headers, auth_header);
 
     /* Execute request */
