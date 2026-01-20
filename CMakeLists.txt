@@ -44,6 +44,7 @@ set(PAM_MODULE_SOURCES
     src/jti_cache.c
     src/crowdsec.c
     src/service_account.c
+    src/str_utils.c
 )
 
 if(ENABLE_CACHE)
