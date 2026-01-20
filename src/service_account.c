@@ -105,7 +105,7 @@ static int parse_int(const char *value, int default_val)
         return default_val;
     }
 
-    if (result < 0 || result > 65535) {
+    if (result < 0 || result > 65534) {
         return default_val;
     }
 

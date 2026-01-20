@@ -776,15 +776,10 @@ static char *extract_ssh_key_fingerprint(pam_handle_t *pamh)
         p = space + 1;
         /* p now points to the fingerprint (SHA256:xxx or similar) */
 
-        /* Find end of fingerprint (next space, comma, or end of string) */
-        char *end = p;
-        while (*end && *end != ' ' && *end != ',' && *end != ':') {
-            end++;
-        }
-        /* For SHA256:xxx format, include the hash part */
+        /* For SHA256:xxx or MD5:xxx format, extract the full fingerprint */
         if (strncmp(p, "SHA256:", 7) == 0 || strncmp(p, "MD5:", 4) == 0) {
             /* Find the actual end (space, comma, newline, or end) */
-            end = p;
+            char *end = p;
             while (*end && *end != ' ' && *end != ',' && *end != '\n') {
                 end++;
             }
@@ -1138,6 +1133,19 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
     /* Check if this is a service account */
     if (service_accounts_is_service_account(&data->service_accounts, user)) {
         const service_account_t *sa = service_accounts_find(&data->service_accounts, user);
+        if (!sa) {
+            OB_LOG_ERR(pamh, "Service account %s: configuration lookup failed", user);
+
+            if (audit_initialized) {
+                audit_event.event_type = AUDIT_AUTH_FAILURE;
+                audit_event.result_code = PAM_AUTH_ERR;
+                audit_event.reason = "Service account: configuration lookup failed";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_AUTH_ERR;
+        }
         OB_LOG_DEBUG(pamh, "User %s is a service account, validating SSH key fingerprint", user);
 
         /*
@@ -1458,6 +1466,12 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
      */
     if (service_accounts_is_service_account(&data->service_accounts, user)) {
         const service_account_t *sa = service_accounts_find(&data->service_accounts, user);
+        if (!sa) {
+            OB_LOG_ERR(pamh,
+                       "Service account '%s' reported as present but not found in configuration",
+                       user);
+            return PAM_PERM_DENIED;
+        }
 
         /* Initialize audit event for service accounts */
         if (data->audit) {
