@@ -42,6 +42,7 @@
 #include "jwks_cache.h"
 #include "jti_cache.h"
 #include "crowdsec.h"
+#include "service_account.h"
 #ifdef ENABLE_CACHE
 #include "token_cache.h"
 #endif
@@ -68,6 +69,7 @@ typedef struct {
     bastion_jwt_verifier_t *bastion_jwt_verifier;  /* Bastion JWT verifier */
     crowdsec_context_t *crowdsec;  /* CrowdSec bouncer/watcher */
     crowdsec_action_t crowdsec_action;  /* Parsed CrowdSec action (reject/warn) */
+    service_accounts_t service_accounts;  /* Service accounts (ansible, backup, etc.) */
 #ifdef ENABLE_CACHE
     token_cache_t *cache;
 #endif
@@ -366,6 +368,7 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status)
         if (ob_data->crowdsec) {
             crowdsec_destroy(ob_data->crowdsec);
         }
+        service_accounts_free(&ob_data->service_accounts);
         config_free(&ob_data->config);
         free(ob_data);
     }
@@ -667,6 +670,27 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
         }
     }
 
+    /* Load service accounts configuration */
+    service_accounts_init(&data->service_accounts);
+    if (data->config.service_accounts_file) {
+        int sa_result = service_accounts_load(data->config.service_accounts_file,
+                                               &data->service_accounts);
+        if (sa_result == -2) {
+            OB_LOG_ERR(pamh, "Security error: service accounts file %s is not owned by root",
+                    data->config.service_accounts_file);
+            goto error;
+        }
+        if (sa_result == -3) {
+            OB_LOG_ERR(pamh, "Security error: service accounts file %s has insecure permissions",
+                    data->config.service_accounts_file);
+            goto error;
+        }
+        if (sa_result == 0 && data->service_accounts.count > 0) {
+            OB_LOG_INFO(pamh, "Loaded %zu service accounts from %s",
+                    data->service_accounts.count, data->config.service_accounts_file);
+        }
+    }
+
     /* Store data for later calls */
     if (pam_set_data(pamh, PAM_OPENBASTION_DATA, data, cleanup_data) != PAM_SUCCESS) {
         OB_LOG_ERR(pamh, "Failed to store module data");
@@ -702,6 +726,83 @@ static const char *get_client_ip(pam_handle_t *pamh)
         return rhost;
     }
     return "local";
+}
+
+/*
+ * Extract SSH key fingerprint from PAM environment.
+ * SSH sets SSH_USER_AUTH environment variable when ExposeAuthInfo is enabled.
+ * Format for publickey: "publickey <algorithm> SHA256:<fingerprint>"
+ * For certificates: "publickey <algorithm>-cert-v01@openssh.com SHA256:<fingerprint>"
+ *
+ * Returns allocated string with fingerprint (caller must free), or NULL if not found.
+ */
+static char *extract_ssh_key_fingerprint(pam_handle_t *pamh)
+{
+    /* Get SSH_USER_AUTH from PAM environment */
+    const char *ssh_auth = pam_getenv(pamh, "SSH_USER_AUTH");
+    if (!ssh_auth || !*ssh_auth) {
+        OB_LOG_DEBUG(pamh, "No SSH_USER_AUTH in environment (ExposeAuthInfo not enabled?)");
+        return NULL;
+    }
+
+    /* Security: Check length before processing */
+    if (strlen(ssh_auth) >= 8192) {
+        OB_LOG_WARN(pamh, "SSH_USER_AUTH too long, ignoring");
+        return NULL;
+    }
+
+    OB_LOG_DEBUG(pamh, "SSH_USER_AUTH: %s", ssh_auth);
+
+    /* Must start with "publickey " */
+    if (strncmp(ssh_auth, "publickey ", 10) != 0) {
+        OB_LOG_DEBUG(pamh, "SSH authentication is not publickey");
+        return NULL;
+    }
+
+    /* Parse: "publickey <algorithm> <fingerprint>" */
+    char *auth_copy = strdup(ssh_auth);
+    if (!auth_copy) {
+        return NULL;
+    }
+
+    char *fingerprint = NULL;
+
+    /* Skip "publickey " prefix */
+    char *p = auth_copy + 10;
+
+    /* Skip algorithm (find next space) */
+    char *space = strchr(p, ' ');
+    if (space) {
+        p = space + 1;
+        /* p now points to the fingerprint (SHA256:xxx or similar) */
+
+        /* For SHA256:xxx or MD5:xxx format, extract the full fingerprint */
+        if (strncmp(p, "SHA256:", 7) == 0 || strncmp(p, "MD5:", 4) == 0) {
+            /* Find the actual end (space, comma, newline, or end) */
+            char *end = p;
+            while (*end && *end != ' ' && *end != ',' && *end != '\n') {
+                end++;
+            }
+            size_t len = (size_t)(end - p);
+            if (len > 0 && len < 256) {
+                fingerprint = malloc(len + 1);
+                if (fingerprint) {
+                    memcpy(fingerprint, p, len);
+                    fingerprint[len] = '\0';
+                }
+            }
+        }
+    }
+
+    free(auth_copy);
+
+    if (fingerprint) {
+        OB_LOG_DEBUG(pamh, "Extracted SSH key fingerprint: %s", fingerprint);
+    } else {
+        OB_LOG_DEBUG(pamh, "Could not extract SSH key fingerprint from SSH_USER_AUTH");
+    }
+
+    return fingerprint;
 }
 
 /*
@@ -1029,6 +1130,103 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
         /* CS_ALLOW or (CS_ERROR + fail_open): continue with authentication */
     }
 
+    /* Check if this is a service account */
+    if (service_accounts_is_service_account(&data->service_accounts, user)) {
+        const service_account_t *sa = service_accounts_find(&data->service_accounts, user);
+        if (!sa) {
+            OB_LOG_ERR(pamh, "Service account %s: configuration lookup failed", user);
+
+            if (audit_initialized) {
+                audit_event.event_type = AUDIT_AUTH_FAILURE;
+                audit_event.result_code = PAM_AUTH_ERR;
+                audit_event.reason = "Service account: configuration lookup failed";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_AUTH_ERR;
+        }
+        OB_LOG_DEBUG(pamh, "User %s is a service account, validating SSH key fingerprint", user);
+
+        /*
+         * Security: Validate SSH key fingerprint.
+         * Extract the fingerprint from SSH_USER_AUTH and compare with configured value.
+         * This requires ExposeAuthInfo=yes in sshd_config.
+         */
+        char *ssh_fingerprint = extract_ssh_key_fingerprint(pamh);
+        if (!ssh_fingerprint) {
+            OB_LOG_ERR(pamh, "Service account %s: cannot extract SSH key fingerprint "
+                    "(is ExposeAuthInfo enabled in sshd_config?)", user);
+
+            if (audit_initialized) {
+                audit_event.event_type = AUDIT_AUTH_FAILURE;
+                audit_event.result_code = PAM_AUTH_ERR;
+                audit_event.reason = "Service account: no SSH fingerprint available";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_AUTH_ERR;
+        }
+
+        /* Validate fingerprint against configured value */
+        int fp_result = service_accounts_validate_key(&data->service_accounts, user, ssh_fingerprint);
+        if (fp_result != 0) {
+            OB_LOG_ERR(pamh, "Service account %s: SSH key fingerprint mismatch "
+                    "(got %s, expected %s)", user, ssh_fingerprint,
+                    sa->key_fingerprint ? sa->key_fingerprint : "(none)");
+            free(ssh_fingerprint);
+
+            if (audit_initialized) {
+                audit_event.event_type = AUDIT_AUTH_FAILURE;
+                audit_event.result_code = PAM_AUTH_ERR;
+                audit_event.reason = "Service account: SSH key fingerprint mismatch";
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
+            }
+
+            return PAM_AUTH_ERR;
+        }
+
+        OB_LOG_INFO(pamh, "Service account %s authenticated with fingerprint %s",
+                user, ssh_fingerprint);
+        free(ssh_fingerprint);
+
+        /* Store service account attributes for pam_sm_open_session (user creation) */
+        if (sa->gecos) {
+            char *gecos_copy = strdup(sa->gecos);
+            if (gecos_copy) {
+                pam_set_data(pamh, "ob_gecos", gecos_copy, cleanup_string);
+            }
+        }
+        if (sa->shell) {
+            char *shell_copy = strdup(sa->shell);
+            if (shell_copy) {
+                pam_set_data(pamh, "ob_shell", shell_copy, cleanup_string);
+            }
+        }
+        if (sa->home) {
+            char *home_copy = strdup(sa->home);
+            if (home_copy) {
+                pam_set_data(pamh, "ob_home", home_copy, cleanup_string);
+            }
+        }
+
+        /* Mark as service account for pam_sm_acct_mgmt */
+        pam_set_data(pamh, "ob_service_account", (void *)1, NULL);
+
+        /* Log success */
+        if (audit_initialized) {
+            audit_event.event_type = AUDIT_AUTH_SUCCESS;
+            audit_event.result_code = PAM_SUCCESS;
+            audit_event.reason = "Service account (SSH key validated)";
+            audit_event_set_end_time(&audit_event);
+            audit_log_event(data->audit, &audit_event);
+        }
+
+        return PAM_SUCCESS;
+    }
+
     /* If authorize_only mode, skip password check */
     if (data->config.authorize_only) {
         OB_LOG_DEBUG(pamh, "authorize_only mode, skipping password check");
@@ -1259,6 +1457,74 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     const char *service = NULL;
     if (pam_get_item(pamh, PAM_SERVICE, (const void **)&service) != PAM_SUCCESS || !service) {
         service = "unknown";
+    }
+
+    /*
+     * Handle service accounts (ansible, backup, etc.)
+     * These accounts are authorized locally based on their presence in the
+     * service accounts configuration file.
+     */
+    if (service_accounts_is_service_account(&data->service_accounts, user)) {
+        const service_account_t *sa = service_accounts_find(&data->service_accounts, user);
+        if (!sa) {
+            OB_LOG_ERR(pamh,
+                       "Service account '%s' reported as present but not found in configuration",
+                       user);
+            return PAM_PERM_DENIED;
+        }
+
+        /* Initialize audit event for service accounts */
+        if (data->audit) {
+            audit_event_init(&audit_event, AUDIT_AUTHZ_SUCCESS);
+            audit_event.user = user;
+            audit_event.service = service;
+            audit_event.client_ip = client_ip;
+            audit_event.tty = tty;
+            audit_initialized = true;
+        }
+
+        /*
+         * Handle sudo authorization for service accounts.
+         * Check if the service account has sudo_allowed permission.
+         */
+        if (strcmp(service, "sudo") == 0) {
+            if (!sa->sudo_allowed) {
+                OB_LOG_INFO(pamh, "Service account %s not authorized for sudo", user);
+
+                if (audit_initialized) {
+                    audit_event.event_type = AUDIT_AUTHZ_DENIED;
+                    audit_event.result_code = PAM_PERM_DENIED;
+                    audit_event.reason = "Service account sudo not allowed";
+                    audit_event_set_end_time(&audit_event);
+                    audit_log_event(data->audit, &audit_event);
+                }
+
+                return PAM_PERM_DENIED;
+            }
+
+            /* Store sudo_nopasswd flag if applicable */
+            if (sa->sudo_nopasswd) {
+                pam_putenv(pamh, "LLNG_SUDO_NOPASSWD=1");
+                OB_LOG_DEBUG(pamh, "Service account %s granted sudo without password", user);
+            }
+        }
+
+        /* Store permissions in PAM environment */
+        if (sa->sudo_allowed) {
+            pam_putenv(pamh, "LLNG_SUDO_ALLOWED=1");
+        }
+
+        /* Success */
+        if (audit_initialized) {
+            audit_event.result_code = PAM_SUCCESS;
+            audit_event.reason = "Service account authorized";
+            audit_event_set_end_time(&audit_event);
+            audit_log_event(data->audit, &audit_event);
+        }
+
+        OB_LOG_INFO(pamh, "Service account %s authorized for access%s", user,
+                      sa->sudo_allowed ? " (sudo allowed)" : "");
+        return PAM_SUCCESS;
     }
 
     /*
