@@ -1,7 +1,7 @@
 # Tests for pam_openbastion
 
 # Test configuration parsing
-add_executable(test_config test_config.c ../src/config.c)
+add_executable(test_config test_config.c ../src/config.c ../src/str_utils.c)
 target_include_directories(test_config PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_config COMMAND test_config)
 
@@ -48,7 +48,7 @@ target_include_directories(test_nss_openbastion PRIVATE ${CMAKE_SOURCE_DIR}/incl
 add_test(NAME test_nss_openbastion COMMAND test_nss_openbastion)
 
 # Test path validation
-add_executable(test_path_validator test_path_validator.c ../src/config.c)
+add_executable(test_path_validator test_path_validator.c ../src/config.c ../src/str_utils.c)
 target_include_directories(test_path_validator PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_path_validator COMMAND test_path_validator)
 
@@ -141,7 +141,7 @@ target_link_libraries(test_crowdsec
 add_test(NAME test_crowdsec COMMAND test_crowdsec)
 
 # Test service account management
-add_executable(test_service_account test_service_account.c ../src/service_account.c ../src/config.c)
+add_executable(test_service_account test_service_account.c ../src/service_account.c ../src/config.c ../src/str_utils.c)
 target_include_directories(test_service_account PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_service_account COMMAND test_service_account)
 

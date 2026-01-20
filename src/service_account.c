@@ -18,6 +18,7 @@
 
 #include "service_account.h"
 #include "config.h"
+#include "str_utils.h"
 
 /* Initial capacity for accounts array */
 #define INITIAL_CAPACITY 8
@@ -53,42 +54,9 @@ static int check_file_permissions_fd(int fd)
     return 0;  /* OK */
 }
 
-/* Trim whitespace from string */
-static char *trim(char *str)
-{
-    if (!str) return NULL;
-
-    /* Trim leading */
-    while (isspace((unsigned char)*str)) str++;
-
-    if (*str == '\0') return str;
-
-    /* Trim trailing */
-    char *end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) end--;
-    end[1] = '\0';
-
-    return str;
-}
-
-/*
- * Helper to parse boolean values.
- * Returns true for: "true", "yes", "1", "on"
- * Returns false for: "false", "no", "0", "off", and any other value
- */
-static bool parse_bool(const char *value)
-{
-    if (!value) return false;
-
-    if (strcmp(value, "true") == 0 ||
-        strcmp(value, "yes") == 0 ||
-        strcmp(value, "1") == 0 ||
-        strcmp(value, "on") == 0) {
-        return true;
-    }
-
-    return false;
-}
+/* Use shared string utilities from str_utils.h */
+#define trim str_trim
+#define parse_bool str_parse_bool
 
 /*
  * Safe integer parsing with validation.
