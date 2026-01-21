@@ -357,24 +357,19 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         if (url_contains_dangerous_chars(value)) {
             return -1;  /* Dangerous characters */
         }
-        free(config->portal_url);
-        config->portal_url = strdup(value);
+        SET_STRING_FIELD(config->portal_url, value, key);
     }
     else if (strcmp(key, "client_id") == 0) {
-        free(config->client_id);
-        config->client_id = strdup(value);
+        SET_STRING_FIELD(config->client_id, value, key);
     }
     else if (strcmp(key, "client_secret") == 0) {
-        free(config->client_secret);
-        config->client_secret = strdup(value);
+        SET_STRING_FIELD(config->client_secret, value, key);
     }
     else if (strcmp(key, "server_token_file") == 0 || strcmp(key, "token_file") == 0) {
-        free(config->server_token_file);
-        config->server_token_file = strdup(value);
+        SET_STRING_FIELD(config->server_token_file, value, key);
     }
     else if (strcmp(key, "server_group") == 0) {
-        free(config->server_group);
-        config->server_group = strdup(value);
+        SET_STRING_FIELD(config->server_group, value, key);
     }
     else if (strcmp(key, "timeout") == 0) {
         config->timeout = parse_int(value, DEFAULT_TIMEOUT, 1, 300);
@@ -383,8 +378,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->verify_ssl = parse_bool(value);
     }
     else if (strcmp(key, "ca_cert") == 0) {
-        free(config->ca_cert);
-        config->ca_cert = strdup(value);
+        SET_STRING_FIELD(config->ca_cert, value, key);
     }
     else if (strcmp(key, "min_tls_version") == 0) {
         config->min_tls_version = parse_int(value, TLS_VERSION_1_3, 0, 99);
@@ -393,16 +387,14 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         else if (config->min_tls_version < TLS_VERSION_1_2) config->min_tls_version = TLS_VERSION_1_3;  /* Invalid -> default */
     }
     else if (strcmp(key, "cert_pin") == 0) {
-        free(config->cert_pin);
-        config->cert_pin = strdup(value);
+        SET_STRING_FIELD(config->cert_pin, value, key);
     }
     /* Cache settings */
     else if (strcmp(key, "cache_enabled") == 0 || strcmp(key, "cache") == 0) {
         config->cache_enabled = parse_bool(value);
     }
     else if (strcmp(key, "cache_dir") == 0) {
-        free(config->cache_dir);
-        config->cache_dir = strdup(value);
+        SET_STRING_FIELD(config->cache_dir, value, key);
     }
     else if (strcmp(key, "cache_ttl") == 0) {
         config->cache_ttl = parse_int(value, DEFAULT_CACHE_TTL, 0, 86400);
@@ -411,8 +403,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->cache_ttl_high_risk = parse_int(value, DEFAULT_CACHE_TTL_HIGH_RISK, 0, 86400);
     }
     else if (strcmp(key, "high_risk_services") == 0) {
-        free(config->high_risk_services);
-        config->high_risk_services = strdup(value);
+        SET_STRING_FIELD(config->high_risk_services, value, key);
     }
     else if (strcmp(key, "cache_encrypted") == 0) {
         config->cache_encrypted = parse_bool(value);
@@ -425,12 +416,10 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->auth_cache_enabled = parse_bool(value);
     }
     else if (strcmp(key, "auth_cache_dir") == 0) {
-        free(config->auth_cache_dir);
-        config->auth_cache_dir = strdup(value);
+        SET_STRING_FIELD(config->auth_cache_dir, value, key);
     }
     else if (strcmp(key, "auth_cache_force_online") == 0 || strcmp(key, "force_online_file") == 0) {
-        free(config->auth_cache_force_online);
-        config->auth_cache_force_online = strdup(value);
+        SET_STRING_FIELD(config->auth_cache_force_online, value, key);
     }
     /* Authorization mode */
     else if (strcmp(key, "authorize_only") == 0) {
@@ -449,8 +438,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->audit_enabled = parse_bool(value);
     }
     else if (strcmp(key, "audit_log_file") == 0 || strcmp(key, "audit_file") == 0) {
-        free(config->audit_log_file);
-        config->audit_log_file = strdup(value);
+        SET_STRING_FIELD(config->audit_log_file, value, key);
     }
     else if (strcmp(key, "audit_to_syslog") == 0 || strcmp(key, "audit_syslog") == 0) {
         config->audit_to_syslog = parse_bool(value);
@@ -466,8 +454,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->rate_limit_enabled = parse_bool(value);
     }
     else if (strcmp(key, "rate_limit_state_dir") == 0) {
-        free(config->rate_limit_state_dir);
-        config->rate_limit_state_dir = strdup(value);
+        SET_STRING_FIELD(config->rate_limit_state_dir, value, key);
     }
     else if (strcmp(key, "rate_limit_max_attempts") == 0) {
         config->rate_limit_max_attempts = parse_int(value, 5, 1, 100);
@@ -502,60 +489,49 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->secrets_use_keyring = parse_bool(value);
     }
     else if (strcmp(key, "secrets_keyring_name") == 0 || strcmp(key, "keyring_name") == 0) {
-        free(config->secrets_keyring_name);
-        config->secrets_keyring_name = strdup(value);
+        SET_STRING_FIELD(config->secrets_keyring_name, value, key);
     }
     /* Webhook settings */
     else if (strcmp(key, "notify_enabled") == 0 || strcmp(key, "notify") == 0) {
         config->notify_enabled = parse_bool(value);
     }
     else if (strcmp(key, "notify_url") == 0 || strcmp(key, "webhook_url") == 0) {
-        free(config->notify_url);
-        config->notify_url = strdup(value);
+        SET_STRING_FIELD(config->notify_url, value, key);
     }
     else if (strcmp(key, "notify_secret") == 0 || strcmp(key, "webhook_secret") == 0) {
-        free(config->notify_secret);
-        config->notify_secret = strdup(value);
+        SET_STRING_FIELD(config->notify_secret, value, key);
     }
     /* Request signing settings */
     else if (strcmp(key, "request_signing_secret") == 0) {
-        free(config->request_signing_secret);
-        config->request_signing_secret = strdup(value);
+        SET_STRING_FIELD(config->request_signing_secret, value, key);
     }
     /* User creation settings */
     else if (strcmp(key, "create_user") == 0 || strcmp(key, "create_user_enabled") == 0) {
         config->create_user_enabled = parse_bool(value);
     }
     else if (strcmp(key, "create_user_shell") == 0) {
-        free(config->create_user_shell);
-        config->create_user_shell = strdup(value);
+        SET_STRING_FIELD(config->create_user_shell, value, key);
     }
     else if (strcmp(key, "create_user_groups") == 0) {
-        free(config->create_user_groups);
-        config->create_user_groups = strdup(value);
+        SET_STRING_FIELD(config->create_user_groups, value, key);
     }
     else if (strcmp(key, "create_user_home_base") == 0 || strcmp(key, "home_base") == 0) {
-        free(config->create_user_home_base);
-        config->create_user_home_base = strdup(value);
+        SET_STRING_FIELD(config->create_user_home_base, value, key);
     }
     else if (strcmp(key, "create_user_skel") == 0 || strcmp(key, "skel") == 0) {
-        free(config->create_user_skel);
-        config->create_user_skel = strdup(value);
+        SET_STRING_FIELD(config->create_user_skel, value, key);
     }
     /* Path validation settings */
     else if (strcmp(key, "approved_shells") == 0) {
-        free(config->approved_shells);
-        config->approved_shells = strdup(value);
+        SET_STRING_FIELD(config->approved_shells, value, key);
     }
     else if (strcmp(key, "approved_home_prefixes") == 0) {
-        free(config->approved_home_prefixes);
-        config->approved_home_prefixes = strdup(value);
+        SET_STRING_FIELD(config->approved_home_prefixes, value, key);
     }
     /* Service accounts */
     else if (strcmp(key, "service_accounts_file") == 0 ||
              strcmp(key, "service_accounts") == 0) {
-        free(config->service_accounts_file);
-        config->service_accounts_file = strdup(value);
+        SET_STRING_FIELD(config->service_accounts_file, value, key);
     }
     /* Bastion JWT verification settings */
     else if (strcmp(key, "bastion_jwt_required") == 0 || strcmp(key, "require_bastion") == 0) {
@@ -565,16 +541,13 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->bastion_jwt_verify_local = parse_bool(value);
     }
     else if (strcmp(key, "bastion_jwt_issuer") == 0) {
-        free(config->bastion_jwt_issuer);
-        config->bastion_jwt_issuer = strdup(value);
+        SET_STRING_FIELD(config->bastion_jwt_issuer, value, key);
     }
     else if (strcmp(key, "bastion_jwt_jwks_url") == 0) {
-        free(config->bastion_jwt_jwks_url);
-        config->bastion_jwt_jwks_url = strdup(value);
+        SET_STRING_FIELD(config->bastion_jwt_jwks_url, value, key);
     }
     else if (strcmp(key, "bastion_jwt_jwks_cache") == 0) {
-        free(config->bastion_jwt_jwks_cache);
-        config->bastion_jwt_jwks_cache = strdup(value);
+        SET_STRING_FIELD(config->bastion_jwt_jwks_cache, value, key);
     }
     else if (strcmp(key, "bastion_jwt_cache_ttl") == 0) {
         config->bastion_jwt_cache_ttl = parse_int(value, 3600, 60, 86400);
@@ -583,8 +556,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->bastion_jwt_clock_skew = parse_int(value, 60, 0, 600);
     }
     else if (strcmp(key, "bastion_jwt_allowed_bastions") == 0 || strcmp(key, "allowed_bastions") == 0) {
-        free(config->bastion_jwt_allowed_bastions);
-        config->bastion_jwt_allowed_bastions = strdup(value);
+        SET_STRING_FIELD(config->bastion_jwt_allowed_bastions, value, key);
     }
     /* JTI replay detection options */
     else if (strcmp(key, "bastion_jwt_replay_detection") == 0) {
