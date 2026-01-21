@@ -30,6 +30,9 @@
 /* Maximum response size from JWKS endpoint */
 #define MAX_JWKS_RESPONSE_SIZE (64 * 1024)
 
+/* Minimum interval between refresh attempts (rate limit) */
+#define MIN_REFRESH_INTERVAL 300  /* 5 minutes */
+
 /* Cached key entry */
 typedef struct {
     char *kid;           /* Key ID */
@@ -48,6 +51,7 @@ struct jwks_cache {
     jwks_key_entry_t keys[JWKS_MAX_KEYS];
     size_t key_count;
     time_t last_refresh;
+    time_t last_fetch_attempt;  /* Rate limiting: time of last fetch attempt */
     bool initialized;
 };
 
@@ -346,6 +350,14 @@ static int parse_jwks(jwks_cache_t *cache, const char *jwks_json)
 static int fetch_jwks(jwks_cache_t *cache)
 {
     if (!cache || !cache->jwks_url) return -1;
+
+    /* Rate limiting: prevent excessive refresh attempts */
+    time_t now = time(NULL);
+    if (cache->last_fetch_attempt > 0 &&
+        now - cache->last_fetch_attempt < MIN_REFRESH_INTERVAL) {
+        return -1;  /* Too soon since last attempt */
+    }
+    cache->last_fetch_attempt = now;
 
     CURL *curl = curl_easy_init();
     if (!curl) return -1;
