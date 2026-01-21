@@ -24,8 +24,12 @@ typedef struct jti_entry {
     struct jti_entry *next;
 } jti_entry_t;
 
-/* Hash table size (prime number for better distribution) */
-#define HASH_TABLE_SIZE 1009
+/*
+ * Hash table size (prime number for better distribution).
+ * With default max_entries of 10000, this gives ~2.4 entries per bucket average,
+ * which keeps lookup time close to O(1) in practice.
+ */
+#define HASH_TABLE_SIZE 4099
 
 /* JTI cache structure */
 struct jti_cache {

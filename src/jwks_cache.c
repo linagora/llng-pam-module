@@ -31,6 +31,17 @@
 /* Maximum response size from JWKS endpoint */
 #define MAX_JWKS_RESPONSE_SIZE (64 * 1024)
 
+/* Minimum interval between refresh attempts (rate limit) */
+#define MIN_REFRESH_INTERVAL 300  /* 5 minutes */
+
+/* For unit testing, expose internal functions and constants */
+#ifdef JWKS_CACHE_TEST
+#define JWKS_STATIC_OR_TEST
+int jwks_cache_get_min_refresh_interval(void) { return MIN_REFRESH_INTERVAL; }
+#else
+#define JWKS_STATIC_OR_TEST static
+#endif
+
 /* Cached key entry */
 typedef struct {
     char *kid;           /* Key ID */
@@ -49,8 +60,31 @@ struct jwks_cache {
     jwks_key_entry_t keys[JWKS_MAX_KEYS];
     size_t key_count;
     time_t last_refresh;
+    time_t last_fetch_attempt;  /* Rate limiting: time of last fetch attempt */
     bool initialized;
 };
+
+#ifdef JWKS_CACHE_TEST
+/*
+ * Test-only functions to manipulate rate limiting state
+ */
+time_t jwks_cache_get_last_fetch_attempt(jwks_cache_t *cache)
+{
+    return cache ? cache->last_fetch_attempt : 0;
+}
+
+void jwks_cache_set_last_fetch_attempt(jwks_cache_t *cache, time_t t)
+{
+    if (cache) cache->last_fetch_attempt = t;
+}
+
+bool jwks_cache_is_rate_limited(jwks_cache_t *cache, time_t now)
+{
+    if (!cache) return true;
+    if (cache->last_fetch_attempt == 0) return false;
+    return (now - cache->last_fetch_attempt) < MIN_REFRESH_INTERVAL;
+}
+#endif
 
 /* CURL write callback data */
 typedef struct {
@@ -347,6 +381,14 @@ static int parse_jwks(jwks_cache_t *cache, const char *jwks_json)
 static int fetch_jwks(jwks_cache_t *cache)
 {
     if (!cache || !cache->jwks_url) return -1;
+
+    /* Rate limiting: prevent excessive refresh attempts */
+    time_t now = time(NULL);
+    if (cache->last_fetch_attempt > 0 &&
+        now - cache->last_fetch_attempt < MIN_REFRESH_INTERVAL) {
+        return -1;  /* Too soon since last attempt */
+    }
+    cache->last_fetch_attempt = now;
 
     CURL *curl = curl_easy_init();
     if (!curl) return -1;
