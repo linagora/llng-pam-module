@@ -26,6 +26,7 @@ typedef struct {
     char *jti;           /* JWT ID (unique identifier) */
     time_t exp;          /* Expiration time */
     time_t iat;          /* Issued at time */
+    time_t nbf;          /* Not before time (RFC 7519) */
     char *bastion_id;    /* Bastion server ID (client_id) */
     char *bastion_group; /* Bastion server group */
     char *bastion_ip;    /* Bastion IP address */
@@ -39,7 +40,7 @@ typedef struct {
 typedef struct {
     char *issuer;                /* Expected issuer (LLNG portal URL) */
     char *audience;              /* Expected audience (default: "pam:bastion-backend") */
-    int max_clock_skew;          /* Allowed clock skew in seconds (default: 60) */
+    int max_clock_skew;          /* Allowed clock skew in seconds (default: 30) */
     char *allowed_bastions;      /* Comma-separated list of allowed bastion IDs (NULL = all) */
     jwks_cache_t *jwks_cache;    /* JWKS cache for public keys */
     jti_cache_t *jti_cache;      /* JTI cache for replay detection (NULL = disabled) */
@@ -112,5 +113,25 @@ void bastion_jwt_claims_free(bastion_jwt_claims_t *claims);
  *   true if allowed, false otherwise
  */
 bool bastion_jwt_is_bastion_allowed(const char *bastion_id, const char *allowed_bastions);
+
+#ifdef BASTION_JWT_TEST
+/*
+ * Validate JWT time claims (exposed for unit testing)
+ *
+ * Parameters:
+ *   exp            - Expiration time (0 = not set)
+ *   nbf            - Not before time (0 = not set)
+ *   iat            - Issued at time (0 = not set)
+ *   now            - Current time to validate against
+ *   max_clock_skew - Allowed clock skew in seconds
+ *
+ * Returns:
+ *   BASTION_JWT_OK if valid
+ *   BASTION_JWT_EXPIRED if token expired
+ *   BASTION_JWT_NOT_YET_VALID if token not yet valid
+ */
+bastion_jwt_result_t bastion_jwt_validate_time(
+    time_t exp, time_t nbf, time_t iat, time_t now, int max_clock_skew);
+#endif
 
 #endif /* BASTION_JWT_H */

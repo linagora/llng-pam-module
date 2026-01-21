@@ -18,6 +18,13 @@
 #include "jwks_cache.h"
 #include "jti_cache.h"
 
+/* For unit testing, expose internal functions */
+#ifdef BASTION_JWT_TEST
+#define STATIC_OR_TEST
+#else
+#define STATIC_OR_TEST static
+#endif
+
 /* Security limits */
 #define MAX_JWT_LENGTH 8192
 #define MAX_HEADER_LENGTH 1024
@@ -33,6 +40,39 @@ struct bastion_jwt_verifier {
     jwks_cache_t *jwks_cache;
     jti_cache_t *jti_cache;  /* For replay detection (NULL = disabled) */
 };
+
+/*
+ * Validate JWT time claims (exp, nbf, iat)
+ * This function is exposed for unit testing via BASTION_JWT_TEST.
+ *
+ * Parameters:
+ *   exp            - Expiration time (0 = not set)
+ *   nbf            - Not before time (0 = not set)
+ *   iat            - Issued at time (0 = not set)
+ *   now            - Current time to validate against
+ *   max_clock_skew - Allowed clock skew in seconds
+ *
+ * Returns:
+ *   BASTION_JWT_OK if valid
+ *   BASTION_JWT_EXPIRED if token expired
+ *   BASTION_JWT_NOT_YET_VALID if token not yet valid
+ */
+STATIC_OR_TEST bastion_jwt_result_t bastion_jwt_validate_time(
+    time_t exp, time_t nbf, time_t iat, time_t now, int max_clock_skew)
+{
+    /* Check expiration */
+    if (exp > 0 && now > exp + max_clock_skew) {
+        return BASTION_JWT_EXPIRED;
+    }
+
+    /* Check not-before (nbf claim takes precedence, fall back to iat) */
+    time_t not_before = nbf > 0 ? nbf : iat;
+    if (not_before > 0 && now < not_before - max_clock_skew) {
+        return BASTION_JWT_NOT_YET_VALID;
+    }
+
+    return BASTION_JWT_OK;
+}
 
 /* Base64url decode (RFC 4648 section 5) */
 static unsigned char *base64url_decode(const char *input, size_t input_len, size_t *out_len)
@@ -196,6 +236,10 @@ static int parse_jwt_payload(const char *payload_b64, size_t payload_len,
         claims->iat = (time_t)json_object_get_int64(val);
     }
 
+    if (json_object_object_get_ex(json, "nbf", &val)) {
+        claims->nbf = (time_t)json_object_get_int64(val);
+    }
+
     if (json_object_object_get_ex(json, "jti", &val)) {
         const char *str = json_object_get_string(val);
         if (str) claims->jti = strdup(str);
@@ -300,7 +344,7 @@ bastion_jwt_verifier_t *bastion_jwt_verifier_init(const bastion_jwt_config_t *co
         return NULL;
     }
 
-    verifier->max_clock_skew = config->max_clock_skew > 0 ? config->max_clock_skew : 60;
+    verifier->max_clock_skew = config->max_clock_skew > 0 ? config->max_clock_skew : 30;
 
     if (config->allowed_bastions) {
         verifier->allowed_bastions = strdup(config->allowed_bastions);
@@ -411,19 +455,13 @@ bastion_jwt_result_t bastion_jwt_verify(bastion_jwt_verifier_t *verifier,
         return BASTION_JWT_INVALID_PAYLOAD;
     }
 
-    /* Verify claims */
+    /* Verify time claims */
     time_t now = time(NULL);
-
-    /* Check expiration */
-    if (claims->exp > 0 && now > claims->exp + verifier->max_clock_skew) {
+    bastion_jwt_result_t time_result = bastion_jwt_validate_time(
+        claims->exp, claims->nbf, claims->iat, now, verifier->max_clock_skew);
+    if (time_result != BASTION_JWT_OK) {
         bastion_jwt_claims_free(claims);
-        return BASTION_JWT_EXPIRED;
-    }
-
-    /* Check not-before (iat) */
-    if (claims->iat > 0 && now < claims->iat - verifier->max_clock_skew) {
-        bastion_jwt_claims_free(claims);
-        return BASTION_JWT_NOT_YET_VALID;
+        return time_result;
     }
 
     /* Verify issuer if configured */
@@ -458,9 +496,17 @@ bastion_jwt_result_t bastion_jwt_verify(bastion_jwt_verifier_t *verifier,
                 bastion_jwt_claims_free(claims);
                 return BASTION_JWT_REPLAY_DETECTED;
             } else if (jti_result != JTI_CACHE_OK) {
-                /* Log non-fatal cache errors (full, internal error, etc.) */
+                /* Log non-fatal cache errors (full, internal error, etc.)
+                 * Truncate JTI to avoid leaking full token identifier */
+                char jti_truncated[16];
+                size_t jti_len = strlen(claims->jti);
+                if (jti_len > 8) {
+                    snprintf(jti_truncated, sizeof(jti_truncated), "%.8s...", claims->jti);
+                } else {
+                    snprintf(jti_truncated, sizeof(jti_truncated), "%s", claims->jti);
+                }
                 fprintf(stderr, "bastion_jwt: JTI cache warning: %s (jti=%s)\n",
-                        jti_cache_result_str(jti_result), claims->jti);
+                        jti_cache_result_str(jti_result), jti_truncated);
             }
         } else {
             /* Replay detection configured but token has no jti claim */
