@@ -114,4 +114,24 @@ void bastion_jwt_claims_free(bastion_jwt_claims_t *claims);
  */
 bool bastion_jwt_is_bastion_allowed(const char *bastion_id, const char *allowed_bastions);
 
+#ifdef BASTION_JWT_TEST
+/*
+ * Validate JWT time claims (exposed for unit testing)
+ *
+ * Parameters:
+ *   exp            - Expiration time (0 = not set)
+ *   nbf            - Not before time (0 = not set)
+ *   iat            - Issued at time (0 = not set)
+ *   now            - Current time to validate against
+ *   max_clock_skew - Allowed clock skew in seconds
+ *
+ * Returns:
+ *   BASTION_JWT_OK if valid
+ *   BASTION_JWT_EXPIRED if token expired
+ *   BASTION_JWT_NOT_YET_VALID if token not yet valid
+ */
+bastion_jwt_result_t bastion_jwt_validate_time(
+    time_t exp, time_t nbf, time_t iat, time_t now, int max_clock_skew);
+#endif
+
 #endif /* BASTION_JWT_H */

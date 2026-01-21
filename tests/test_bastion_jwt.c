@@ -10,6 +10,7 @@
 #include <string.h>
 #include <time.h>
 
+/* BASTION_JWT_TEST is defined via CMake to enable test-exposed functions */
 #include "../include/bastion_jwt.h"
 
 static int tests_run = 0;
@@ -274,6 +275,138 @@ static int test_verify_invalid_format(void)
     return 1;
 }
 
+/*
+ * Test time validation with nbf claim
+ */
+static int test_nbf_future(void)
+{
+    /* JWT with nbf set to future should return NOT_YET_VALID */
+    time_t now = 1000000;
+    time_t nbf_future = now + 3600;  /* 1 hour in the future */
+    int clock_skew = 30;
+
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        0,           /* exp: not set */
+        nbf_future,  /* nbf: future */
+        0,           /* iat: not set */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_NOT_YET_VALID);
+    return 1;
+}
+
+static int test_nbf_past(void)
+{
+    /* JWT with nbf set to past should validate successfully */
+    time_t now = 1000000;
+    time_t nbf_past = now - 60;  /* 1 minute in the past */
+    int clock_skew = 30;
+
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        0,         /* exp: not set */
+        nbf_past,  /* nbf: past */
+        0,         /* iat: not set */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_OK);
+    return 1;
+}
+
+static int test_nbf_and_iat(void)
+{
+    /* When both nbf and iat are set, nbf should take precedence */
+    time_t now = 1000000;
+    time_t nbf = now - 60;     /* nbf: 1 minute in the past (valid) */
+    time_t iat = now + 3600;   /* iat: 1 hour in the future (would be invalid) */
+    int clock_skew = 30;
+
+    /* Since nbf takes precedence and is in the past, should be valid */
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        0,   /* exp: not set */
+        nbf, /* nbf: past (takes precedence) */
+        iat, /* iat: future (ignored when nbf is set) */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_OK);
+    return 1;
+}
+
+static int test_iat_fallback(void)
+{
+    /* Without nbf, should fall back to iat for not-before check */
+    time_t now = 1000000;
+    time_t iat_future = now + 3600;  /* 1 hour in the future */
+    int clock_skew = 30;
+
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        0,           /* exp: not set */
+        0,           /* nbf: not set (will fall back to iat) */
+        iat_future,  /* iat: future */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_NOT_YET_VALID);
+    return 1;
+}
+
+static int test_nbf_with_clock_skew(void)
+{
+    /* JWT with nbf slightly in the future but within clock skew should be valid */
+    time_t now = 1000000;
+    time_t nbf = now + 20;  /* 20 seconds in the future */
+    int clock_skew = 30;    /* 30 seconds skew allowed */
+
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        0,   /* exp: not set */
+        nbf, /* nbf: slightly in future but within skew */
+        0,   /* iat: not set */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_OK);
+    return 1;
+}
+
+static int test_exp_and_nbf_combined(void)
+{
+    /* Test that both exp and nbf are checked correctly */
+    time_t now = 1000000;
+    time_t exp = now + 3600;  /* expires in 1 hour (valid) */
+    time_t nbf = now - 60;    /* valid since 1 minute ago (valid) */
+    int clock_skew = 30;
+
+    bastion_jwt_result_t result = bastion_jwt_validate_time(
+        exp,
+        nbf,
+        0,   /* iat: not set */
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_OK);
+
+    /* Now test with expired token */
+    time_t exp_past = now - 3600;  /* expired 1 hour ago */
+    result = bastion_jwt_validate_time(
+        exp_past,
+        nbf,
+        0,
+        now,
+        clock_skew
+    );
+
+    ASSERT(result == BASTION_JWT_EXPIRED);
+    return 1;
+}
+
 int main(void)
 {
     printf("Running bastion JWT tests:\n\n");
@@ -302,6 +435,14 @@ int main(void)
     TEST(verify_null_verifier);
     TEST(verify_null_jwt);
     TEST(verify_invalid_format);
+
+    printf("\nTesting bastion_jwt_validate_time (nbf validation):\n");
+    TEST(nbf_future);
+    TEST(nbf_past);
+    TEST(nbf_and_iat);
+    TEST(iat_fallback);
+    TEST(nbf_with_clock_skew);
+    TEST(exp_and_nbf_combined);
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

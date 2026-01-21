@@ -18,6 +18,13 @@
 #include "jwks_cache.h"
 #include "jti_cache.h"
 
+/* For unit testing, expose internal functions */
+#ifdef BASTION_JWT_TEST
+#define STATIC_OR_TEST
+#else
+#define STATIC_OR_TEST static
+#endif
+
 /* Security limits */
 #define MAX_JWT_LENGTH 8192
 #define MAX_HEADER_LENGTH 1024
@@ -33,6 +40,39 @@ struct bastion_jwt_verifier {
     jwks_cache_t *jwks_cache;
     jti_cache_t *jti_cache;  /* For replay detection (NULL = disabled) */
 };
+
+/*
+ * Validate JWT time claims (exp, nbf, iat)
+ * This function is exposed for unit testing via BASTION_JWT_TEST.
+ *
+ * Parameters:
+ *   exp            - Expiration time (0 = not set)
+ *   nbf            - Not before time (0 = not set)
+ *   iat            - Issued at time (0 = not set)
+ *   now            - Current time to validate against
+ *   max_clock_skew - Allowed clock skew in seconds
+ *
+ * Returns:
+ *   BASTION_JWT_OK if valid
+ *   BASTION_JWT_EXPIRED if token expired
+ *   BASTION_JWT_NOT_YET_VALID if token not yet valid
+ */
+STATIC_OR_TEST bastion_jwt_result_t bastion_jwt_validate_time(
+    time_t exp, time_t nbf, time_t iat, time_t now, int max_clock_skew)
+{
+    /* Check expiration */
+    if (exp > 0 && now > exp + max_clock_skew) {
+        return BASTION_JWT_EXPIRED;
+    }
+
+    /* Check not-before (nbf claim takes precedence, fall back to iat) */
+    time_t not_before = nbf > 0 ? nbf : iat;
+    if (not_before > 0 && now < not_before - max_clock_skew) {
+        return BASTION_JWT_NOT_YET_VALID;
+    }
+
+    return BASTION_JWT_OK;
+}
 
 /* Base64url decode (RFC 4648 section 5) */
 static unsigned char *base64url_decode(const char *input, size_t input_len, size_t *out_len)
@@ -415,20 +455,13 @@ bastion_jwt_result_t bastion_jwt_verify(bastion_jwt_verifier_t *verifier,
         return BASTION_JWT_INVALID_PAYLOAD;
     }
 
-    /* Verify claims */
+    /* Verify time claims */
     time_t now = time(NULL);
-
-    /* Check expiration */
-    if (claims->exp > 0 && now > claims->exp + verifier->max_clock_skew) {
+    bastion_jwt_result_t time_result = bastion_jwt_validate_time(
+        claims->exp, claims->nbf, claims->iat, now, verifier->max_clock_skew);
+    if (time_result != BASTION_JWT_OK) {
         bastion_jwt_claims_free(claims);
-        return BASTION_JWT_EXPIRED;
-    }
-
-    /* Check not-before (nbf claim takes precedence, fall back to iat) */
-    time_t not_before = claims->nbf > 0 ? claims->nbf : claims->iat;
-    if (not_before > 0 && now < not_before - verifier->max_clock_skew) {
-        bastion_jwt_claims_free(claims);
-        return BASTION_JWT_NOT_YET_VALID;
+        return time_result;
     }
 
     /* Verify issuer if configured */

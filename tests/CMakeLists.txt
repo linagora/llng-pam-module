@@ -102,6 +102,7 @@ add_test(NAME test_token_manager COMMAND test_token_manager)
 
 # Test bastion JWT verification
 add_executable(test_bastion_jwt test_bastion_jwt.c ../src/bastion_jwt.c ../src/jwks_cache.c ../src/jti_cache.c)
+target_compile_definitions(test_bastion_jwt PRIVATE BASTION_JWT_TEST)
 target_include_directories(test_bastion_jwt PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
