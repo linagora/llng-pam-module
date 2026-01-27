@@ -477,6 +477,198 @@ shell = /bin/bash
 home = /var/lib/ansible
 ```
 
+## Offline Credential Cache Security
+
+The offline credential cache enables authentication when the LLNG server is unreachable.
+This section describes the security measures protecting cached credentials.
+
+### Cryptographic Design
+
+#### Password Hashing (Argon2id)
+
+User passwords are hashed using **Argon2id**, the winner of the Password Hashing Competition
+and recommended by OWASP:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Memory | 64 MB | Prevents GPU/ASIC attacks |
+| Iterations | 3 | Time cost balanced for UX |
+| Parallelism | 4 | Utilizes multi-core CPUs |
+| Hash length | 32 bytes | 256-bit security |
+| Salt length | 16 bytes | Unique per entry |
+
+These parameters align with OWASP's recommendations for login verification on
+systems with adequate memory.
+
+#### Encryption at Rest (AES-256-GCM)
+
+Cache entries are encrypted using **AES-256-GCM** (authenticated encryption):
+
+```
+File format:
+[Magic: OBCACHE01][Salt: 16 bytes][IV: 12 bytes][Tag: 16 bytes][Ciphertext]
+```
+
+| Component | Size | Purpose |
+|-----------|------|---------|
+| Magic header | 9 bytes | Version identification |
+| Salt | 16 bytes | Key derivation salt (CSPRNG) |
+| IV/Nonce | 12 bytes | Unique per encryption (CSPRNG) |
+| Auth Tag | 16 bytes | Integrity verification |
+| Ciphertext | Variable | Encrypted JSON entry |
+
+**GCM authentication** ensures any tampering (bit flips, truncation) is detected
+and the entry is rejected.
+
+#### Key Derivation
+
+The encryption key is derived from the machine identity:
+
+```
+1. Read /etc/machine-id (32 hex chars)
+2. Derive key: PBKDF2-SHA256(machine_id, file_salt, 100000 iterations)
+3. Result: 256-bit AES key unique to this machine + this file
+```
+
+**Security properties:**
+- Keys are never stored, always derived on demand
+- Each file uses a different salt → different key
+- Stealing cache files without machine-id is useless
+- Changing machine-id invalidates all cached credentials
+
+### Brute-Force Protection
+
+#### Account Lockout
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Max attempts | 5 | Failures before lockout |
+| Initial lockout | 30 seconds | First lockout duration |
+| Max lockout | 1 hour | Maximum lockout duration |
+| Backoff multiplier | 2.0 | Exponential increase |
+
+Lockout progression: 30s → 60s → 120s → 240s → 480s → ... → 3600s (max)
+
+#### Lockout Storage
+
+Lockout state is stored within the encrypted cache entry:
+- `failed_attempts`: Counter of consecutive failures
+- `locked_until`: Unix timestamp when lockout expires
+
+This ensures lockout state cannot be reset by file manipulation.
+
+### Error Code Isolation
+
+The greeter and PAM module communicate via specific error codes:
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | OK | Success |
+| -1 | NOT_FOUND | User not in cache |
+| -2 | EXPIRED | Cache entry expired |
+| -3 | LOCKED | Account locked out |
+| -4 | PASSWORD | Password mismatch |
+| -5 | CRYPTO | Decryption failed |
+| -6 | IO | File system error |
+
+**Security consideration:** Error codes are intentionally generic to prevent
+information disclosure (e.g., distinguishing "user exists" from "wrong password").
+
+### Cache Entry Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Stored: Successful online auth
+    Stored --> Verified: Correct password (offline)
+    Stored --> Failed: Wrong password
+    Failed --> Failed: Increment failures
+    Failed --> Locked: Max attempts reached
+    Locked --> Stored: Lockout expires
+    Stored --> Expired: TTL exceeded
+    Expired --> [*]: Entry removed
+    Verified --> [*]: User authenticated
+```
+
+### File System Security
+
+| Requirement | Implementation |
+|-------------|----------------|
+| Directory permissions | 0700 (owner only) |
+| File permissions | 0600 (owner read/write) |
+| Symlink protection | O_NOFOLLOW on all opens |
+| Race condition | Exclusive file locks (flock) |
+| Filename | SHA-256(username) to prevent enumeration |
+
+### Cache TTL and Expiration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `offline_cache_ttl` | 86400 (24h) | Maximum cache validity |
+| `offline_cache_max_ttl` | 604800 (7d) | Absolute maximum TTL |
+| `offline_cache_cleanup_interval` | 3600 (1h) | Cleanup expired entries |
+
+**Important:** Online authentication success always refreshes the cache.
+Failed online attempts do NOT refresh the cache (prevents stale password issues).
+
+### Threat Mitigations (Offline Cache)
+
+| Threat | Mitigation |
+|--------|------------|
+| Password cracking | Argon2id with 64MB memory cost |
+| Cache file theft | AES-256-GCM + machine-id derived key |
+| Bit-flip attacks | GCM authentication tag |
+| Key extraction | No keys stored; derived from machine-id |
+| Brute-force login | Exponential lockout (30s → 1h) |
+| User enumeration | SHA-256 hashed filenames |
+| Symlink attacks | O_NOFOLLOW on file operations |
+| Race conditions | Exclusive file locking |
+| Stale passwords | TTL expiration + online refresh priority |
+| Lockout bypass | Lockout state encrypted in cache |
+
+### Administrative Controls
+
+The `ob-cache-admin` tool provides secure cache management:
+
+```bash
+# List cached credentials (metadata only, no secrets)
+ob-cache-admin list
+
+# Remove specific user's cache
+ob-cache-admin clear-user username
+
+# Remove all cached credentials
+ob-cache-admin clear
+
+# Unlock a locked account
+ob-cache-admin unlock username
+
+# Remove expired entries
+ob-cache-admin expire
+```
+
+**Security notes:**
+- Requires root privileges (cache files owned by root)
+- Never displays passwords or hashes
+- All operations logged to syslog
+- Unlock operation resets failure counter but does not bypass authentication
+
+### Recommendations
+
+1. **Set appropriate TTL**: Balance convenience vs. security. 24h is reasonable for
+   most environments; reduce to 8h for high-security.
+
+2. **Monitor machine-id stability**: Changes invalidate all caches and require
+   re-authentication online.
+
+3. **Regular cleanup**: Enable automatic cleanup to remove expired entries and
+   reduce attack surface.
+
+4. **Audit lockouts**: Monitor `ob-cache-admin stats` for unusual lockout patterns
+   indicating brute-force attempts.
+
+5. **Disable when not needed**: If offline access is not required, set
+   `offline_mode = disabled` to eliminate the attack surface entirely.
+
 ## Threat Mitigations
 
 | Threat | Mitigation |
