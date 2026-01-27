@@ -40,6 +40,12 @@ The module supports two authentication methods:
   - Post-authentication failure reporting via CrowdSec watcher
   - Auto-ban after configurable failure threshold
   - Compatible with [Crowdsieve](https://github.com/linagora/crowdsieve) for centralized alert management
+- **Offline authentication** (optional):
+  - Credential caching for network outages
+  - Argon2id password hashing (memory-hard)
+  - AES-256-GCM encryption at rest
+  - Brute-force protection with lockout
+  - LightDM greeter with automatic offline fallback
 
 ## Requirements
 
