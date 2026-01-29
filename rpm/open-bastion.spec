@@ -62,10 +62,18 @@ token-based and key-based authorization with server groups.
 %{_sbindir}/ob-session-recorder
 %{_sbindir}/ob-bastion-setup
 %{_sbindir}/ob-backend-setup
+%{_sbindir}/ob-desktop-setup
 %{_bindir}/ob-ssh-cert
 %{_bindir}/ob-ssh-proxy
 %config(noreplace) %{_sysconfdir}/open-bastion/session-recorder.conf.example
 %config(noreplace) %{_sysconfdir}/open-bastion/ssh-proxy.conf.example
+%config(noreplace) %{_sysconfdir}/open-bastion/lightdm-openbastion.conf.example
+%dir %{_datadir}/open-bastion/lightdm
+%dir %{_datadir}/open-bastion/lightdm/greeter
+%{_datadir}/open-bastion/lightdm/greeter/greeter.js
+%{_datadir}/open-bastion/lightdm/greeter/index.html
+%{_datadir}/open-bastion/lightdm/greeter/index.theme
+%{_datadir}/open-bastion/lightdm/greeter/style.css
 %{_unitdir}/ob-heartbeat.service
 %{_unitdir}/ob-heartbeat.timer
 %{_mandir}/man1/ob-ssh-cert.1*
@@ -87,6 +95,6 @@ token-based and key-based authorization with server groups.
 %systemd_postun_with_restart ob-heartbeat.timer
 
 %changelog
-* Sat Dec 14 2025 Xavier Guimard <xguimard@linagora.com> - 1.0.0-1
+* Sun Dec 14 2025 Xavier Guimard <xguimard@linagora.com> - 1.0.0-1
 - Initial RPM package
 - Renamed project from pam-llng to open-bastion
