@@ -124,7 +124,9 @@ mktemp_dir() {
 base64_file() {
     local f="$1"
     [ -f "$f" ] || die "base64_file: missing $f"
-    base64 -w0 -- "$f" 2>/dev/null || base64 -- "$f" | tr -d '\n'
+    # Read via stdin: GNU base64 accepts a positional file, but BSD/macOS
+    # base64 does not (it needs -i FILE), so a redirect is the portable form.
+    base64 -w0 < "$f" 2>/dev/null || base64 < "$f" | tr -d '\n'
 }
 
 # base64_string <string>
