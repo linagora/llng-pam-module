@@ -39,7 +39,6 @@
 /* Cache settings */
 #define CACHE_TTL 300           /* 5 minutes */
 #define CACHE_MAX_ENTRIES 1000
-#define CACHE_FILE "/var/cache/nss_llng/users.cache"
 
 /*
  * Longest serialized cache record we are willing to write, newline included.
@@ -786,11 +785,21 @@ static int valid_cache_name(const char *name)
  */
 static int open_cache_dir_read(const char *dir)
 {
+    /* Both warnings below describe a PERMANENT misconfiguration, and this
+     * function runs on every getpwnam()/getpwuid() in every process on the
+     * host: logging per lookup would flood syslog for as long as the condition
+     * lasts. Once per process is enough to diagnose it, and the process
+     * lifetime bounds the flood. The atomic exchange keeps concurrent threads
+     * from each emitting a copy. */
+    static int warned_symlink = 0;
+    static int warned_untrusted = 0;
+
     int dfd = open(dir, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dfd < 0) {
         /* ENOENT: no cache yet. EACCES/EPERM: not ours to read. Both are
          * normal, silent outcomes — the caller simply falls through to LLNG. */
-        if (errno == ELOOP) {
+        if (errno == ELOOP &&
+            __atomic_exchange_n(&warned_symlink, 1, __ATOMIC_RELAXED) == 0) {
             syslog(LOG_WARNING,
                    "libnss_openbastion: cache directory %s is a symlink (rejected)", dir);
         }
@@ -804,10 +813,13 @@ static int open_cache_dir_read(const char *dir)
     }
     if (!S_ISDIR(st.st_mode) || st.st_uid != CACHE_TRUSTED_UID ||
         (st.st_mode & (S_IWGRP | S_IWOTH))) {
-        syslog(LOG_WARNING,
-               "libnss_openbastion: cache directory %s is untrusted "
-               "(wrong owner or group/world-writable) - ignoring cache",
-               dir);
+        if (__atomic_exchange_n(&warned_untrusted, 1, __ATOMIC_RELAXED) == 0) {
+            syslog(LOG_WARNING,
+                   "libnss_openbastion: cache directory %s is untrusted "
+                   "(wrong owner or group/world-writable) - ignoring cache "
+                   "(further occurrences in this process are not logged)",
+                   dir);
+        }
         close(dfd);
         return -1;
     }
@@ -1172,9 +1184,22 @@ static void file_cache_write_atomic_at(int dirfd, const char *leaf,
      * fchmod() on the temp fd before the rename closes the TOCTOU window and
      * normalises an entry created under a restrictive umask.
      */
-    if (fchmod(fileno(f), 0644) != 0 || fflush(f) != 0 || ferror(f)) {
-        syslog(LOG_WARNING, "libnss_openbastion: error writing cache file %s: %s",
-               tmpleaf, strerror(errno));
+    /* Checked one at a time, and errno captured immediately: a single
+     * short-circuited condition would report strerror(errno) from whichever
+     * call happened to leave a value behind, not from the one that failed
+     * (ferror() in particular sets nothing). */
+    const char *failed = NULL;
+    int saved_errno = 0;
+    if (fchmod(fileno(f), 0644) != 0) {
+        failed = "fchmod"; saved_errno = errno;
+    } else if (fflush(f) != 0) {
+        failed = "fflush"; saved_errno = errno;
+    } else if (ferror(f)) {
+        failed = "write"; saved_errno = 0;
+    }
+    if (failed) {
+        syslog(LOG_WARNING, "libnss_openbastion: %s failed on cache file %s: %s",
+               failed, tmpleaf, saved_errno ? strerror(saved_errno) : "stream error");
         fclose(f);
         unlinkat(dirfd, tmpleaf, 0);
         return;
