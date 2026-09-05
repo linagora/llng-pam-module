@@ -158,6 +158,16 @@ case "$1" in
         chmod 700 /var/cache/open-bastion
         mkdir -p /var/lib/open-bastion
         chmod 711 /var/lib/open-bastion
+        # NSS cross-process passwd cache (libnss_openbastion). 0711 = traversable
+        # but NOT listable: entries stay 0644 so an unprivileged getpwnam()/
+        # getpwuid() can read its own record from inside its own process, but no
+        # local account can readdir() the directory and enumerate the SSO user
+        # directory wholesale. That matters most for byname/, whose filenames are
+        # the login names themselves. Refs #189. The module re-asserts these
+        # modes at runtime; setting them here closes the gap on upgrade from a
+        # version that shipped them 0755.
+        mkdir -p /var/cache/nss_llng/byname
+        chmod 711 /var/cache/nss_llng /var/cache/nss_llng/byname
         # Create ob-sessions group for session recording privilege separation
         groupadd --system ob-sessions 2>/dev/null || true
         # Create open-bastion-sudo group for defense-in-depth sudo authorization (Mode E)
