@@ -158,30 +158,37 @@ static char *strdup_or_null(const char *s)
 
 /*
  * Generate HMAC-SHA256 signature for request signing.
- * Message format: timestamp.method.path.body
+ * Message format: timestamp.nonce.method.path.body
  * Output: hex-encoded signature string (65 bytes including null terminator)
+ *
+ * Security (#188): the nonce MUST be part of the signed message. It is sent
+ * in its own X-Nonce header for the server's replay window; if it were left
+ * out of the HMAC an attacker could replay a captured request with a fresh
+ * nonce and the signature would still verify, defeating replay protection.
  */
 static void generate_request_signature(const char *secret,
                                         long timestamp,
+                                        const char *nonce,
                                         const char *method,
                                         const char *path,
                                         const char *body,
                                         char *signature,
                                         size_t sig_size)
 {
-    if (!secret || !signature || sig_size < 65) {
+    if (!secret || !nonce || !signature || sig_size < 65) {
         if (signature && sig_size > 0) signature[0] = '\0';
         return;
     }
 
-    /* Build message: timestamp.method.path.body
+    /* Build message: timestamp.nonce.method.path.body
      * Use stack allocation for typical message sizes to avoid malloc overhead.
-     * Typical: timestamp(~10) + method(~4) + path(~50) + body(~200) < SIGNATURE_STACK_BUFFER_SIZE
+     * Typical: timestamp(~10) + nonce(~55) + method(~4) + path(~50) + body(~200)
+     * < SIGNATURE_STACK_BUFFER_SIZE
      */
     char ts_str[32];
     snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
 
-    size_t msg_len = strlen(ts_str) + 1 + strlen(method) + 1 +
+    size_t msg_len = strlen(ts_str) + 1 + strlen(nonce) + 1 + strlen(method) + 1 +
                      strlen(path) + 1 + (body ? strlen(body) : 0);
 
     /* Use stack buffer for small messages, heap for large ones */
@@ -200,8 +207,8 @@ static void generate_request_signature(const char *secret,
         heap_allocated = true;
     }
 
-    snprintf(message, msg_len + 1, "%s.%s.%s.%s",
-             ts_str, method, path, body ? body : "");
+    snprintf(message, msg_len + 1, "%s.%s.%s.%s.%s",
+             ts_str, nonce, method, path, body ? body : "");
 
     /* Generate HMAC-SHA256 */
     unsigned char hmac[EVP_MAX_MD_SIZE];
@@ -276,7 +283,9 @@ static void generate_nonce(char *nonce, size_t nonce_size)
  * Adds X-Timestamp, X-Nonce, and X-Signature-256 headers.
  *
  * The nonce provides replay protection - server should reject
- * requests with previously seen nonces within a time window.
+ * requests with previously seen nonces within a time window. It is covered
+ * by the signature (see generate_request_signature) so it cannot be swapped
+ * for a fresh value on a replayed request.
  */
 static struct curl_slist *add_signing_headers(struct curl_slist *headers,
                                                const char *signing_secret,
@@ -294,9 +303,9 @@ static struct curl_slist *add_signing_headers(struct curl_slist *headers,
     char nonce[80];
     generate_nonce(nonce, sizeof(nonce));
 
-    /* Generate signature (includes nonce in message) */
+    /* Generate signature over timestamp.nonce.method.path.body (#188) */
     char signature[65];
-    generate_request_signature(signing_secret, timestamp, method, path, body,
+    generate_request_signature(signing_secret, timestamp, nonce, method, path, body,
                                signature, sizeof(signature));
 
     /* Add headers */
@@ -892,9 +901,30 @@ int ob_introspect_token(ob_client_t *client,
 
     /* Build POST data with JWT client assertion (RFC 7523) */
     char *escaped_token = curl_easy_escape(client->curl, token, 0);
+    if (!escaped_token) {
+        snprintf(client->error, sizeof(client->error),
+                 "Failed to URL-encode token for introspection");
+        return -1;
+    }
+
     char postdata[8192];
     int len = snprintf(postdata, sizeof(postdata), "token=%s", escaped_token);
     curl_free(escaped_token);
+
+    /*
+     * snprintf() returns the length the result WOULD have had, not the number
+     * of bytes written. A token whose URL-encoded form does not fit therefore
+     * yields len >= sizeof(postdata): using it as an offset would point past
+     * the end of the buffer and make "sizeof(postdata) - len" wrap around to a
+     * huge size_t, so the append below would write outside the stack frame.
+     * Reject the request before that can happen.
+     */
+    if (len < 0 || (size_t)len >= sizeof(postdata)) {
+        explicit_bzero(postdata, sizeof(postdata));
+        snprintf(client->error, sizeof(client->error),
+                 "POST data too long for introspection");
+        return -1;
+    }
 
     /* Add JWT client assertion for authentication */
     struct curl_slist *headers = NULL;
@@ -903,6 +933,7 @@ int ob_introspect_token(ob_client_t *client,
                                                 client->client_secret,
                                                 url);
         if (!client_jwt) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
                      "Failed to generate JWT for introspection");
             return -1;
@@ -914,11 +945,13 @@ int ob_introspect_token(ob_client_t *client,
         free(client_jwt);
 
         if (!encoded_jwt) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
                      "Failed to URL-encode JWT for introspection");
             return -1;
         }
 
+        /* len is bounded by the check above, so this offset stays in range */
         int written = snprintf(postdata + len, sizeof(postdata) - len,
             "&client_id=%s"
             "&client_assertion_type=urn%%3Aietf%%3Aparams%%3Aoauth%%3A"
@@ -926,10 +959,11 @@ int ob_introspect_token(ob_client_t *client,
             "&client_assertion=%s", client->client_id, encoded_jwt);
         curl_free(encoded_jwt);
 
-        /* Check for buffer overflow */
+        /* Check for truncation (snprintf() itself stayed inside the buffer) */
         if (written < 0 || (size_t)written >= sizeof(postdata) - len) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
-                     "POST data buffer overflow in introspection");
+                     "POST data too long for introspection");
             return -1;
         }
         len += written;

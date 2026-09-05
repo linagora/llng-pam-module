@@ -63,7 +63,6 @@ Features:
 %build
 %set_build_flags
 %cmake \
-    -DENABLE_CACHE=ON \
     -DUSE_LIBSODIUM=ON \
     -DBUILD_TESTING=ON \
     -DINSTALL_DESKTOP=ON \

@@ -5,7 +5,6 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Options
-option(ENABLE_CACHE "Enable token caching" ON)
 option(BUILD_TESTING "Build tests" ON)
 option(INSTALL_SYSTEMD "Install systemd unit files" ON)
 option(INSTALL_DESKTOP "Install Desktop SSO components (LightDM greeter)" OFF)
@@ -35,7 +34,6 @@ set(PAM_MODULE_SOURCES
     src/config.c
     src/audit_log.c
     src/rate_limiter.c
-    src/client_context.c
     src/token_manager.c
     src/jwt_utils.c
     src/notify.c
@@ -47,11 +45,6 @@ set(PAM_MODULE_SOURCES
     src/ssh_key_policy.c
     src/str_utils.c
 )
-
-if(ENABLE_CACHE)
-    list(APPEND PAM_MODULE_SOURCES src/token_cache.c)
-    add_definitions(-DENABLE_CACHE)
-endif()
 
 # Desktop SSO components (offline credential cache, OAuth2 introspection)
 # When INSTALL_DESKTOP=OFF, none of this code is compiled into pam_openbastion.so.

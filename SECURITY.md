@@ -52,7 +52,17 @@ When `request_signing_secret` is configured, requests include:
 
 - `X-Timestamp`: Unix timestamp _(server should reject if too old)_
 - `X-Nonce`: Unique `timestamp_ms-uuid` format _(server should reject duplicates)_
-- `X-Signature-256`: HMAC-SHA256 signature of the request
+- `X-Signature-256`: `sha256=<hex>`, HMAC-SHA256 of the request
+
+The signed message is, with `.` as separator and an empty string for a bodyless request:
+
+```
+<timestamp>.<nonce>.<method>.<path>.<body>
+```
+
+The nonce is part of the signed message: leaving it out would let an attacker
+replay a captured request with a fresh `X-Nonce` while keeping a valid
+signature, defeating the replay window.
 
 This provides defense-in-depth against request tampering, even if TLS is somehow compromised.
 
@@ -214,48 +224,79 @@ when an `allowed_bastions` file is present.
 | Expiry   | Fail-closed: `ob-ssh` prints a clear error and exits non-zero                 |
 | Renewal  | User reconnects to the bastion; no silent re-vouching                         |
 
-## Token Cache Security
+## Authorization Cache Security
+
+The **authorization cache** (`auth_cache`) is the only PAM-side cache in the
+module. It stores the result of a successful `/pam/authorize` call so that an
+already-authorized user can still log in while the LLNG portal is unreachable.
+It never caches credentials, tokens, or password material — only an
+authorization verdict and the account attributes that come with it.
+
+Entries are written only by builds that include the Desktop SSO components
+(`-DINSTALL_DESKTOP=ON`, which is what the `.deb` and `.rpm` packages use).
+An SSH-only build reads the cache but never populates it.
 
 ### Encryption at Rest
 
-When `cache_encrypted = true` _(default)_, cached tokens are encrypted using:
+Cache entries are always encrypted — there is no plaintext mode:
 
 - **Algorithm**: AES-256-GCM _(authenticated encryption)_
 - **Key Derivation**: PBKDF2-SHA256 with 100,000 iterations
-- **Key Source**: Machine ID (`/etc/machine-id`) + cache username as salt
+- **Key Source**: Machine ID (`/etc/machine-id`), or a per-installation
+  `.instance_id` when `/etc/machine-id` is unavailable (containers, chroots),
+  salted with a per-directory `.auth_salt`
 - **Authentication**: GCM tag prevents tampering
+
+> **Scope of the key.** The derived key is **per cache directory**, not per
+> user: every entry in one cache directory is encrypted under the same key.
+> Earlier versions of this document described the salt as "the cache username",
+> which wrongly implied per-user key separation. The salt is 16 random bytes
+> from `RAND_bytes()`, generated on first use and persisted next to the cache
+> as `.auth_salt`; it is not derived from the machine id or the username, and
+> its purpose is to stop an attacker precomputing keys for a known machine id.
 
 ```
 File format:
-[Plaintext: "expires_at\n"][Magic: LLNGCACHE02][IV: 12 bytes][Tag: 16 bytes][Ciphertext]
+["<expires_at> <HMAC-SHA256 hex>\n"][Magic: LLNGCACHE04][IV: 12 bytes][Ciphertext][GCM tag: 16 bytes]
 ```
 
-The plaintext timestamp header allows quick expiration checks without decryption
-_(performance optimization)_. However, the timestamp is **duplicated inside the encrypted payload**
-for integrity verification. If an attacker modifies the plaintext header to extend cache validity,
-the mismatch with the encrypted timestamp causes immediate rejection and cache file deletion.
+The plaintext expiration header allows quick expiry checks and cleanup without
+decrypting the payload. It is authenticated with an HMAC-SHA256 over the
+timestamp, keyed with the same derived key, so an attacker cannot extend cache
+validity by editing it: a header that fails HMAC verification is ignored and
+the entry falls through to a full authenticated decrypt.
+
+### Fail-Closed Key Derivation
+
+`auth_cache_init()` returns `NULL` if key derivation fails. There is no
+unencrypted fallback: if the cache cannot be encrypted, it is not used at all
+and authorization falls back to the online path.
 
 ### Cache Isolation
 
-- Each user's cache is stored in a separate file
+- Entries are keyed on `(user, server_group, host)` and stored one per file
 - File permissions: 0600 _(owner read/write only)_
-- Directory permissions: 0700
+- Directory permissions: 0700 _(`/var/cache/open-bastion/auth` by default)_
+- Files are written to a temporary path and renamed atomically
+- Reads use `O_NOFOLLOW`; a symlink in place of a cache file is deleted, not followed
 
-### Cache Invalidation
+### TTL and Invalidation
 
-When `cache_invalidate_on_logout = true` _(default)_:
+The TTL is not a local setting — it comes from the server, in the `offline.ttl`
+field of the `/pam/authorize` response, and the entry is only written when the
+server explicitly enables offline mode for that user. Expired entries are
+removed on access and by `auth_cache_cleanup()`.
 
-- User's cache is cleared when their PAM session closes
-- Prevents stale tokens from being reused
+Set `auth_cache_enabled = false` to disable the cache entirely; touching the
+`auth_cache_force_online` file (`/etc/open-bastion/force_online` by default)
+forces every authorization online without a configuration change.
 
-### Risk-Based TTL
+### Brute-Force Protection
 
-| Service Type       | Default TTL |
-| ------------------ | ----------- |
-| Normal services    | 300 seconds |
-| High-risk services | 60 seconds  |
-
-Configure high-risk services via `high_risk_services` _(comma-separated)_.
+Because a cached verdict can be replayed offline, cache lookups are rate
+limited independently of the online path (`cache_rate_limit_*`). Both hits and
+misses count towards the lockout, so an attacker cannot probe for which
+usernames have a cache entry without incurring the penalty.
 
 ## Rate Limiting
 
@@ -369,11 +410,9 @@ For real-time security monitoring:
 
 ### Secrets Management
 
-| Setting                | Default        | Description             |
-| ---------------------- | -------------- | ----------------------- |
-| `secrets_encrypted`    | true           | Encrypt secrets at rest |
-| `secrets_use_keyring`  | true           | Use kernel keyring      |
-| `secrets_keyring_name` | "open-bastion" | Keyring identifier      |
+| Setting             | Default | Description             |
+| ------------------- | ------- | ----------------------- |
+| `secrets_encrypted` | true    | Encrypt secrets at rest |
 
 ### File Permissions
 

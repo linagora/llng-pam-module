@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/file.h>
 #include <openssl/evp.h>
 
 #include "rate_limiter.h"
@@ -258,6 +259,61 @@ static void delete_state(const char *path)
     unlink(path);
 }
 
+/*
+ * Per-key inter-process lock (#186).
+ *
+ * The lockout counter is updated with a read-modify-write (load_state ->
+ * ++failure_count -> save_state). PAM runs one process per authentication
+ * attempt, so N parallel attempts would each read the same count k and each
+ * write k+1: the counter advances by 1 instead of N and the lockout threshold
+ * can be outrun by simply attacking in parallel.
+ *
+ * A dedicated "<state file>.lock" companion file is used rather than the state
+ * file itself: save_state replaces the state file by an atomic renameat(), so
+ * the state inode changes on every update and a lock held on it would no longer
+ * exclude a process that opened the new inode. The lock file is therefore never
+ * unlinked (not even by rate_limiter_reset or rate_limiter_cleanup); it is empty
+ * and its inode must stay stable for as long as the key exists.
+ *
+ * Returns a locked fd, or -1 when the lock could not be taken. Callers proceed
+ * unlocked in that case (degraded, exactly the pre-#186 behaviour): failing to
+ * record the failure at all would turn an unwritable lock file into a way to
+ * disable rate limiting entirely.
+ */
+static int lock_state(const char *path)
+{
+    char lock_path[520];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
+    if (n < 0 || (size_t)n >= sizeof(lock_path)) {
+        return -1;
+    }
+
+    /* O_NOFOLLOW: a symlink planted at the lock path is a security violation,
+     * removed and retried once (same handling as load_state_at). */
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == ELOOP) {
+        unlink(lock_path);
+        fd = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    }
+    if (fd < 0) {
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Release a lock taken by lock_state(). Safe on -1 (lock not held). */
+static void unlock_state(int fd)
+{
+    if (fd < 0) return;
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
 rate_limiter_t *rate_limiter_init(const rate_limiter_config_t *config)
 {
     rate_limiter_t *rl = calloc(1, sizeof(rate_limiter_t));
@@ -334,15 +390,12 @@ int rate_limiter_check(rate_limiter_t *rl, const char *key)
     return 0;
 }
 
-int rate_limiter_record_failure(rate_limiter_t *rl, const char *key)
+/*
+ * Read-modify-write of the state file. MUST be called with the per-key lock
+ * held (see lock_state): load_state/save_state are not atomic together.
+ */
+static int record_failure_locked(rate_limiter_t *rl, const char *path)
 {
-    if (!rl || !rl->config.enabled || !key) {
-        return 0;
-    }
-
-    char path[512];
-    build_state_path(rl, key, path, sizeof(path));
-
     rate_limit_state_t state;
     time_t now = time(NULL);
 
@@ -401,6 +454,24 @@ int rate_limiter_record_failure(rate_limiter_t *rl, const char *key)
     return 0;
 }
 
+int rate_limiter_record_failure(rate_limiter_t *rl, const char *key)
+{
+    if (!rl || !rl->config.enabled || !key) {
+        return 0;
+    }
+
+    char path[512];
+    build_state_path(rl, key, path, sizeof(path));
+
+    /* Serialize the whole read-modify-write against the other PAM processes
+     * hitting the same key, so N parallel failures count as N (#186). */
+    int lock_fd = lock_state(path);
+    int ret = record_failure_locked(rl, path);
+    unlock_state(lock_fd);
+
+    return ret;
+}
+
 void rate_limiter_reset(rate_limiter_t *rl, const char *key)
 {
     if (!rl || !rl->config.enabled || !key) {
@@ -409,7 +480,12 @@ void rate_limiter_reset(rate_limiter_t *rl, const char *key)
 
     char path[512];
     build_state_path(rl, key, path, sizeof(path));
+
+    /* Take the same lock so a reset cannot land in the middle of a concurrent
+     * increment (which would then re-create the file with a stale count). */
+    int lock_fd = lock_state(path);
     delete_state(path);
+    unlock_state(lock_fd);
 }
 
 bool rate_limiter_get_state(rate_limiter_t *rl, const char *key, rate_limit_state_t *state)

@@ -512,6 +512,106 @@ static int test_init_with_invalid_key(void)
     return 1;
 }
 
+/* Find a file with the given suffix in dir. Returns 1 on success. */
+static int find_file_with_suffix(const char *dir, const char *suffix,
+                                 char *out, size_t out_size)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int found = 0;
+    struct dirent *e;
+    size_t slen = strlen(suffix);
+    while ((e = readdir(d)) != NULL) {
+        size_t nlen = strlen(e->d_name);
+        if (nlen > slen && strcmp(e->d_name + nlen - slen, suffix) == 0) {
+            snprintf(out, out_size, "%s/%s", dir, e->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * Regression for #197: the atomic-write temp file must be per-process.
+ *
+ * auth_cache_store() used to write through a fixed "<path>.tmp" opened with
+ * O_TRUNC, so two concurrent writers interleaved into a single file and
+ * renamed the mixture into place. A sentinel planted at the old fixed name
+ * must now be left strictly untouched — the writer uses "<path>.tmp.<pid>"
+ * created with O_EXCL.
+ */
+static int test_temp_file_is_private(void)
+{
+    if (!has_machine_id()) return 2;  /* SKIP */
+
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s/tmpname", test_dir);
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return 0;
+
+    auth_cache_t *cache = auth_cache_init(dir);
+    ASSERT(cache != NULL);
+
+    auth_cache_entry_t entry = {
+        .version = 4,
+        .user = "tmpuser",
+        .authorized = true,
+        .groups = NULL,
+        .groups_count = 0,
+        .sudo_allowed = false,
+        .sudo_nopasswd = false,
+        .gecos = "Tmp User",
+        .shell = "/bin/bash",
+        .home = "/home/tmpuser"
+    };
+
+    int ok = (auth_cache_store(cache, "tmpuser", "default", "tmphost", &entry, 60) == 0);
+
+    char entry_path[512] = {0};
+    ok = ok && find_file_with_suffix(dir, ".authcache", entry_path, sizeof(entry_path));
+
+    /* Plant a sentinel at the temp name the pre-#197 code would have reused. */
+    char legacy_tmp[600];
+    const char *sentinel = "SENTINEL-MUST-SURVIVE";
+    if (ok) {
+        snprintf(legacy_tmp, sizeof(legacy_tmp), "%s.tmp", entry_path);
+        int fd = open(legacy_tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        ok = (fd >= 0);
+        if (ok) {
+            ok = (write(fd, sentinel, strlen(sentinel)) == (ssize_t)strlen(sentinel));
+            close(fd);
+        }
+    }
+
+    /* Refresh the same entry: must not go through the fixed temp name. */
+    entry.sudo_allowed = true;
+    ok = ok && (auth_cache_store(cache, "tmpuser", "default", "tmphost", &entry, 60) == 0);
+
+    if (ok) {
+        char buf[128] = {0};
+        int fd = open(legacy_tmp, O_RDONLY);
+        ok = (fd >= 0);
+        if (ok) {
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            ok = (n == (ssize_t)strlen(sentinel) && strcmp(buf, sentinel) == 0);
+        }
+    }
+
+    /* And the entry itself must carry the refreshed value. */
+    if (ok) {
+        auth_cache_entry_t got = {0};
+        ok = auth_cache_lookup(cache, "tmpuser", "default", "tmphost", &got) &&
+             got.sudo_allowed == true;
+        auth_cache_entry_free(&got);
+    }
+
+    auth_cache_destroy(cache);
+    return ok;
+}
+
 int main(void)
 {
     printf("=== Authorization Cache Tests ===\n\n");
@@ -536,6 +636,7 @@ int main(void)
     TEST(force_online_no_file);
     TEST(cleanup_expired);
     TEST(entry_free_null);
+    TEST(temp_file_is_private);
 
     cleanup_test_dir();
 
