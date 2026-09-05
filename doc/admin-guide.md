@@ -797,12 +797,35 @@ The following aliases are recognized:
 
 ### SSH Server Requirement
 
-For SSH key policy to work, the SSH server must expose authentication information:
+The module identifies the presented key through the `ob-ssh-principals` helper
+installed by `ob-bastion-setup` / `ob-backend-setup`, which sshd calls with the
+key type and key blob:
 
 ```bash
-# /etc/ssh/sshd_config
-ExposeAuthInfo yes
+# /etc/ssh/sshd_config — written by the setup scripts
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k
+AuthorizedPrincipalsCommandUser nobody
+
+ExposeAuthInfo yes   # fallback for sshd variants that propagate SSH_USER_AUTH
 ```
+
+> **Enforcement is fail-closed.** With `ssh_key_policy_enabled = true`, a key
+> whose type or size cannot be determined is **denied**. sshd does not export
+> `SSH_USER_AUTH` to PAM during `pam_acct_mgmt` on OpenSSH >= 9.8, so the helper
+> above is the channel that makes the policy work at all. Before enabling the
+> policy — and after any package upgrade — make sure the installed helper writes
+> the key metadata:
+>
+> ```bash
+> grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+> ```
+>
+> If it does not, re-run `ob-bastion-setup` / `ob-backend-setup` for this host's
+> role. A package upgrade replaces the PAM module but not the helper, which
+> lives in `/usr/local/sbin` and is written by the setup script.
+
+`ssh_key_min_rsa_bits` is enforced from the RSA modulus decoded out of the key
+blob, so it is a real check and not only documentation.
 
 ### Example Configurations
 
@@ -839,8 +862,11 @@ If users are rejected due to key policy:
 journalctl -u sshd | grep "SSH key policy"
 
 # Common errors:
-# - "Key type not allowed: ssh-dss" → DSA keys are disabled
-# - "RSA key too small: 1024 bits" → User needs a larger key
+# - "RSA keys are not allowed by policy" → the type is excluded
+# - "RSA key size below minimum required" → user needs a larger key
+# - "DSA keys are not allowed by policy (deprecated)" → DSA is disabled
+# - "cannot identify the key presented by user ..." → the host still has the
+#   pre-v1 ob-ssh-principals helper: re-run ob-bastion-setup / ob-backend-setup
 ```
 
 ---

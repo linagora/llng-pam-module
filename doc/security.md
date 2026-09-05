@@ -72,8 +72,35 @@ ssh_key_allowed_types = ed25519,ecdsa,sk
 | `ssh_key_min_rsa_bits`   | `2048`  | Minimum RSA key size in bits      |
 | `ssh_key_min_ecdsa_bits` | `256`   | Minimum ECDSA key size in bits    |
 
-**Note:** This feature requires `ExposeAuthInfo yes` in `sshd_config` to function.
-This is also required for [Service Accounts](service-accounts.md) fingerprint validation.
+### Requirements and failure mode
+
+The module learns which key was presented from the `ob-ssh-principals`
+helper installed by `ob-bastion-setup` / `ob-backend-setup`, which sshd
+calls as `AuthorizedPrincipalsCommand ... %u %f %t %k`. sshd does not
+export `SSH_USER_AUTH` to the PAM environment during `pam_acct_mgmt` on
+current OpenSSH, so this spool is the channel. Check that the installed
+helper is recent enough:
+
+```bash
+grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+```
+
+The check is **fail-closed**: with `ssh_key_policy_enabled = true`, a key
+whose type or size cannot be determined is **denied**, and the reason is
+logged. Consequences:
+
+- Enable the policy only on a host whose setup script has been re-run with
+  the version that installs the v1 helper. A package upgrade alone replaces
+  the PAM module but not the helper in `/usr/local/sbin`; the postinst warns
+  about that combination.
+- `ssh_key_min_rsa_bits` is enforced from the RSA modulus decoded out of
+  the key blob. An RSA key whose size cannot be measured is rejected.
+- With the policy disabled (the default), none of this runs and behaviour
+  is unchanged.
+
+`ExposeAuthInfo yes` in `sshd_config` remains useful as a fallback for sshd
+variants that do propagate the information, and is required for
+[Service Accounts](service-accounts.md) fingerprint validation.
 
 ## Cache Brute-Force Protection
 

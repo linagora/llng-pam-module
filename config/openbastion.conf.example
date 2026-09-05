@@ -303,6 +303,13 @@ log_level = warn
 # Enable SSH key policy enforcement
 # When enabled, connections with non-compliant keys are rejected
 # Default: false
+# Requires an sshd configured by a recent ob-bastion-setup / ob-backend-setup
+# (AuthorizedPrincipalsCommand ... %t %k): that is how the module learns which
+# key was presented. Enforcement is FAIL-CLOSED - if the key cannot be
+# identified, the login is denied. Leave this off until the host's setup script
+# has been re-run:
+#   grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+# See doc/security.md.
 # ssh_key_policy_enabled = false
 
 # Allowed key types (comma-separated)

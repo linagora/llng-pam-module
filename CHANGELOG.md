@@ -114,6 +114,32 @@ COMPONENT` line and interpolated verbatim into the generated installer, which
 
 ### Fixed
 
+- **The SSH key policy is now actually enforced, fail-closed (#181).**
+  `ssh_key_policy_enabled` was documented as implemented but enforced nothing.
+  The check called `extract_ssh_algorithm()`, which reads only `SSH_USER_AUTH`
+  — a variable sshd does not export to the PAM environment during
+  `pam_acct_mgmt` on OpenSSH >= 9.8 — and when it returned `NULL` the whole
+  policy block was silently skipped. `ssh_key_policy_check_rsa_size()` had no
+  production caller at all, so `ssh_key_min_rsa_bits` was inert.
+  - `ob-ssh-principals` (installed by `ob-bastion-setup` / `ob-backend-setup`)
+    is now called with sshd's `%t` and `%k` tokens and writes a second spool
+    drop, `/run/open-bastion/ssh-fp/<anchor>.key`, carrying `v=1` / `fp=` /
+    `alg=` / `key=`. The existing `<anchor>.fp` drop is untouched, so an older
+    module reading it keeps working against a newer helper.
+  - `pam_openbastion` decodes the key blob itself (type name, and the RSA
+    modulus size — the only place that size exists), cross-checks it against
+    the fingerprint drop, then runs the full policy check including
+    `ssh_key_min_rsa_bits`.
+  - When the policy is enabled and the key cannot be identified, the account
+    phase now **denies** instead of skipping, with an explicit log line naming
+    the fix (re-run the setup script).
+  - `ssh_key_policy_enabled` still defaults to `false`; with the policy off
+    nothing in this path runs and behaviour is unchanged. Because a package
+    upgrade replaces the PAM module but not the helper in `/usr/local/sbin`,
+    the postinst warns when it finds the policy enabled next to a pre-v1
+    helper, and the docs tell you to re-run `ob-bastion-setup` /
+    `ob-backend-setup` before enabling it.
+
 - **A server-supplied `gid` is no longer validated against the synthetic UID
   range.** The NSS module briefly checked the portal's `gid` (an LDAP
   `gidNumber` exported via `pamAccessExportedVars`) against

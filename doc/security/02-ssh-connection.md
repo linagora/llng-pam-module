@@ -700,15 +700,44 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 
 **Conséquence :** Un attaquant pourrait casser une clé faible et obtenir le certificat associé.
 
-**Remédiation embarquée (IMPLÉMENTÉE) :**
+**Remédiation embarquée (IMPLÉMENTÉE, sous condition de déploiement) :**
 
-Le module PAM peut appliquer une politique de restriction des types de clés SSH :
+Le module PAM applique une politique de restriction des types **et des tailles**
+de clés SSH :
 
 ```ini
 # /etc/open-bastion/openbastion.conf
 ssh_key_policy_enabled = true
 ssh_key_allowed_types = ed25519, sk-ed25519, sk-ecdsa
+ssh_key_min_rsa_bits = 3072      # réellement appliqué (issue #181)
 ```
+
+> **Précondition (issue #181).** Le contrôle n'est effectif que si l'hôte a été
+> configuré par une version de `ob-bastion-setup` / `ob-backend-setup` qui
+> installe le helper `ob-ssh-principals` « spool v1 » — celui qui dépose le type
+> et le blob de la clé présentée dans `/run/open-bastion/ssh-fp/<pid>.key`.
+> Vérification :
+>
+> ```bash
+> grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+> ```
+>
+> sshd n'exporte pas `SSH_USER_AUTH` dans l'environnement PAM pendant
+> `pam_acct_mgmt` (OpenSSH ≥ 9.8), donc c'est le seul canal par lequel le module
+> voit la clé.
+>
+> Le contrôle est **fail-closed** : si `ssh_key_policy_enabled = true` et que la
+> clé ne peut pas être identifiée, la connexion est **refusée** (et la raison
+> journalisée). Auparavant, ce même cas faisait silencieusement sauter tout le
+> bloc de vérification : la politique était inerte sur tout OpenSSH récent.
+>
+> Après une simple mise à jour du paquet, **rejouer le script de setup** de
+> l'hôte avant (ou en même temps que) l'activation de la politique. Le postinst
+> détecte la combinaison « politique activée + helper pré-v1 » et l'affiche.
+
+La taille RSA est déduite du module de la clé (décodage du blob `%k` fourni par
+sshd), pas du nom d'algorithme : `ssh_key_min_rsa_bits` est donc réellement
+appliqué. Une clé RSA dont la taille ne peut pas être mesurée est refusée.
 
 **Types de clés supportés :**
 
@@ -724,14 +753,20 @@ ssh_key_allowed_types = ed25519, sk-ed25519, sk-ecdsa
 **Prérequis SSH :**
 
 ```bash
-# /etc/ssh/sshd_config
-ExposeAuthInfo yes   # Requis pour accéder au type de clé (déjà configuré)
+# /etc/ssh/sshd_config — écrit par ob-bastion-setup / ob-backend-setup
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k
+AuthorizedPrincipalsCommandUser nobody
 ```
 
-|                 |           Score résiduel           |
-| --------------- | :--------------------------------: |
-| **Probabilité** | 1 (avec politique de clés activée) |
-| **Impact**      |    3 (si clé faible compromise)    |
+Les jetons `%t` (type de clé) et `%k` (blob base64 de la clé ou du certificat)
+sont supportés par `AuthorizedPrincipalsCommand` depuis OpenSSH 7.4.
+`ExposeAuthInfo yes` reste utile pour les sshd qui propagent `SSH_USER_AUTH`,
+mais n'est pas suffisant seul sur OpenSSH ≥ 9.8.
+
+|                 |                 Score résiduel                  |
+| --------------- | :---------------------------------------------: |
+| **Probabilité** | 1 (avec politique de clés activée, fail-closed) |
+| **Impact**      |          3 (si clé faible compromise)           |
 
 ---
 
