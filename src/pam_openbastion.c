@@ -267,6 +267,45 @@ static int has_offline_session_marker(const char *user)
 #endif /* ENABLE_DESKTOP_SSO */
 
 /*
+ * Re-adopt the identity (inode + mtime) of the server token file.
+ *
+ * verify_token_file_security() treats an inode change as a security violation,
+ * and data->token_file_inode is otherwise recorded only once, when the handle
+ * loads the token. But the token file is legitimately replaced by rename():
+ * both the ob-heartbeat timer (every 5 minutes, i.e. exactly
+ * TOKEN_RECHECK_INTERVAL) and our own refresh_server_token_on_demand() persist
+ * that way. A long-lived PAM handle would therefore lock itself out on the next
+ * periodic re-verification — the on-demand refresh poisoning the very handle it
+ * had just healed. Call this after deliberately adopting a new on-disk token so
+ * the recorded identity follows the file we chose to trust.
+ */
+static void readopt_token_file_identity(pam_handle_t *pamh,
+                                        pam_openbastion_data_t *data)
+{
+    if (!data || !data->config.server_token_file) {
+        return;
+    }
+
+    int fd = open(data->config.server_token_file, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        OB_LOG_WARN(pamh, "Cannot re-adopt token file %s after refresh",
+                    data->config.server_token_file);
+        return;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) == 0) {
+        data->token_file_inode = st.st_ino;
+        data->token_file_mtime = st.st_mtime;
+        data->last_token_check = time(NULL);
+    } else {
+        OB_LOG_WARN(pamh, "Cannot stat token file %s after refresh",
+                    data->config.server_token_file);
+    }
+    close(fd);
+}
+
+/*
  * Security: Re-verify token file permissions periodically (fixes #46)
  * Returns 0 if OK, -1 if security violation detected
  */
@@ -2238,6 +2277,9 @@ static int refresh_server_token_on_demand(pam_handle_t *pamh,
     rc = 0;
 
 out:
+    if (rc == 0) {
+        readopt_token_file_identity(pamh, data);
+    }
     token_info_free(&ti);
     return rc;
 }

@@ -113,6 +113,10 @@ ctest --output-on-failure --verbose
 %dir %{_datadir}/open-bastion/audit/cron.daily
 %{_datadir}/open-bastion/audit/rules.d/open-bastion.rules
 %{_datadir}/open-bastion/audit/cron.daily/open-bastion-audit-rotate
+# logrotate template for the JSON audit log (the admin copies it into
+# /etc/logrotate.d/; not %config, since audit_log_file is configurable)
+%dir %{_datadir}/open-bastion/logrotate
+%{_datadir}/open-bastion/logrotate/open-bastion
 %{_unitdir}/ob-heartbeat.service
 %{_unitdir}/ob-heartbeat.timer
 %{_unitdir}/ob-cert.socket

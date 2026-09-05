@@ -17,6 +17,21 @@ sudo journalctl -u sshd -f
 `pam_openbastion` logs to the `authpriv` facility, so its detailed messages are
 only visible to root / the `adm` group.
 
+Audit events (`audit_to_syslog = true`) go to the `auth` facility under the same
+`pam_openbastion` ident, so one filter catches both:
+
+```bash
+# Module messages and audit events together
+sudo journalctl -t pam_openbastion -f
+sudo grep pam_openbastion /var/log/auth.log
+
+# The structured JSON trail, if audit_log_file is set
+sudo tail -f /var/log/open-bastion/audit.json
+```
+
+Before 0.6.3 the audit events used the pre-rename `pam_llng` ident, so on an
+older host grep for that instead.
+
 ## Enable debug mode
 
 In `/etc/open-bastion/openbastion.conf`:
