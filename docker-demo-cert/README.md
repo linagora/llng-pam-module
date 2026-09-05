@@ -273,7 +273,8 @@ docker exec ob-cert-backend-new sed -i 's/^group:.*/group:          files openba
 ```bash
 docker exec ob-cert-backend-new tee /etc/pam.d/sshd << 'EOF'
 # PAM configuration for SSH with Open Bastion
-auth       required     pam_permit.so
+# auth denies: certificate logins never reach pam_authenticate()
+auth       required     pam_deny.so
 account    required     pam_openbastion.so
 session    required     pam_openbastion.so create_user=true
 session    required     pam_unix.so
@@ -439,7 +440,7 @@ auth_cache_enabled = true
 And `/etc/pam.d/sshd`:
 
 ```
-auth       required     pam_permit.so
+auth       required     pam_deny.so
 account    required     pam_openbastion.so
 session    required     pam_unix.so
 ```

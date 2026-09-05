@@ -5,10 +5,14 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); echo "  PASS: $1"; }
 fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 run_test() { TESTS_RUN=$((TESTS_RUN + 1)); "$@"; }
+
+# shellcheck source=tests/lib_pam_stack.sh
+. "$TESTS_DIR/lib_pam_stack.sh"
 
 source_script() {
     local script="$1"
@@ -365,6 +369,34 @@ test_sudoers_rule_is_valid() {
     rm -f "$tmp"
 }
 
+# ── Test 21: the generated sshd PAM auth stack is fail-closed (#180) ──
+# A bare "auth required pam_permit.so" made pam_authenticate() succeed for any
+# password if sshd ever ran the stack (PasswordAuthentication /
+# KbdInteractiveAuthentication yes with UsePAM yes). The stack now denies
+# outright: sshd never calls pam_authenticate() for a certificate login, so the
+# only thing that reaches it is a password/keyboard-interactive attempt.
+# tests/test_ob_pam_runtime.sh proves the denial by running the stack.
+test_pam_sshd_fail_closed() {
+    local out
+    out=$(
+        source_script "ob-bastion-setup"
+        parse_args -p "https://x" --dry-run
+        configure_pam_sshd 2>&1
+    )
+    assert_auth_stack_denies "generated /etc/pam.d/sshd auth stack denies" "$out"
+}
+
+# ── Test 22: the Mode E sudo stack keeps its pam_deny backstop (#180) ──
+test_pam_sudo_max_security_fail_closed() {
+    local out
+    out=$(
+        source_script "ob-bastion-setup"
+        parse_args -p "https://x" --max-security --dry-run
+        configure_max_security_sudo 2>&1
+    )
+    assert_auth_stack_fail_closed "generated Mode E /etc/pam.d/sudo auth stack is fail-closed" "$out"
+}
+
 # ── Run all tests ──
 echo "=== Testing ob-bastion-setup ==="
 run_test test_syntax
@@ -389,6 +421,9 @@ run_test test_portal_url_rejects_metacharacters
 run_test test_portal_url_accepts_normal
 run_test test_sudoers_validated_before_install
 run_test test_sudoers_rule_is_valid
+
+run_test test_pam_sshd_fail_closed
+run_test test_pam_sudo_max_security_fail_closed
 
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed ==="

@@ -470,8 +470,10 @@ ob-enroll -g production
 
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
-# Authentication: Accept from bastion (SSH keys)
-auth       required     pam_permit.so
+# Authentication: denied. SSH keys/certs are checked by sshd, which does not
+# call pam_authenticate() on that path; only password/keyboard-interactive
+# authentication reaches this stack, and it is refused.
+auth       required     pam_deny.so
 
 # Authorization: LLNG required
 account    required     pam_openbastion.so

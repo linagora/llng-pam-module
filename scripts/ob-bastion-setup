@@ -503,8 +503,11 @@ configure_pam_sshd() {
 # Authorization: LLNG checks if user can access this bastion
 # Session: Standard Unix session handling
 
-# Authentication - permit (handled by SSH certs)
-auth       required     pam_permit.so
+# Authentication - refused. SSH certificates are validated by sshd, which never
+# calls pam_authenticate() on the pubkey/certificate path, so this stack is only
+# reached by password or keyboard-interactive authentication - neither of which
+# this mode allows. pam_deny returns PAM_AUTH_ERR (authentication failure).
+auth       required     pam_deny.so
 
 # Authorization - check with LLNG (certificate-aware mode)
 account    required     pam_openbastion.so ssh_cert_aware=true
