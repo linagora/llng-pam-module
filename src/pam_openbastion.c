@@ -979,10 +979,11 @@ static int sync_user_groups(pam_handle_t *pamh,
 /*
  * Invalidate the NSS module's own passwd file cache for a single user.
  *
- * Historically this forked `nscd --invalidate`, but nscd has been dropped
- * (it loaded our multithreaded curl/TLS NSS module and crashed with SIGABRT
- * in the NSS path). The NSS module (libnss_openbastion) now maintains its own
- * cross-process file cache under /var/cache/nss_llng:
+ * Historically this forked `nscd --invalidate`. nscd has been dropped: the NSS
+ * module (libnss_openbastion) keeps its own in-memory and cross-process file
+ * cache under /var/cache/nss_llng, which makes a separate caching daemon
+ * redundant, and nscd is deprecated upstream and absent from modern
+ * distributions. The file cache is laid out as:
  *   - per-name entries: /var/cache/nss_llng/byname/<name>
  *   - per-uid  entries: /var/cache/nss_llng/<uid>
  * Removing the relevant entries here makes a freshly created user or a changed
@@ -992,41 +993,88 @@ static int sync_user_groups(pam_handle_t *pamh,
  * The module serves passwd only (getpwnam/getpwuid); it does not implement the
  * group database, so there are no group-cache files to invalidate.
  *
- * Security: this runs as root and the cache dir is root-owned 0755. The
- * username is validated (same rules as validate_username) before being used as
- * a path component, and every path is built with a bounds-checked snprintf.
- * unlink()/unlinkat() do not follow a symlink on the final path component, so
- * removal is confined to the cache directory. Operating purely by path means
- * this is a harmless no-op when the cache files (or the directory) are absent,
- * so it introduces no hard dependency on the NSS module being installed.
+ * Security: this runs as root. Removal is done with unlinkat() relative to a
+ * directory fd opened with O_DIRECTORY|O_NOFOLLOW and verified by fstat() to be
+ * a root-owned, non-group/world-writable directory — the same discipline the
+ * NSS side uses. The `byname` subdirectory is reached with openat() from the
+ * verified parent fd, again O_NOFOLLOW and re-verified, so no component of the
+ * path (not just the final one) can be swapped for a symlink between the check
+ * and the unlink. The username is validated (same rules as validate_username)
+ * before being used as a path component, and every leaf is built with a
+ * bounds-checked snprintf. Everything is a harmless no-op when the cache files
+ * or directories are absent, so this introduces no hard dependency on the NSS
+ * module being installed.
  *
  * When have_uid is non-zero, the per-uid entry for `uid` is also removed.
  */
 #define OB_NSS_CACHE_DIR "/var/cache/nss_llng"
+#define OB_NSS_CACHE_BYNAME "byname"
+
+/*
+ * Open `name` relative to `parentfd` (or as an absolute path when parentfd is
+ * AT_FDCWD) as a directory, refusing symlinks, and verify it is root-owned and
+ * not group/world-writable. Returns a fd the caller must close, or -1.
+ */
+static int open_verified_cache_dir(int parentfd, const char *name)
+{
+    int dfd = openat(parentfd, name,
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) {
+        /* ENOENT (no cache yet) and ELOOP (symlink) are both silent no-ops. */
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(dfd, &st) != 0) {
+        close(dfd);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 ||
+        (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        syslog(LOG_WARNING,
+               "pam_openbastion: NSS cache directory %s is untrusted "
+               "(wrong owner or group/world-writable) - not invalidating", name);
+        close(dfd);
+        return -1;
+    }
+
+    return dfd;
+}
 
 static void invalidate_user_cache(const char *username, uid_t uid, int have_uid)
 {
-    char path[PATH_MAX];
+    char leaf[NAME_MAX + 1];
     int n;
+
+    int dirfd = open_verified_cache_dir(AT_FDCWD, OB_NSS_CACHE_DIR);
+    if (dirfd < 0) {
+        return;
+    }
 
     /* Remove the per-name entry, if a valid username is in scope. */
     if (username && validate_username(username)) {
-        n = snprintf(path, sizeof(path),
-                     OB_NSS_CACHE_DIR "/byname/%s", username);
-        if (n > 0 && (size_t)n < sizeof(path)) {
-            /* No-op (with ENOENT) if the file or cache dir is absent. */
-            unlink(path);
+        int bynamefd = open_verified_cache_dir(dirfd, OB_NSS_CACHE_BYNAME);
+        if (bynamefd >= 0) {
+            /* validate_username() caps the length well below NAME_MAX, but
+             * stay bounds-checked regardless. */
+            n = snprintf(leaf, sizeof(leaf), "%s", username);
+            if (n > 0 && (size_t)n < sizeof(leaf)) {
+                /* No-op (with ENOENT) if the entry is absent. */
+                unlinkat(bynamefd, leaf, 0);
+            }
+            close(bynamefd);
         }
     }
 
     /* Remove the per-uid entry when the uid is known. */
     if (have_uid) {
-        n = snprintf(path, sizeof(path),
-                     OB_NSS_CACHE_DIR "/%lu", (unsigned long)uid);
-        if (n > 0 && (size_t)n < sizeof(path)) {
-            unlink(path);
+        n = snprintf(leaf, sizeof(leaf), "%lu", (unsigned long)uid);
+        if (n > 0 && (size_t)n < sizeof(leaf)) {
+            unlinkat(dirfd, leaf, 0);
         }
     }
+
+    close(dirfd);
 }
 
 /*
