@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
+  instead of used with a warning** (offline auth cache, desktop SSO). Versions
+  up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`
+  used to document creating the key with
+  `dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1`, which under
+  root's default umask 022 produces a `0644` file — so hosts set up from that
+  recipe are affected. **Effect on upgrade:** the key is ignored, the cache key
+  falls back to machine-id derivation, and every *existing* offline cache entry
+  becomes undecryptable — a cache miss, not a failure: affected desktop SSO
+  users need one online re-authentication and the cache repopulates. There is no
+  lockout and no manual cache cleanup to do. **Remedy (restores the strong
+  derivation):** `chown root:root /etc/open-bastion/cache.key && chmod 600
+  /etc/open-bastion/cache.key`. The rejection is logged to syslog with that
+  exact command. `ob-desktop-setup` has always created the key `0600`, so hosts
+  set up with it are unaffected.
+
 ### Fixed
+
+- **A server-supplied `gid` is no longer validated against the synthetic UID
+  range.** The NSS module briefly checked the portal's `gid` (an LDAP
+  `gidNumber` exported via `pamAccessExportedVars`) against
+  `[min_uid, max_uid]` — default `[10000, 60000]` — so an ordinary group such as
+  `1000` fell outside it and was silently replaced by `default_gid`. GIDs now
+  have their own policy range, `min_gid`/`max_gid` in
+  `nss_openbastion.conf`, defaulting to `[1000, 65533]`: the Debian/RHEL
+  boundary between system groups (`SYS_GID_MAX=999`) and user groups
+  (`GID_MIN=1000`). `gid 0` and `nogroup` are refused whatever the
+  configuration says. An out-of-policy gid is replaced by `default_gid` and
+  logged to syslog with the offending value — never silently.
 
 - **A rejected `/pam/verify` token now fails cleanly instead of looking like a
   server outage.** On any negative verdict — expired or invalid one-time token,
