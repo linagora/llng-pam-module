@@ -4,11 +4,7 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
-    # `fix/nss-name-file-cache` is the base of the stacked PR #175: without it
-    # here, retargeting that PR onto its dependency silently disables CI for it
-    # (no checks reported at all). Drop this entry once #174 is merged and #175
-    # is retargeted back onto main.
-    branches: [ main, desktop-sso, fix/nss-name-file-cache ]
+    branches: [ main, desktop-sso ]
 
 # Restrict GITHUB_TOKEN permissions to read-only by default
 permissions:
