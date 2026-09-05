@@ -34,6 +34,7 @@ debian/open-bastion-dbgsym/
 debian/open-bastion-builder/
 debian/*.debhelper.log
 debian/*.substvars
+debian/*.postinst.debhelper
 debian/*.postrm.debhelper
 debian/debhelper-build-stamp
 debian/files
@@ -47,3 +48,7 @@ local/
 # Local libvirt lab: VM disk images, seeds and the mkvm helper are
 # machine-local scratch, never part of the source archive.
 local-test/vm/
+
+# Verification build trees (doc/CONTRIBUTING build-and-test recipes)
+build-verify/
+build-asan/
