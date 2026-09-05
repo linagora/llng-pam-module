@@ -332,6 +332,7 @@ Le module NSS (`libnss_openbastion.so`) fournit la résolution des utilisateurs 
 - **Protection contre les débordements de tampon** : Toutes les copies de chaînes utilisent `safe_strcpy()` avec vérification des limites
 - **Validation des entrées serveur** : Les chemins de shell et de répertoire personnel provenant du serveur sont validés par rapport aux listes approuvées
 - **Contrôle de la plage d'UID** : Les UID fournis par le serveur doivent être dans la plage min_uid/max_uid configurée
+- **Contrôle de la plage de GID** : Le GID primaire fourni par le serveur doit être dans la plage `min_gid`/`max_gid` configurée (par défaut `[1000, 65533]`, la frontière Debian/RHEL entre groupes système et groupes utilisateur). Les GID 0 et `nogroup` sont refusés inconditionnellement : un portail compromis ou mal configuré ne peut pas attribuer aux utilisateurs SSO un groupe primaire équivalent à root (`root`, `sudo`, `wheel`, `shadow`, `docker`). Un GID hors politique retombe sur `default_gid` avec un avertissement syslog (repli plutôt qu'échec : un GID erroné ne doit pas provoquer un blocage NSS sur tout l'hôte)
 - **Sécurité par défaut** : Retourne les codes d'erreur appropriés en cas d'échec ; les chemins invalides se replient sur les valeurs par défaut
 
 ### Manipulation Directe de /etc/passwd et /etc/shadow

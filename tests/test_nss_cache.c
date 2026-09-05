@@ -196,6 +196,82 @@ static int test_trim_empty_is_not_ub(void)
 }
 
 /*
+ * Regression test for the review of PR #222: a server-supplied gid must not be
+ * validated against the *synthetic UID* range. An ordinary LDAP gidNumber
+ * (1000 = a Debian user-private group, 5000, ...) falls outside
+ * [min_uid, max_uid] = [10000, 60000] and used to be silently replaced by
+ * default_gid - a silent permission change on shared files.
+ *
+ * Drives the shipped select_primary_gid() through the real g_config.
+ */
+static int check_gid(const char *json_text, gid_t expect, const char *what)
+{
+    struct json_object *json = json_tokener_parse(json_text);
+    if (!json) {
+        fprintf(stderr, "\n    %s: unparseable test JSON\n", what);
+        return 0;
+    }
+    gid_t got = select_primary_gid(json, "someuser");
+    json_object_put(json);
+    if (got != expect) {
+        fprintf(stderr, "\n    %s: got gid %u, expected %u\n",
+                what, (unsigned)got, (unsigned)expect);
+        return 0;
+    }
+    return 1;
+}
+
+static int test_server_gid_policy(void)
+{
+    /* Production defaults, as load_config() would set them. */
+    g_config.min_uid = DEFAULT_MIN_UID;      /* 10000 */
+    g_config.max_uid = DEFAULT_MAX_UID;      /* 60000 */
+    g_config.min_gid = DEFAULT_MIN_GID;      /* 1000  */
+    g_config.max_gid = DEFAULT_MAX_GID;      /* 65533 */
+    g_config.default_gid = 100;
+
+    int ok = 1;
+
+    /* THE regression: an ordinary gidNumber survives unchanged even though it
+     * is far outside the synthetic UID range. */
+    ok &= check_gid("{\"gid\":1000}", 1000, "gidNumber 1000 survives");
+    ok &= check_gid("{\"gid\":5000}", 5000, "gidNumber 5000 survives");
+    /* Inside the UID range too - must still be taken verbatim. */
+    ok &= check_gid("{\"gid\":50000}", 50000, "gidNumber 50000 survives");
+    /* Upper bound of the policy. */
+    ok &= check_gid("{\"gid\":65533}", 65533, "max_gid boundary survives");
+
+    /* What the check actually exists for. */
+    ok &= check_gid("{\"gid\":0}", 100, "gid 0 (root) refused");
+    ok &= check_gid("{\"gid\":27}", 100, "gid 27 (sudo) refused");
+    ok &= check_gid("{\"gid\":10}", 100, "gid 10 (wheel) refused");
+    ok &= check_gid("{\"gid\":998}", 100, "dynamic system gid (docker) refused");
+    ok &= check_gid("{\"gid\":65534}", 100, "gid 65534 (nogroup) refused");
+    ok &= check_gid("{\"gid\":-1}", 100, "negative gid refused");
+
+    /* Absent or non-integer gid keeps the pre-existing fallback. */
+    ok &= check_gid("{}", 100, "missing gid falls back to default_gid");
+    ok &= check_gid("{\"gid\":\"users\"}", 100, "string gid falls back to default_gid");
+
+    /* gid 0 is refused even if an admin widens min_gid all the way down. */
+    g_config.min_gid = 0;
+    ok &= check_gid("{\"gid\":0}", 100, "gid 0 refused even with min_gid=0");
+    /* min_gid=0 is nonsense and must not mean "reject everything": the
+     * compiled policy applies instead, so 1000 still survives. */
+    ok &= check_gid("{\"gid\":1000}", 1000, "gidNumber 1000 survives min_gid=0");
+
+    /* A site that legitimately exports gid 100 (users) can lower the floor. */
+    g_config.min_gid = 100;
+    g_config.default_gid = 65533;   /* distinct, so a fallback is visible */
+    ok &= check_gid("{\"gid\":100}", 100, "min_gid=100 admits gid 100");
+    ok &= check_gid("{\"gid\":27}", 65533, "min_gid=100 still refuses gid 27");
+
+    g_config.min_gid = DEFAULT_MIN_GID;
+    g_config.default_gid = 100;
+    return ok;
+}
+
+/*
  * file_cache_save() writes the shared uid -> passwd cache under CACHE_DIR.
  * Only root may do so: an NSS module is loaded into every process that
  * resolves a user, so an unprivileged caller must never be able to create or
@@ -275,6 +351,14 @@ int main(void)
 
     printf("  Testing trim_empty_is_not_ub... ");
     if (test_trim_empty_is_not_ub()) {
+        printf("PASS\n");
+    } else {
+        printf("FAIL\n");
+        ok = 0;
+    }
+
+    printf("  Testing server_gid_policy... ");
+    if (test_server_gid_policy()) {
         printf("PASS\n");
     } else {
         printf("FAIL\n");

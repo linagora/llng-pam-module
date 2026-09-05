@@ -63,6 +63,37 @@
 /* Reserved UID for 'nobody' user - must never be assigned */
 #define NOBODY_UID 65534
 
+/*
+ * Policy range for a *server-supplied* primary GID (the `gid` key of
+ * pamAccessExportedVars, typically an LDAP gidNumber).
+ *
+ * This is deliberately NOT the synthetic [min_uid, max_uid] range: those bounds
+ * exist so generate_unique_uid() can mint UIDs that cannot collide with local
+ * accounts, and an LDAP gidNumber has no reason to live there. Validating a gid
+ * against them replaces every ordinary group (1000, 5000, a Debian user-private
+ * group) with default_gid - a silent permission change on shared files.
+ *
+ * The line that matters is system group vs. user group:
+ *   - Debian login.defs / adduser: SYS_GID_MIN=100, SYS_GID_MAX=999, GID_MIN=1000
+ *   - RHEL/Fedora login.defs:      system groups <= 999, GID_MIN=1000
+ *   - this module already refuses a min_uid below 1000 in generate_unique_uid()
+ *     "to protect system UIDs" - the same boundary, applied to groups.
+ *
+ * So the default floor is 1000. It covers the whole static band (root=0, adm=4,
+ * disk=6, wheel=10, sudo=27, shadow=42, staff=50) *and* the dynamic band where
+ * `docker`, `lxd` or `libvirt` land on Debian (adduser --system allocates from
+ * 100-999) - a "< 100" cut would let `docker` through, which is a root
+ * equivalent. Sites that legitimately export a low gidNumber (e.g. 100/users)
+ * can lower min_gid in nss_openbastion.conf.
+ *
+ * GID 0 is rejected unconditionally, whatever min_gid says.
+ */
+#define DEFAULT_MIN_GID 1000
+#define DEFAULT_MAX_GID 65533
+
+/* Reserved GID for 'nogroup'/'nobody' - must never be assigned */
+#define NOBODY_GID 65534
+
 /* Recursion guard - prevent infinite loops when NSS calls trigger more NSS lookups */
 static __thread int g_in_nss_lookup = 0;
 
@@ -79,6 +110,8 @@ typedef struct {
     char *default_home_base;
     uid_t min_uid;
     uid_t max_uid;
+    gid_t min_gid;                /* policy range for a server-supplied gid */
+    gid_t max_gid;
     gid_t default_gid;
     char *service_accounts_file;  /* Local service accounts config */
 } nss_llng_config_t;
@@ -491,6 +524,8 @@ static int load_config(nss_llng_config_t *config)
     config->cache_ttl = CACHE_TTL;
     config->min_uid = DEFAULT_MIN_UID;
     config->max_uid = DEFAULT_MAX_UID;
+    config->min_gid = DEFAULT_MIN_GID;
+    config->max_gid = DEFAULT_MAX_GID;
     config->default_gid = 100;  /* users group */
 
     char line[1024];
@@ -554,6 +589,18 @@ static int load_config(nss_llng_config_t *config)
             uid_t max_uid;
             if (safe_parse_uid(value, &max_uid) == 0) {
                 config->max_uid = max_uid;
+            }
+        }
+        else if (strcmp(key, "min_gid") == 0) {
+            gid_t min_gid;
+            if (safe_parse_gid(value, &min_gid) == 0) {
+                config->min_gid = min_gid;
+            }
+        }
+        else if (strcmp(key, "max_gid") == 0) {
+            gid_t max_gid;
+            if (safe_parse_gid(value, &max_gid) == 0) {
+                config->max_gid = max_gid;
             }
         }
         else if (strcmp(key, "default_gid") == 0) {
@@ -1153,6 +1200,70 @@ static int query_service_account(const char *username, struct passwd *pw,
     return 0;
 }
 
+/*
+ * Is a server-supplied primary GID acceptable?
+ *
+ * Returns 0 when the gid may be used verbatim, -1 when it must be replaced by
+ * the locally configured default_gid. See DEFAULT_MIN_GID for why the bound is
+ * a group policy of its own and not the synthetic [min_uid, max_uid] range.
+ *
+ * gid 0 and nogroup are refused whatever the configuration says: the whole
+ * point of the check is that a compromised or misconfigured portal must not be
+ * able to hand every SSO user a root-equivalent primary group.
+ */
+static int gid_in_policy(gid_t gid, gid_t min_gid, gid_t max_gid)
+{
+    if (gid == 0 || gid == (gid_t)NOBODY_GID) {
+        return -1;
+    }
+    /* Unset or nonsensical configuration: fall back to the compiled policy
+     * rather than to "reject everything" (config may not have been loaded). */
+    if (max_gid == 0 || min_gid > max_gid) {
+        min_gid = DEFAULT_MIN_GID;
+        max_gid = DEFAULT_MAX_GID;
+    }
+    return (gid < min_gid || gid > max_gid) ? -1 : 0;
+}
+
+/*
+ * Pick the primary GID for a user out of the portal's JSON answer.
+ *
+ * Deliberate asymmetry with the UID: an out-of-policy uid fails the whole
+ * lookup, an out-of-policy gid falls back to default_gid *with a syslog
+ * warning*. The uid is identity - a wrong one means wrong file ownership and
+ * wrong audit attribution, so refusing to answer is right. The gid only selects
+ * an access set: failing the lookup would turn one bad pamAccessExportedVars
+ * entry into NSS_STATUS_NOTFOUND for every SSO user on the host (and OpenSSH
+ * refuses to start at all when getpwuid() fails - "You don't exist, go away!").
+ * Degrading to a locally-chosen group is strictly safer than a fleet lockout,
+ * and the function already falls back for a missing or non-integer gid.
+ * The fallback is never silent, which was the substance of the review.
+ */
+static gid_t select_primary_gid(struct json_object *json, const char *username)
+{
+    struct json_object *val;
+
+    if (!json_object_object_get_ex(json, "gid", &val) ||
+        !json_object_is_type(val, json_type_int)) {
+        return g_config.default_gid;
+    }
+
+    gid_t gid = (gid_t)json_object_get_int(val);
+    if (gid_in_policy(gid, g_config.min_gid, g_config.max_gid) == 0) {
+        return gid;
+    }
+
+    syslog(LOG_WARNING,
+           "libnss_openbastion: server-supplied gid %u for user %s is outside "
+           "the allowed group range [%u, %u] (or is a reserved gid) - using "
+           "default_gid %u instead; adjust min_gid/max_gid in "
+           "nss_openbastion.conf if this gid is legitimate",
+           (unsigned)gid, username,
+           (unsigned)g_config.min_gid, (unsigned)g_config.max_gid,
+           (unsigned)g_config.default_gid);
+    return g_config.default_gid;
+}
+
 /* Query LLNG server for user info */
 static int query_llng_userinfo(const char *username, struct passwd *pw,
                                 char *buffer, size_t buflen)
@@ -1344,29 +1455,9 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         }
     }
 
-    /* GID - only use if it's actually an integer, and only within the same
-     * range the UID is validated against. An unvalidated server-supplied gid is
-     * the more dangerous of the two: gid 0 (or any system group such as sudo,
-     * adm, docker, shadow) would silently grant the SSO user that group's
-     * privileges on every host. Out-of-range values fall back to the locally
-     * configured default_gid rather than failing the lookup, so a bad answer
-     * from the portal degrades instead of locking users out. */
-    if (json_object_object_get_ex(json, "gid", &val) &&
-        json_object_is_type(val, json_type_int)) {
-        gid_t gid = (gid_t)json_object_get_int(val);
-        if (gid < (gid_t)g_config.min_uid || gid > (gid_t)g_config.max_uid ||
-            gid == (gid_t)NOBODY_UID) {
-            syslog(LOG_WARNING,
-                   "libnss_openbastion: server returned out-of-range gid %u for user %s "
-                   "- using default_gid %u",
-                   (unsigned)gid, username, (unsigned)g_config.default_gid);
-            pw->pw_gid = g_config.default_gid;
-        } else {
-            pw->pw_gid = gid;
-        }
-    } else {
-        pw->pw_gid = g_config.default_gid;
-    }
+    /* GID - an ordinary LDAP gidNumber must survive verbatim; only genuinely
+     * dangerous groups are refused. See select_primary_gid(). */
+    pw->pw_gid = select_primary_gid(json, username);
 
     /* GECOS - sanitize to remove dangerous characters */
     pw->pw_gecos = p;

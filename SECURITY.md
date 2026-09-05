@@ -312,6 +312,14 @@ The NSS module (`libnss_openbastion.so`) provides user resolution:
 - **Buffer overflow protection**: All string copies use bounds-checked `safe_strcpy()`
 - **Server input validation**: Shell and home paths from server are validated against approved lists
 - **UID range enforcement**: Server-provided UIDs must be within configured min_uid/max_uid range
+- **GID policy enforcement**: A server-provided primary GID must be within the
+  configured `min_gid`/`max_gid` range (default `[1000, 65533]`, the Debian/RHEL
+  system-group vs. user-group boundary). `gid 0` and `nogroup` are refused
+  unconditionally, so a compromised or misconfigured portal cannot hand SSO users
+  a root-equivalent primary group (`root`, `sudo`, `wheel`, `shadow`, `docker`).
+  An out-of-policy GID falls back to `default_gid` and is logged to syslog
+  (falling back rather than failing the lookup: a bad GID must not turn into a
+  host-wide NSS lockout)
 - **Fail-safe**: Returns appropriate error codes on any failure; invalid paths fall back to defaults
 
 ### Direct /etc/passwd and /etc/shadow Manipulation
