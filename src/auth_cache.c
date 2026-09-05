@@ -35,7 +35,7 @@
 /* Use shared JSON strdup utility */
 #define safe_json_strdup str_json_strdup
 
-/* Encryption constants (same as token_cache) */
+/* Encryption constants */
 #define MACHINE_ID_FILE "/etc/machine-id"
 #define KEY_SIZE 32
 #define IV_SIZE 12

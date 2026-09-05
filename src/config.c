@@ -54,15 +54,11 @@ static int check_file_permissions_fd(int fd)
 
 /* Default values */
 #define DEFAULT_TIMEOUT                 10
-#define DEFAULT_CACHE_TTL               300
-#define DEFAULT_CACHE_TTL_HIGH_RISK     60
-#define DEFAULT_CACHE_DIR               "/var/cache/open-bastion"
 #define DEFAULT_AUTH_CACHE_DIR          "/var/cache/open-bastion/auth"
 #define DEFAULT_AUTH_CACHE_FORCE_ONLINE "/etc/open-bastion/force_online"
 #define DEFAULT_SERVER_GROUP            "default"
 #define DEFAULT_AUDIT_LOG_FILE          "/var/log/open-bastion/audit.json"
 #define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/open-bastion/ratelimit"
-#define DEFAULT_KEYRING_NAME            "open-bastion"
 
 /* TLS version constants for min_tls_version configuration */
 #define TLS_VERSION_1_2 12
@@ -77,14 +73,6 @@ void config_init(pam_openbastion_config_t *config)
     config->verify_ssl = true;
     config->log_level = 1;  /* warn */
     config->min_tls_version = TLS_VERSION_1_3;  /* TLS 1.3 by default */
-
-    /* Cache settings */
-    config->cache_enabled = true;
-    config->cache_ttl = DEFAULT_CACHE_TTL;
-    config->cache_ttl_high_risk = DEFAULT_CACHE_TTL_HIGH_RISK;
-    config->cache_dir = strdup(DEFAULT_CACHE_DIR);
-    config->cache_encrypted = true;  /* Encrypted by default */
-    config->cache_invalidate_on_logout = true;  /* Invalidate on logout by default */
 
     /* Authorization cache settings (for offline mode) */
     config->auth_cache_enabled = true;
@@ -116,8 +104,6 @@ void config_init(pam_openbastion_config_t *config)
 
     /* Secret storage - secure defaults */
     config->secrets_encrypted = true;
-    config->secrets_use_keyring = true;
-    config->secrets_keyring_name = strdup(DEFAULT_KEYRING_NAME);
 
     /* Webhooks - disabled by default */
     config->notify_enabled = false;
@@ -203,10 +189,6 @@ void config_free(pam_openbastion_config_t *config)
     free(config->ca_cert);
     free(config->cert_pin);
 
-    /* Cache settings */
-    free(config->cache_dir);
-    free(config->high_risk_services);
-
     /* Authorization cache settings */
     free(config->auth_cache_dir);
     free(config->auth_cache_force_online);
@@ -222,9 +204,6 @@ void config_free(pam_openbastion_config_t *config)
 
     /* Rate limiting settings */
     free(config->rate_limit_state_dir);
-
-    /* Secret storage */
-    free(config->secrets_keyring_name);
 
     /* Webhooks */
     free(config->notify_url);
@@ -417,28 +396,6 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "cert_pin") == 0) {
         SET_STRING_FIELD(config->cert_pin, value, key);
     }
-    /* Cache settings */
-    else if (strcmp(key, "cache_enabled") == 0 || strcmp(key, "cache") == 0) {
-        config->cache_enabled = parse_bool(value);
-    }
-    else if (strcmp(key, "cache_dir") == 0) {
-        SET_STRING_FIELD(config->cache_dir, value, key);
-    }
-    else if (strcmp(key, "cache_ttl") == 0) {
-        config->cache_ttl = parse_int(value, DEFAULT_CACHE_TTL, 0, 86400);
-    }
-    else if (strcmp(key, "cache_ttl_high_risk") == 0) {
-        config->cache_ttl_high_risk = parse_int(value, DEFAULT_CACHE_TTL_HIGH_RISK, 0, 86400);
-    }
-    else if (strcmp(key, "high_risk_services") == 0) {
-        SET_STRING_FIELD(config->high_risk_services, value, key);
-    }
-    else if (strcmp(key, "cache_encrypted") == 0) {
-        config->cache_encrypted = parse_bool(value);
-    }
-    else if (strcmp(key, "cache_invalidate_on_logout") == 0) {
-        config->cache_invalidate_on_logout = parse_bool(value);
-    }
     /* Authorization cache settings (offline mode) */
     else if (strcmp(key, "auth_cache_enabled") == 0 || strcmp(key, "auth_cache") == 0) {
         config->auth_cache_enabled = parse_bool(value);
@@ -512,12 +469,6 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     /* Secret storage settings */
     else if (strcmp(key, "secrets_encrypted") == 0) {
         config->secrets_encrypted = parse_bool(value);
-    }
-    else if (strcmp(key, "secrets_use_keyring") == 0 || strcmp(key, "use_keyring") == 0) {
-        config->secrets_use_keyring = parse_bool(value);
-    }
-    else if (strcmp(key, "secrets_keyring_name") == 0 || strcmp(key, "keyring_name") == 0) {
-        SET_STRING_FIELD(config->secrets_keyring_name, value, key);
     }
     /* Webhook settings */
     else if (strcmp(key, "notify_enabled") == 0 || strcmp(key, "notify") == 0) {
@@ -800,12 +751,6 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
         else if (strcmp(arg, "authorize_only") == 0) {
             config->authorize_only = true;
         }
-        else if (strcmp(arg, "no_cache") == 0 || strcmp(arg, "nocache") == 0) {
-            config->cache_enabled = false;
-        }
-        else if (strcmp(arg, "no_cache_encrypt") == 0 || strcmp(arg, "nocacheencrypt") == 0) {
-            config->cache_encrypted = false;
-        }
         else if (strcmp(arg, "no_auth_cache") == 0 || strcmp(arg, "noauthcache") == 0) {
             config->auth_cache_enabled = false;
         }
@@ -839,9 +784,6 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
         /* Secret storage flags */
         else if (strcmp(arg, "no_encrypt_secrets") == 0) {
             config->secrets_encrypted = false;
-        }
-        else if (strcmp(arg, "no_keyring") == 0 || strcmp(arg, "nokeyring") == 0) {
-            config->secrets_use_keyring = false;
         }
         /* User creation flags */
         else if (strcmp(arg, "create_user") == 0) {
