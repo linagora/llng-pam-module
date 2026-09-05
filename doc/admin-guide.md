@@ -441,9 +441,9 @@ chmod 644 /etc/open-bastion/nss_openbastion.conf
 
 #### NSS cache and LLNG outages
 
-`cache_ttl` is not only a load knob: since Open Bastion does not use `nscd`, it
-is the *only* thing standing between an LLNG outage and a host that can no
-longer resolve its users.
+`cache_ttl` is not only a load knob: on a host without `nscd` — the default,
+since it is no longer a dependency — it is the *only* thing standing between an
+LLNG outage and a host that can no longer resolve its users.
 
 The NSS module deliberately **never serves stale data**:
 
@@ -513,12 +513,17 @@ confused with it:
 
 sed -i 's/^passwd:.*/passwd: files openbastion/' /etc/nsswitch.conf
 
-# No name-service cache daemon is required or wanted. The NSS module keeps its
-# own in-memory and on-disk cache (/var/cache/nss_llng), so nscd would only
-# add a redundant second cache in front of it -- and nscd is deprecated
-# upstream and absent from modern distributions. PAM invalidates the module's
-# file cache directly when users or group memberships change, so the new
-# resolver takes effect immediately.
+# No name-service cache daemon is required. The NSS module keeps its own
+# in-memory and on-disk cache (/var/cache/nss_llng), so nscd would only add a
+# redundant second cache in front of it -- and nscd is deprecated upstream and
+# absent from modern distributions. PAM invalidates the module's file cache
+# directly when users or group memberships change, so the new resolver takes
+# effect immediately.
+#
+# Keeping nscd is still supported: it is no longer a dependency, but it is not
+# disabled either, and PAM still runs `nscd --invalidate passwd group` when the
+# binary is present -- which matters, because nscd also caches the *group*
+# database this module does not implement.
 # See "NSS cache and LLNG outages" below for the cache_ttl trade-off.
 ```
 

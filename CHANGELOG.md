@@ -40,12 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in this module's NSS path; that was a double-free in the module itself and
   was fixed in 0.6.1 — it is no longer a reason to avoid `nscd`, only the
   reason the redundancy was noticed.)
-- **The PAM module no longer forks `nscd --invalidate`.** It invalidates the NSS
-  module's own file-cache entries directly (by name, and by uid for newly
-  created users), so user and group-membership changes stay visible
-  immediately. Entries are removed with `unlinkat()` relative to directory
-  file descriptors opened `O_NOFOLLOW` and verified root-owned, so no path
-  component can be swapped for a symlink.
+- **The PAM module now invalidates the NSS module's own file cache.** It removes
+  the entries directly (by name, and by uid for newly created users), so user
+  and group-membership changes stay visible immediately. Entries are removed
+  with `unlinkat()` relative to directory file descriptors opened `O_NOFOLLOW`
+  and verified root-owned, so no path component can be swapped for a symlink.
+  The `nscd --invalidate passwd group` fork is **kept as well**, best-effort,
+  on hosts where `/usr/sbin/nscd` exists: this release does not disable `nscd`
+  on upgraded hosts, and where it still runs, glibc routes both `passwd` and
+  `group` through it. The module implements `passwd` only, so without that fork
+  a removal from `open-bastion-sudo` would have stayed cached by `nscd` for
+  `positive-time-to-live group` (3600 s on Debian) — turning an immediate sudo
+  revocation into a delay of up to an hour. Hosts without `nscd` installed pay
+  nothing: no binary, no fork.
 
 ### Changed
 

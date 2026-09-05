@@ -977,13 +977,21 @@ static int sync_user_groups(pam_handle_t *pamh,
 }
 
 /*
- * Invalidate the NSS module's own passwd file cache for a single user.
+ * Invalidate every cache that could still answer with the old passwd/group
+ * data for a single user: the NSS module's own file cache, and — on a host
+ * that still runs nscd — nscd's.
  *
- * Historically this forked `nscd --invalidate`. nscd has been dropped: the NSS
- * module (libnss_openbastion) keeps its own in-memory and cross-process file
- * cache under /var/cache/nss_llng, which makes a separate caching daemon
- * redundant, and nscd is deprecated upstream and absent from modern
- * distributions. The file cache is laid out as:
+ * The NSS module (libnss_openbastion) keeps its own in-memory and
+ * cross-process file cache under /var/cache/nss_llng, which makes a separate
+ * caching daemon redundant, and nscd is deprecated upstream and absent from
+ * modern distributions; that is why the packages no longer depend on it. But
+ * they no longer DISABLE it either (deliberately: see the postinst), so a host
+ * upgraded from an earlier release may well still be running it, and glibc
+ * then routes every passwd AND group lookup through the nscd socket. See
+ * invalidate_nscd_if_present() below for why dropping that fork would have
+ * delayed sudo revocation by up to an hour on exactly those hosts.
+ *
+ * The module's file cache is laid out as:
  *   - per-name entries: /var/cache/nss_llng/byname/<name>
  *   - per-uid  entries: /var/cache/nss_llng/<uid>
  * Removing the relevant entries here makes a freshly created user or a changed
@@ -991,7 +999,9 @@ static int sync_user_groups(pam_handle_t *pamh,
  * immediately, instead of waiting for the file-cache TTL to expire.
  *
  * The module serves passwd only (getpwnam/getpwuid); it does not implement the
- * group database, so there are no group-cache files to invalidate.
+ * group database, so there are no group-cache files to invalidate — group
+ * membership comes from /etc/group, which nscd (when present) does cache and
+ * which is why the nscd side invalidates both databases.
  *
  * Security: this runs as root. Removal is done with unlinkat() relative to a
  * directory fd opened with O_DIRECTORY|O_NOFOLLOW and verified by fstat() to be
@@ -1009,6 +1019,7 @@ static int sync_user_groups(pam_handle_t *pamh,
  */
 #define OB_NSS_CACHE_DIR "/var/cache/nss_llng"
 #define OB_NSS_CACHE_BYNAME "byname"
+#define OB_NSCD_BINARY "/usr/sbin/nscd"
 
 /*
  * Open `name` relative to `parentfd` (or as an absolute path when parentfd is
@@ -1041,7 +1052,64 @@ static int open_verified_cache_dir(int parentfd, const char *name)
     return dfd;
 }
 
-static void invalidate_user_cache(const char *username, uid_t uid, int have_uid)
+/*
+ * Best-effort `nscd --invalidate` for passwd and group, on hosts that still
+ * run nscd.
+ *
+ * Dropping the nscd dependency does not stop an upgraded host from running it,
+ * and the postinst deliberately does not disable it (an administrator may keep
+ * it for hosts/services, databases this package does not own). On such a host
+ * glibc consults the nscd socket first, for the group database as well as
+ * passwd — and this module only implements passwd, so its own file-cache
+ * invalidation above cannot reach a stale group entry. Debian's default
+ * `positive-time-to-live group` is 3600, so without this fork, removing a user
+ * from open-bastion-sudo would have stayed effective for up to an hour, where
+ * it used to take effect immediately. That is a security regression, not a
+ * performance one, so the historical fork stays.
+ *
+ * It costs nothing on the overwhelming majority of hosts: no nscd binary, no
+ * fork. The access() probe is an "is it worth trying" test, not a security
+ * check — the exec() is what actually decides — so its inherent raciness is
+ * irrelevant. Failures are ignored throughout: an absent or unresponsive nscd
+ * must never make a login or a group change fail.
+ *
+ * `nscd --invalidate` takes a single table, hence the two children; they are
+ * forked together and reaped together, as the pre-existing code did.
+ */
+static void invalidate_nscd_if_present(void)
+{
+    if (access(OB_NSCD_BINARY, X_OK) != 0) {
+        return;   /* nscd not installed: nothing routes through it */
+    }
+
+    static const char *const tables[2] = { "passwd", "group" };
+    pid_t pids[2] = { -1, -1 };
+
+    for (int i = 0; i < 2; i++) {
+        pids[i] = fork();
+        if (pids[i] == 0) {
+            int null_fd = open("/dev/null", O_WRONLY);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDOUT_FILENO);
+                dup2(null_fd, STDERR_FILENO);
+                close(null_fd);
+            }
+            execl(OB_NSCD_BINARY, "nscd", "--invalidate", tables[i], (char *)NULL);
+            _exit(0);
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        if (pids[i] > 0) {
+            int status;
+            waitpid(pids[i], &status, 0);
+        }
+    }
+}
+
+/* Clear the NSS module's own file-cache entries for `username` (and `uid`). */
+static void invalidate_module_file_cache(const char *username, uid_t uid,
+                                         int have_uid)
 {
     char leaf[NAME_MAX + 1];
     int n;
@@ -1075,6 +1143,15 @@ static void invalidate_user_cache(const char *username, uid_t uid, int have_uid)
     }
 
     close(dirfd);
+}
+
+static void invalidate_user_cache(const char *username, uid_t uid, int have_uid)
+{
+    invalidate_module_file_cache(username, uid, have_uid);
+    /* Unconditionally, and NOT inside the block above: a host can run nscd
+     * with no module file cache on disk yet (nothing resolved since boot), and
+     * that host still needs its group entry cleared. */
+    invalidate_nscd_if_present();
 }
 
 /*
