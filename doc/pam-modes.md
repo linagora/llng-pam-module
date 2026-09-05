@@ -138,13 +138,31 @@ TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedKeysFile none                           # No unsigned keys
 RevokedKeys /etc/ssh/revoked_keys                 # KRL mandatory
 ExposeAuthInfo yes                                # For certificate audit
-AuthorizedPrincipalsCommand /bin/echo %u          # Accept cert whose principal matches the Unix username
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f
 AuthorizedPrincipalsCommandUser nobody
 PermitRootLogin no
 ```
 
 `ob-bastion-setup --max-security` writes these settings automatically via an
 `Include` directive in `sshd_config`.
+
+> **Do not replace `ob-ssh-principals` with `/bin/echo %u`.** Earlier revisions
+> of this document showed that shortcut; it silently disables two controls:
+>
+> - `%f` is what feeds the [SSH fingerprint binding](#ssh-fingerprint-binding-on-pamauthorize-and-pamverify)
+>   (the helper drops it in `/run/open-bastion/ssh-fp/<pid>.fp` for
+>   `pam_openbastion` to read). With `/bin/echo` no fingerprint is ever
+>   captured, so the binding degrades to "not sent".
+> - On **backends** the helper is invoked with a third token,
+>   `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i`,
+>   and `%i` (the certificate key-id) is what carries `bastion=<id>`, checked
+>   against `/etc/open-bastion/allowed_bastions` **before PAM runs**. With
+>   `/bin/echo` any CA-signed certificate whose principal matches the login
+>   name is accepted, including a direct user SSO certificate that never went
+>   through a bastion.
+>
+> The helper is written to `/usr/local/sbin/ob-ssh-principals` at setup time by
+> `ob-bastion-setup` / `ob-backend-setup`; it is not shipped as a packaged file.
 
 ### PAM Configuration for sshd
 
@@ -355,7 +373,9 @@ TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedKeysFile none                           # No unsigned keys
 RevokedKeys /etc/ssh/revoked_keys                 # KRL mandatory
 ExposeAuthInfo yes
-AuthorizedPrincipalsCommand /bin/echo %u
+# Bastion: two tokens (%u %f). Backend: three (%u %f %i) — %i carries the
+# bastion= key-id checked against /etc/open-bastion/allowed_bastions.
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f
 AuthorizedPrincipalsCommandUser nobody
 PermitRootLogin no
 PermitEmptyPasswords no

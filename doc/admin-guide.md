@@ -234,6 +234,16 @@ ob-enroll -g bastion
 
 ### Step 5: Configure PAM
 
+> **This section describes a token-authenticated bastion (PAM
+> [Mode A](pam-modes.md#mode-a-llng-token-only-strictest)), not Mode E.**
+> Steps 5 and 6 deliberately enable `PasswordAuthentication` /
+> `KbdInteractiveAuthentication` so that sshd prompts for the LLNG token as a
+> "password". A **Mode E** bastion authenticates with SSO certificates instead
+> and must have both of those set to `no`; do not copy this PAM stack or this
+> `sshd_config` drop-in onto a Mode E host. For Mode E, skip to
+> [Mode E: Maximum Security Deployment](#mode-e-maximum-security-deployment),
+> which runs `ob-bastion-setup --max-security` and writes both files for you.
+
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
 # Authentication: LLNG only (no Unix passwords on bastion)
@@ -583,8 +593,13 @@ It performs all of the following automatically:
   - `AuthorizedKeysFile none`
   - `TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub`
   - `RevokedKeys /etc/ssh/revoked_keys`
-  - `AuthorizedPrincipalsCommand /bin/echo %u`
+  - `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f`
+    (`ob-backend-setup` adds a third token, `%i`, so the helper can check the
+    certificate key-id against `/etc/open-bastion/allowed_bastions`)
   - `AuthorizedPrincipalsCommandUser nobody`
+  - Writes the `ob-ssh-principals` helper itself to `/usr/local/sbin/` (it is
+    generated at setup time, not shipped in the package) together with its
+    `/run/open-bastion/ssh-fp` spool directory and a `/etc/tmpfiles.d` drop-in
   - `PermitRootLogin no`
   - `ExposeAuthInfo yes`
 - Writes `/etc/pam.d/sshd` and `/etc/pam.d/sudo` for Mode E
