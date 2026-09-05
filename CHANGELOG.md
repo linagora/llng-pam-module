@@ -16,14 +16,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1`, which under
   root's default umask 022 produces a `0644` file — so hosts set up from that
   recipe are affected. **Effect on upgrade:** the key is ignored, the cache key
-  falls back to machine-id derivation, and every *existing* offline cache entry
+  falls back to machine-id derivation, and every _existing_ offline cache entry
   becomes undecryptable — a cache miss, not a failure: affected desktop SSO
   users need one online re-authentication and the cache repopulates. There is no
   lockout and no manual cache cleanup to do. **Remedy (restores the strong
   derivation):** `chown root:root /etc/open-bastion/cache.key && chmod 600
-  /etc/open-bastion/cache.key`. The rejection is logged to syslog with that
+/etc/open-bastion/cache.key`. The rejection is logged to syslog with that
   exact command. `ob-desktop-setup` has always created the key `0600`, so hosts
   set up with it are unaffected.
+
+### Removed
+
+- **Dead token cache, `client_context`, and kernel-keyring settings.** Three
+  things `SECURITY.md` documented as active features were never wired into the
+  PAM chain, so this is a documentation-accuracy fix as much as a cleanup:
+  - The **encrypted token cache** (`src/token_cache.c`) was initialised,
+    destroyed and invalidated, but `cache_lookup()`/`cache_store()` had no
+    caller anywhere outside its own unit test — nothing ever put a token in it
+    or read one back. Removed along with its orphaned settings
+    (`cache_enabled`, `cache_dir`, `cache_ttl`, `cache_ttl_high_risk`,
+    `high_risk_services`, `cache_encrypted`, `cache_invalidate_on_logout`), the
+    `no_cache` / `no_cache_encrypt` module arguments, and the `ENABLE_CACHE`
+    build option. Rewiring it would have reopened an offline authentication
+    path nothing currently needs, so it was deleted rather than reconnected.
+  - **`client_context`** (`src/client_context.c`) was compiled into the module
+    with zero callers. Removed. Its risk-based-TTL logic only ever fed the
+    token cache.
+  - **`secrets_use_keyring` / `secrets_keyring_name`** defaulted to enabled and
+    were documented as "use kernel keyring", but no `add_key`, `request_key` or
+    `keyctl` call existed anywhere — `secret_store` only stored and freed the
+    two fields. Removed, together with the `no_keyring` module argument.
+
+  Unknown configuration keys have always been ignored silently, so an existing
+  `openbastion.conf` still loads; the removed keys simply no longer do anything
+  (they did not before either).
+
+  **Not** removed: `src/auth_cache.c`, a different component that is genuinely
+  used and already fails closed when key derivation fails. The
+  `cache_rate_limit_*` settings also stay — they protect the authorization
+  cache, not the deleted one.
+
+### Changed
+
+- **`SECURITY.md` now documents the cache that actually exists.** The "Token
+  Cache Security" section described the deleted cache, and its stated file
+  layout (`[IV][Tag][Ciphertext]`) did not match the code either. It is
+  replaced by an "Authorization Cache Security" section covering the real
+  `LLNGCACHE04` cache: its true layout (HMAC-authenticated plaintext expiry
+  header, magic, IV, ciphertext, then GCM tag), fail-closed key derivation,
+  `(user, server_group, host)` isolation, server-provided TTL, and the
+  brute-force protection on cache lookups. The French mirror
+  (`doc/security/00-architecture.md`) was corrected the same way.
 
 ### Fixed
 
@@ -45,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin answers `{"valid":false,"error":"<reason>"}` with no `user` field
   (`user` is only present on a positive verdict). The client required `user`
   unconditionally and bailed out with `Missing required 'user' field in
-  response`, returning `PAM_AUTHINFO_UNAVAIL` — which reads as a server problem
+response`, returning `PAM_AUTHINFO_UNAVAIL` — which reads as a server problem
   and, with `auth sufficient`, fell through to `pam_unix` then `pam_deny`. It
   now treats a `valid:false` verdict as a normal negative result: the reason is
   surfaced, authentication fails with `PAM_AUTH_ERR`, and rate-limiting/CrowdSec

@@ -241,9 +241,7 @@ client_id = pam-access
 client_secret = pamsecret
 timeout = 10
 verify_ssl = false
-cache_enabled = true
-cache_dir = /var/cache/open-bastion
-cache_ttl = 300
+auth_cache_enabled = true
 log_level = info
 EOF
 
@@ -434,10 +432,8 @@ server_token_file = /var/lib/open-bastion/token
 timeout = 10
 verify_ssl = true
 
-# Cache settings (for offline mode)
-cache_enabled = true
-cache_dir = /var/cache/open-bastion
-cache_ttl = 300
+# Authorization cache (offline mode)
+auth_cache_enabled = true
 ```
 
 And `/etc/pam.d/sshd`:
@@ -588,9 +584,9 @@ Each SSH server caches authorization responses for offline mode:
 
 ```bash
 # Cache location
-docker exec ob-cert-bastion ls -la /var/cache/open-bastion/
+docker exec ob-cert-bastion ls -la /var/cache/open-bastion/auth/
 
-# Cache entries are encrypted and expire based on cache_ttl (default: 300s)
+# Cache entries are encrypted; their TTL comes from the server (offline.ttl)
 ```
 
 ## Configuration Files
