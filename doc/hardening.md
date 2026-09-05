@@ -37,13 +37,18 @@ the recorder leaves a primary trace independent of the wrapper.
 
 ## What `ob-bastion-setup --enable-hardening` deploys
 
-| Destination                                    | Source template                                    | Purpose                                                                                            |
-| ---------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `/etc/systemd/logind.conf.d/open-bastion.conf` | `share/open-bastion/hardening/logind.conf.d/…`     | `KillUserProcesses=yes` — logind reaps every process owned by a user when their last session ends. |
-| `/etc/security/limits.d/open-bastion.conf`     | `share/open-bastion/hardening/security/limits.d/…` | Caps `nproc` per user at 256, root unlimited. Fork-bomb guardrail.                                 |
-| `/etc/at.allow`                                | `share/open-bastion/hardening/at.allow`            | Whitelist: empty (root only by design). Non-root users cannot use `at(1)`.                         |
-| `/etc/cron.allow`                              | `share/open-bastion/hardening/cron.allow`          | Whitelist: `root` only. Add admins as needed.                                                      |
-| `systemctl mask atd`                           | —                                                  | Disables the at daemon entirely if it is installed.                                                |
+| Destination                                    | Source template                                         | Purpose                                                                                            |
+| ---------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `/etc/systemd/logind.conf.d/open-bastion.conf` | `/usr/share/open-bastion/hardening/logind.conf.d/…`     | `KillUserProcesses=yes` — logind reaps every process owned by a user when their last session ends. |
+| `/etc/security/limits.d/open-bastion.conf`     | `/usr/share/open-bastion/hardening/security/limits.d/…` | Caps `nproc` per user at 256, root unlimited. Fork-bomb guardrail.                                 |
+| `/etc/at.allow`                                | `/usr/share/open-bastion/hardening/at.allow`            | Whitelist: empty (root only by design). Non-root users cannot use `at(1)`.                         |
+| `/etc/cron.allow`                              | `/usr/share/open-bastion/hardening/cron.allow`          | Whitelist: `root` only. Add admins as needed.                                                      |
+| `systemctl mask atd`                           | —                                                       | Disables the at daemon entirely if it is installed.                                                |
+
+The templates are installed by the package under
+`/usr/share/open-bastion/hardening/`; the setup script reads them from there
+(`HARDENING_TEMPLATE_DIR`). In the source tree they live under
+`config/hardening/`.
 
 `systemd-logind` is reloaded at the end of the step via `systemctl
 reload systemd-logind` (SIGHUP). This is **non-disruptive**: logind

@@ -44,10 +44,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion
+apt-get install open-bastion
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion
+dnf install open-bastion
 ```
 
 ### Step 2: Create Configuration
@@ -155,10 +155,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion uuid-runtime jq
+apt-get install open-bastion uuid-runtime jq
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion util-linux jq
+dnf install open-bastion util-linux jq
 ```
 
 ### Step 2: Create Configuration
@@ -376,10 +376,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion
+apt-get install open-bastion
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion
+dnf install open-bastion
 ```
 
 ### Step 2: Create PAM Configuration
@@ -575,7 +575,7 @@ apt install open-bastion-linagora
 ### Step 2: Install Open Bastion
 
 ```bash
-apt install open-bastion libnss-openbastion uuid-runtime jq
+apt install open-bastion uuid-runtime jq
 ```
 
 ### Step 3: Run ob-bastion-setup
@@ -693,7 +693,7 @@ This setting protects against:
 **Important**: Ensure the PAM heartbeat timer is enabled to keep tokens active:
 
 ```bash
-systemctl enable --now open-bastion-heartbeat.timer
+systemctl enable --now ob-heartbeat.timer
 ```
 
 ### Other Recommended Security Settings
@@ -855,6 +855,9 @@ journalctl -u sshd | grep "SSH key policy"
 ---
 
 ## Quick Reference
+
+The full, authoritative list of paths, systemd unit names and package names is
+in [Canonical names and paths](reference-paths.md).
 
 ### File Locations
 

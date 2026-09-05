@@ -478,6 +478,6 @@ authentication with the entered password. This:
 ## See Also
 
 - [Open Bastion Admin Guide](admin-guide.md)
-- [PAM Module Configuration](../README.md#configuration)
+- [PAM Module Configuration](configuration.md)
 - [Offline Mode](offline-mode.md)
 - [LemonLDAP::NG Documentation](https://lemonldap-ng.org/documentation)

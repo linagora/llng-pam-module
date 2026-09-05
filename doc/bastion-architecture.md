@@ -583,7 +583,7 @@ directory so the helper, running as nobody, can read it) and wires
 
 ```ini
 # /etc/ssh/sshd_config.d/00-open-bastion-backend.conf  (managed by ob-backend-setup)
-TrustedUserCAKeys /etc/open-bastion/llng_ca.pub
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 # AcceptEnv LLNG_BASTION_JWT   ← REMOVED

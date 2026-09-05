@@ -139,8 +139,11 @@ ssh -t host-1 'sudo /tmp/bootstrap-standalone.sh --yes'
 ```
 
 A standalone host is simultaneously its own bastion and backend, so it runs the
-same `ob-bastion-setup` under the hood (there is no `ob-standalone-setup`) and
-the full stack applies. Users then log in with their SSO certificate exactly as
+same code as a bastion and the full stack applies. `ob-standalone-setup` **does**
+exist: it is a symlink to `ob-bastion-setup`, and invoking it under that name
+makes the script default `--node-role` to `standalone` instead of `bastion`
+(an explicit `--node-role` always wins). Either command works on a standalone
+host; `ob-standalone-setup` just records the right role without extra flags. Users then log in with their SSO certificate exactly as
 they would on a bastion — they just don't hop anywhere afterwards. The same
 [port-22 lockdown note](#step-2--deploy-the-bastion) applies: run setup while
 you still have a working management session.

@@ -208,8 +208,8 @@ La **seule** propriété de sécurité qui gouverne l'émission d'un certificat 
 
 ```bash
 # /etc/ssh/sshd_config
-TrustedUserCAKeys /etc/ssh/llng_ca.pub          # déjà requis
-AuthorizedPrincipalsCommand /usr/sbin/ob-ssh-principals %u %f %i
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub  # déjà requis
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 # Supprimer : AcceptEnv LLNG_BASTION_JWT
 ```

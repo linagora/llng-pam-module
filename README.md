@@ -183,7 +183,7 @@ The full, theme-organized index is in **[doc/README.md](doc/README.md)**. Highli
 - **Recording & audit** — [Session recording](doc/session-recording.md) · [Audit trace](doc/audit.md)
 - **Offline & resilience** — [Offline mode](doc/offline-mode.md) · [Cache administration](doc/offline-cache-admin.md)
 - **Security & hardening** — [Security features](doc/security.md) · [Hardening](doc/hardening.md) · [CrowdSec](doc/crowdsec.md)
-- **Reference** — [Configuration](doc/configuration.md) · [Troubleshooting](doc/troubleshooting.md) · [Desktop SSO](doc/desktop-sso.md) _(experimental/alpha)_ · [Competitors](doc/competitors.md)
+- **Reference** — [Canonical names & paths](doc/reference-paths.md) · [Configuration](doc/configuration.md) · [Troubleshooting](doc/troubleshooting.md) · [Desktop SSO](doc/desktop-sso.md) _(experimental/alpha)_ · [Competitors](doc/competitors.md)
 - **Security analysis (EBIOS)** — [threat model & risk study](doc/security/00-architecture.md)
 
 ## Troubleshooting
@@ -214,7 +214,7 @@ using LightDM.
 
 ```bash
 # Install the greeter package
-sudo apt install lightdm-openbastion-greeter
+sudo apt install open-bastion-desktop
 
 # Run the setup script
 sudo ob-desktop-setup -p https://auth.example.com
