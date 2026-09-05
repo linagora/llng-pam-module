@@ -169,8 +169,23 @@ PermitRootLogin no
 
 ### PAM Configuration for sshd
 
-This is what `ob-bastion-setup` writes. Reproduce it exactly if you configure
-PAM by hand — every line below is load-bearing.
+This is what `ob-bastion-setup` writes (from v0.6.3 — see #220). Reproduce it
+exactly if you configure PAM by hand: every line below is load-bearing.
+
+> **What actually keeps passwords out.** The `auth` phase is _not_ the barrier.
+> `pam_permit` returns `PAM_SUCCESS` on the intended path, so if sshd ever runs
+> this stack, a password is accepted at the `auth` phase and only the LLNG
+> `account` check stands between the caller and a session. The control that
+> keeps passwords out is **`PasswordAuthentication no`** in the sshd drop-in,
+> which the setup scripts also write.
+>
+> The `pam_permit` / `pam_deny` pair is a _backstop_, not the primary control:
+> `success=1` jumps over exactly one module, so the stack ends on the recorded
+> success, while any other outcome — a missing or erroring module — falls
+> through to `pam_deny` instead of failing open silently.
+>
+> Note this means re-enabling `PasswordAuthentication` on a certificate-mode
+> host is unsafe regardless of the PAM stack. See #180.
 
 ```
 # /etc/pam.d/sshd   (bastion / standalone — written by ob-bastion-setup)
