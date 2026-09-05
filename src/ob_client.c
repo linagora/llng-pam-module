@@ -615,6 +615,14 @@ static void setup_curl(ob_client_t *client)
     curl_easy_reset(client->curl);
     curl_easy_setopt(client->curl, CURLOPT_TIMEOUT, (long)client->timeout);
     curl_easy_setopt(client->curl, CURLOPT_WRITEFUNCTION, write_callback);
+    /*
+     * Security/robustness: never let libcurl arm SIGALRM + siglongjmp for the
+     * name-resolution timeout. We are loaded into other people's processes
+     * (sshd, sudo, and notably the multi-threaded LightDM greeter), where
+     * hijacking a signal handler and longjmp-ing out of the resolver is
+     * undefined behaviour. The NSS module already sets this; keep them aligned.
+     */
+    curl_easy_setopt(client->curl, CURLOPT_NOSIGNAL, 1L);
 
     if (!client->verify_ssl) {
         curl_easy_setopt(client->curl, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -1200,6 +1208,27 @@ static int ob_authorize_user_internal(ob_client_t *client,
         return -1;
     }
     response->authorized = json_object_get_boolean(val);
+
+    /*
+     * A negative verdict (authorized:false) is a valid answer, not a server
+     * error. Mirror the /pam/verify handling fixed in #177: surface the reason
+     * and return success so the caller reports a clean AUTHZ_DENIED /
+     * PAM_PERM_DENIED instead of SERVER_ERROR / PAM_AUTHINFO_UNAVAIL (which
+     * would also wrongly trigger the offline-cache fallback path).
+     * The pam-access plugin does always send 'user' on a denial today, so this
+     * only hardens the contract; it stays fail-closed either way.
+     */
+    if (!response->authorized) {
+        if (json_object_object_get_ex(json, "user", &val)) {
+            response->user = safe_json_strdup(val);
+        }
+        if (json_object_object_get_ex(json, "reason", &val) ||
+            json_object_object_get_ex(json, "error", &val)) {
+            response->reason = safe_json_strdup(val);
+        }
+        json_object_put(json);
+        return 0;
+    }
 
     if (!json_object_object_get_ex(json, "user", &val)) {
         snprintf(client->error, sizeof(client->error),

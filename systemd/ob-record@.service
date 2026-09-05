@@ -26,3 +26,16 @@ ProtectKernelModules=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Private-by-default modes for anything this instance creates, instead of
+# whatever umask the socket activation happened to inherit. It does not weaken
+# the recordings' group-read for auditors: the sink fchmod()s the session dir to
+# 0750 and every recording/metadata file to 0640 explicitly, it never relies on
+# the umask for those.
+UMask=0077
+# Deny the syscall classes this sink never needs (kexec, module loading, raw
+# ptrace, clock setting, ...). @system-service is systemd's broad, well-tested
+# allow set and keeps the AF_UNIX/AF_INET work above intact.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# User=root here is deliberate (recordings must be untouchable by the recorded
+# user), so this sandbox is defence in depth, not the primary control.

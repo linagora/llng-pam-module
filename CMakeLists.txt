@@ -362,6 +362,13 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/config/audit/cron.daily/open-bastion-audit-
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/open-bastion/audit/cron.daily
 )
 
+# logrotate template for the JSON audit log (audit_log_file). Same arrangement
+# as the auditd templates above: a read-only template the admin copies into
+# /etc/logrotate.d/, NOT a conffile, because the log path is configurable.
+install(FILES ${CMAKE_SOURCE_DIR}/config/logrotate/open-bastion
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/open-bastion/logrotate
+)
+
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-backend-setup
     DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
