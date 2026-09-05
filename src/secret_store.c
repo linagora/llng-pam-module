@@ -469,6 +469,27 @@ int secret_store_get(secret_store_t *store,
     unsigned char *ciphertext = data + IV_SIZE;
     unsigned char *tag = data + IV_SIZE + ciphertext_len;
 
+    /*
+     * The caller's buffer must be able to hold the whole plaintext BEFORE we
+     * decrypt anything. AES-256-GCM is a stream cipher: EVP_DecryptUpdate()
+     * writes ciphertext_len bytes into `secret` and the GCM tag is only
+     * verified later, in EVP_DecryptFinal_ex() - so an oversized secret file
+     * would overflow the caller's buffer while the data is still
+     * unauthenticated. Bail out here instead.
+     *
+     * ciphertext_len + TAG_SIZE (rather than ciphertext_len) keeps the margin
+     * EVP_DecryptFinal_ex() may need and matches the explicit_bzero(secret,
+     * secret_size) already performed on the tag-mismatch path below.
+     */
+    if (ciphertext_len + TAG_SIZE > secret_size) {
+        explicit_bzero(data, st.st_size);
+        free(data);
+        snprintf(store->error_buf, sizeof(store->error_buf),
+                 "Secret too large for output buffer (%zu > %zu)",
+                 ciphertext_len, secret_size);
+        return -1;
+    }
+
     /* Decrypt using AES-256-GCM */
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {

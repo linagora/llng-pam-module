@@ -411,6 +411,67 @@ static int test_binary_data(void)
     return 1;
 }
 
+/*
+ * Test that a stored secret larger than the caller's output buffer is refused
+ * instead of overflowing it. Before the fix, secret_store_get() passed the
+ * caller's buffer straight to EVP_DecryptUpdate() with the on-disk ciphertext
+ * length and never compared it to secret_size, so the overflow happened before
+ * the GCM tag was even verified.
+ *
+ * The canary bytes around the (deliberately undersized) buffer must be intact
+ * on return.
+ */
+static int test_output_buffer_too_small(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt",
+        .use_keyring = false,
+        .keyring_name = NULL
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char big_secret[512];
+    for (size_t i = 0; i < sizeof(big_secret); i++) {
+        big_secret[i] = (unsigned char)(i & 0xff);
+    }
+
+    int ret = secret_store_put(store, "toobig:key", big_secret, sizeof(big_secret));
+    if (ret != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* 64-byte window inside a 192-byte area; the surrounding bytes are canaries. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *small = area + 64;
+    size_t actual_len = 12345;
+
+    ret = secret_store_get(store, "toobig:key", small, 64, &actual_len);
+
+    int ok = (ret == -1);
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 128) continue;  /* the buffer we handed over */
+        if (area[i] != 0xAA) ok = 0;       /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "toobig:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
 /* Test error message */
 static int test_error_message(void)
 {
@@ -477,6 +538,7 @@ int main(void)
     TEST(overwrite);
     TEST(disabled);
     TEST(binary_data);
+    TEST(output_buffer_too_small);
     TEST(error_message);
     TEST(rotate_key_not_implemented);
 

@@ -331,17 +331,41 @@ static int read_key_file(const char *path, unsigned char *buf, size_t buf_size)
         return -1;
     }
 
-    /* Enforce strict permissions on key file */
+    /* Must be a regular file, not a fifo/device that could block or feed us
+     * attacker-chosen bytes. */
+    if (!S_ISREG(st.st_mode)) {
+        syslog(LOG_WARNING, "open-bastion: key file %s is not a regular file (rejected)",
+               path);
+        close(fd);
+        return -1;
+    }
+
+    /*
+     * Ownership is checked unconditionally: a key file that happens to be mode
+     * 0600 but is owned by some other uid used to slip through entirely,
+     * because the uid test sat inside the loose-permissions branch below.
+     */
+    if (st.st_uid != 0) {
+        syslog(LOG_WARNING, "open-bastion: key file %s is not owned by root (rejected)",
+               path);
+        close(fd);
+        return -1;
+    }
+
+    /*
+     * Enforce strict permissions on the key file. This is now fail-closed:
+     * a root-owned key file with any group/other bit set is rejected rather
+     * than merely warned about. Rejecting is safe — the caller
+     * (cache_derive_key_with_keyfile) falls back to machine-id derivation and
+     * logs "cache key derived without key file", so the effect is a weaker
+     * derivation and an invalidated offline cache, never a lockout.
+     */
     if ((st.st_mode & 0077) != 0) {
         syslog(LOG_WARNING,
-               "open-bastion: key file has insecure permissions %04o (should be 0600)",
+               "open-bastion: key file has insecure permissions %04o (should be 0600) - rejected",
                st.st_mode & 0777);
-        /* Reject non-root owned files with loose permissions */
-        if (st.st_uid != 0) {
-            close(fd);
-            return -1;
-        }
-        /* Root-owned with loose permissions: warn but allow for backwards compatibility */
+        close(fd);
+        return -1;
     }
 
     /* Read exactly KEY_FILE_SIZE bytes, handling short reads */

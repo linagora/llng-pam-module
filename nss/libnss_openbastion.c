@@ -40,7 +40,11 @@
 #define CACHE_TTL 300           /* 5 minutes */
 #define CACHE_MAX_ENTRIES 1000
 #define CACHE_FILE "/var/cache/nss_llng/users.cache"
+/* Overridable so tests/test_nss_cache.c (which includes this file) can point
+ * the file cache at a temporary directory instead of the real system path. */
+#ifndef CACHE_DIR
 #define CACHE_DIR "/var/cache/nss_llng"
+#endif
 
 /* Default values for user creation */
 #define DEFAULT_SHELL "/bin/bash"
@@ -112,6 +116,13 @@ typedef struct {
 static char *trim(char *str)
 {
     while (*str == ' ' || *str == '\t') str++;
+
+    /* An all-whitespace (or empty) string leaves nothing to trim: forming
+     * `str + strlen(str) - 1` here would be a pointer before the start of the
+     * object, which is undefined behaviour. Same shape as str_trim() in
+     * src/str_utils.c. */
+    if (*str == '\0') return str;
+
     char *end = str + strlen(str) - 1;
     while (end > str && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
         *end-- = '\0';
@@ -672,14 +683,37 @@ static void file_cache_save(const struct passwd *pw)
 {
     if (!pw || !pw->pw_name) return;
 
-    /* Ensure cache directory exists with world-readable permissions.
-     * Use mkdir with correct mode; if it already exists (EEXIST), proceed.
-     * The directory needs to be world-readable (0755) so all users can do UID lookups. */
-    if (mkdir(CACHE_DIR, 0755) == -1 && errno != EEXIST) {
+    /*
+     * Only root writes this cache. An NSS module is loaded into *every*
+     * process that resolves a user, so without this guard an unprivileged
+     * process could be made to create or rewrite entries the whole host then
+     * trusts. In practice only root ever gets here anyway (the LLNG query needs
+     * the root-only server token), so this costs nothing and closes the door.
+     */
+    if (geteuid() != 0) return;
+
+    /*
+     * Directory: root-owned, 0711 — traversable but NOT listable.
+     *
+     * Entries stay readable by unprivileged processes (see the file mode
+     * below), but nobody except root can readdir() the directory, so the SSO
+     * user directory can no longer be harvested wholesale by any local
+     * account. Same trick ob-bastion-setup already applies to
+     * /etc/open-bastion (0711: traversable, unlistable).
+     *
+     * mkdir()'s mode is masked by the caller's umask, and NSS runs inside
+     * arbitrary processes with arbitrary umasks, so set the mode explicitly
+     * afterwards. The chmod is unconditional so that an upgrade also tightens
+     * a 0755 directory left by an earlier version; the directory is root-owned
+     * inside root-only-writable /var/cache, so it cannot be swapped for a
+     * symlink by a local user.
+     */
+    if (mkdir(CACHE_DIR, 0711) == -1 && errno != EEXIST) {
         syslog(LOG_WARNING, "libnss_openbastion: cannot create cache directory %s: %s",
                CACHE_DIR, strerror(errno));
         return;
     }
+    chmod(CACHE_DIR, 0711);
 
     char filepath[256];
     int len = snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)pw->pw_uid);
@@ -689,10 +723,22 @@ static void file_cache_save(const struct passwd *pw)
         return;
     }
 
-    FILE *f = fopen(filepath, "w");
-    if (!f) {
+    /*
+     * O_NOFOLLOW: never follow a symlink sitting at the entry path. The
+     * directory is root-only-writable so one should not exist, but this is
+     * root truncating a path derived from server-supplied data — refuse to be
+     * the write primitive if that assumption is ever wrong.
+     */
+    int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) {
         syslog(LOG_WARNING, "libnss_openbastion: cannot create cache file %s: %s",
                filepath, strerror(errno));
+        return;
+    }
+
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
         return;
     }
 
@@ -706,9 +752,31 @@ static void file_cache_save(const struct passwd *pw)
             pw->pw_shell ? pw->pw_shell : "",
             (long)time(NULL));
 
-    /* Make cache file world-readable so all users can do UID lookups.
-     * Use fchmod() on the file descriptor to avoid TOCTOU race condition
-     * (file could be replaced between fclose and chmod) */
+    /*
+     * File mode 0644, root-owned. It deliberately stays readable by
+     * unprivileged processes and this cannot be tightened to 0600:
+     *
+     *   - an NSS module runs *inside the calling process*, so getpwuid() is
+     *     served to unprivileged programs by this very code;
+     *   - an unprivileged process cannot read the root-only server token, so
+     *     it can never query LLNG - this file cache is its ONLY source of
+     *     uid -> name data (see _nss_openbastion_getpwuid_r);
+     *   - openssh's client calls getpwuid(getuid()) at startup and refuses to
+     *     run when it fails ("You don't exist, go away!"), so a 0600 cache
+     *     would break ob-ssh / ob-scp / ob-sftp for every bastion user, plus
+     *     ls -l, ps and id.
+     *
+     * Handing the entry to its own user (0600 owned by pw_uid) is worse, not
+     * better: the owner could then rewrite their own gid/home/shell and feed
+     * attacker-chosen passwd data back to root. The content is passwd-shaped
+     * and is what /etc/passwd exposes world-readably on every Unix; the actual
+     * exposure fixed here is bulk enumeration, which the 0711 directory stops.
+     * Genuinely sensitive service accounts are already never written here (see
+     * _nss_openbastion_getpwnam_r).
+     *
+     * fchmod() on the fd rather than chmod() on the path: no TOCTOU, and it
+     * also normalises an entry created under a restrictive umask.
+     */
     fchmod(fileno(f), 0644);
     fclose(f);
 }
@@ -1123,12 +1191,31 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
     const char *req_body = json_object_to_json_string(req_json);
 
     /* Build Authorization header from the snapshot, then drop the token copy:
-     * auth_header now holds its own bytes and server_token is no longer needed. */
-    char auth_header[512];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", server_token);
+     * auth_header now holds its own bytes and server_token is no longer needed.
+     *
+     * The header buffer must hold the WHOLE token: load_server_token() accepts
+     * up to 8191 bytes, and a JWT access token can easily exceed the ~490
+     * characters that used to fit here. A silently truncated Bearer value is
+     * the worst outcome - LLNG answers 401 forever, the retry-once path burns
+     * a token reload on every lookup, and nothing in the logs says why. Size
+     * the buffer for the largest token we will ever load, and still check the
+     * snprintf() return so a future overrun fails loudly instead of 401-ing. */
+    char auth_header[8256];
+    int hdr_len = snprintf(auth_header, sizeof(auth_header),
+                           "Authorization: Bearer %s", server_token);
     explicit_bzero(server_token, strlen(server_token));
     free(server_token);
     server_token = NULL;
+    if (hdr_len < 0 || (size_t)hdr_len >= sizeof(auth_header)) {
+        syslog(LOG_ERR,
+               "libnss_openbastion: server token too long for Authorization header "
+               "(%d bytes needed) - refusing to send a truncated credential",
+               hdr_len);
+        explicit_bzero(auth_header, sizeof(auth_header));
+        json_object_put(req_json);
+        curl_easy_cleanup(curl);
+        return -1;
+    }
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -1164,6 +1251,8 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
     curl_slist_free_all(headers);
     json_object_put(req_json);
     curl_easy_cleanup(curl);
+    /* auth_header held the Bearer token; curl has its own copy and is done. */
+    explicit_bzero(auth_header, sizeof(auth_header));
 
     /* Return convention: 0 = found, 1 = authoritatively not found (HTTP 200
      * with found=false), -1 = transient/unavailable (network error, 401/403
@@ -1255,10 +1344,26 @@ static int query_llng_userinfo(const char *username, struct passwd *pw,
         }
     }
 
-    /* GID - only use if it's actually an integer */
+    /* GID - only use if it's actually an integer, and only within the same
+     * range the UID is validated against. An unvalidated server-supplied gid is
+     * the more dangerous of the two: gid 0 (or any system group such as sudo,
+     * adm, docker, shadow) would silently grant the SSO user that group's
+     * privileges on every host. Out-of-range values fall back to the locally
+     * configured default_gid rather than failing the lookup, so a bad answer
+     * from the portal degrades instead of locking users out. */
     if (json_object_object_get_ex(json, "gid", &val) &&
         json_object_is_type(val, json_type_int)) {
-        pw->pw_gid = (gid_t)json_object_get_int(val);
+        gid_t gid = (gid_t)json_object_get_int(val);
+        if (gid < (gid_t)g_config.min_uid || gid > (gid_t)g_config.max_uid ||
+            gid == (gid_t)NOBODY_UID) {
+            syslog(LOG_WARNING,
+                   "libnss_openbastion: server returned out-of-range gid %u for user %s "
+                   "- using default_gid %u",
+                   (unsigned)gid, username, (unsigned)g_config.default_gid);
+            pw->pw_gid = g_config.default_gid;
+        } else {
+            pw->pw_gid = gid;
+        }
     } else {
         pw->pw_gid = g_config.default_gid;
     }
@@ -1435,11 +1540,13 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
      * file (typically sshd during pre-auth getpwnam()).
      *
      * Deliberately skip file_cache_save() here: the shared file cache
-     * lives under /var/cache/nss_llng with 0755 dir and 0644 entries,
-     * so persisting service-account metadata there would expose it to
-     * unprivileged users on the host (including the uid → name reverse
-     * lookup). Keeping it in the per-process in-memory cache only is
-     * sufficient for the one-shot sshd pre-auth getpwnam() path.
+     * lives under /var/cache/nss_llng with a 0711 dir and 0644 entries
+     * (unlistable, but an entry is readable by any process that knows the
+     * uid — see file_cache_save for why it cannot be 0600), so persisting
+     * service-account metadata there would expose it to unprivileged users
+     * on the host (including the uid → name reverse lookup). Keeping it in
+     * the per-process in-memory cache only is sufficient for the one-shot
+     * sshd pre-auth getpwnam() path.
      */
     if (query_service_account(name, result, buffer, buflen) == 0) {
         cache_add(name, result, 1);

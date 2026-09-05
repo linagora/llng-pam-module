@@ -20,6 +20,10 @@
  * (init_cache/cache_add/cache_find) against the real g_cache/g_config state.
  */
 
+/* Point the on-disk cache at a throwaway directory: file_cache_save() must
+ * never touch the real /var/cache/nss_llng from a unit test. */
+#define CACHE_DIR "/tmp/test_nss_openbastion_cache"
+
 #include "../nss/libnss_openbastion.c"
 
 #include <assert.h>
@@ -123,6 +127,75 @@ static int test_expire_by_uid_then_evict_no_double_free(void)
     return 1;
 }
 
+/*
+ * trim() used to compute `str + strlen(str) - 1` before looking at the string,
+ * which is undefined behaviour (a pointer before the start of the object) for
+ * an empty or all-blank value - exactly what a "key =" line in
+ * nss_openbastion.conf produces. Detected by UBSan/ASan; here we simply assert
+ * the result is a well-formed empty string.
+ */
+static int test_trim_empty_is_not_ub(void)
+{
+    char empty[] = "";
+    char blanks[] = "   \t";
+    char value[] = "  hello  ";
+
+    if (strcmp(trim(empty), "") != 0) return 0;
+    if (strcmp(trim(blanks), "") != 0) return 0;
+    if (strcmp(trim(value), "hello") != 0) return 0;
+    return 1;
+}
+
+/*
+ * file_cache_save() writes the shared uid -> passwd cache under CACHE_DIR.
+ * Only root may do so: an NSS module is loaded into every process that
+ * resolves a user, so an unprivileged caller must never be able to create or
+ * rewrite entries the whole host then trusts.
+ *
+ * Running as root we cannot observe the refusal, so we check the modes the
+ * fix installs instead (directory 0711 = traversable but not listable, entry
+ * 0644 root-owned - it must stay readable, see file_cache_save()).
+ */
+static int test_file_cache_save_privileges(void)
+{
+    struct passwd pw = make_pw("cacheduser", 123456);
+    char entry[256];
+    snprintf(entry, sizeof(entry), "%s/%u", CACHE_DIR, (unsigned)pw.pw_uid);
+
+    /* Start from a clean slate. */
+    unlink(entry);
+    rmdir(CACHE_DIR);
+
+    file_cache_save(&pw);
+
+    struct stat st;
+    if (geteuid() != 0) {
+        /* Unprivileged: nothing at all must have been created. */
+        if (stat(CACHE_DIR, &st) == 0) {
+            fprintf(stderr, "unprivileged file_cache_save created %s\n", CACHE_DIR);
+            unlink(entry);
+            rmdir(CACHE_DIR);
+            return 0;
+        }
+        return 1;
+    }
+
+    int ok = 1;
+    if (stat(CACHE_DIR, &st) != 0 || (st.st_mode & 07777) != 0711) {
+        fprintf(stderr, "cache dir mode %04o, expected 0711\n",
+                (unsigned)(st.st_mode & 07777));
+        ok = 0;
+    }
+    if (stat(entry, &st) != 0 || (st.st_mode & 07777) != 0644 || st.st_uid != 0) {
+        fprintf(stderr, "cache entry mode %04o uid %u, expected 0644 root\n",
+                (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid);
+        ok = 0;
+    }
+    unlink(entry);
+    rmdir(CACHE_DIR);
+    return ok;
+}
+
 int main(void)
 {
     int ok = 1;
@@ -137,6 +210,22 @@ int main(void)
 
     printf("  Testing expire_by_uid_then_evict_no_double_free... ");
     if (test_expire_by_uid_then_evict_no_double_free()) {
+        printf("PASS\n");
+    } else {
+        printf("FAIL\n");
+        ok = 0;
+    }
+
+    printf("  Testing trim_empty_is_not_ub... ");
+    if (test_trim_empty_is_not_ub()) {
+        printf("PASS\n");
+    } else {
+        printf("FAIL\n");
+        ok = 0;
+    }
+
+    printf("  Testing file_cache_save_privileges... ");
+    if (test_file_cache_save_privileges()) {
         printf("PASS\n");
     } else {
         printf("FAIL\n");

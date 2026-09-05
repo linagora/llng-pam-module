@@ -740,7 +740,12 @@ Look for:
 ### Recommendations
 
 1. **Generate a key file**: Use `ob-desktop-setup --offline` or create manually
-   (`dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1`)
+   (`dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1 &&
+   chown root:root /etc/open-bastion/cache.key &&
+   chmod 600 /etc/open-bastion/cache.key`).
+   The key file **must** be a root-owned regular file with mode 0600: any other
+   owner or permission bit makes it be ignored (the cache key then falls back to
+   machine-id derivation, which is weaker).
 
 2. **Set appropriate TTL**: Default 7 days; reduce for high-security environments
 
