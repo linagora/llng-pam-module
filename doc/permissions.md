@@ -17,20 +17,20 @@ available for defense-in-depth or for hosts that need a local exception
 
 ## Quick map — "I want to control X. Where?"
 
-| Goal                                            | Layer            | How                                                                                           |
-| ----------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
-| Who can SSH into which servers                  | **SSO**          | [Server groups](llng-configuration.md#server-groups) + `pam-access` rules                     |
-| Who can `sudo`                                  | **SSO** (+local) | LLNG group → sudo authorization; optionally local `sudoers`                                   |
-| Make `sudo` require a fresh SSO token           | **OB**           | [PAM Mode E](pam-modes.md) (max-security)                                                     |
-| Which SSH **key types/sizes** are allowed       | **OB**           | `ssh_key_policy_enabled`, `ssh_key_allowed_types` ([security](security.md#ssh-key-policy))    |
-| Auth method (token / SSH key / password)        | **OB**           | [PAM mode A–E](pam-modes.md)                                                                  |
-| Non-SSO automation logins (ansible, backup, CI) | **OB**           | [`service-accounts.conf`](service-accounts.md)                                                |
-| Auto-created home / shell / UID-GID range       | **OB**           | provisioning keys in [`openbastion.conf`](configuration.md)                                   |
-| Which Unix groups are synced from LLNG          | **both**         | LLNG `managed_groups` + local `allowed_managed_groups` whitelist                              |
-| Process containment (kill on logout, at/cron)   | **OB**           | [`--enable-hardening`](hardening.md)                                                          |
-| Bastion → backend connection trust              | **both**         | LLNG signs the hop cert; backend `allowed_bastions` ([architecture](bastion-architecture.md)) |
-| Revoke an admin everywhere                      | **SSO**          | remove from the group / close the account (see below)                                         |
-| Onboard an admin                                | **SSO**          | add to the right group; they self-serve their SSH cert                                        |
+| Goal                                            | Layer            | How                                                                                                                                                                                      |
+| ----------------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Who can SSH into which servers                  | **SSO**          | [Server groups](llng-configuration.md#server-groups) + `pam-access` rules                                                                                                                |
+| Who can `sudo`                                  | **SSO** (+local) | LLNG group → sudo authorization; optionally local `sudoers`                                                                                                                              |
+| Make `sudo` require a fresh SSO token           | **OB**           | [PAM Mode E](pam-modes.md) (max-security); see [sudo's timestamp cache](pam-modes.md#how-often-you-are-actually-prompted-sudos-timestamp-cache) for how often a prompt is actually shown |
+| Which SSH **key types/sizes** are allowed       | **OB**           | `ssh_key_policy_enabled`, `ssh_key_allowed_types` ([security](security.md#ssh-key-policy))                                                                                               |
+| Auth method (token / SSH key / password)        | **OB**           | [PAM mode A–E](pam-modes.md)                                                                                                                                                             |
+| Non-SSO automation logins (ansible, backup, CI) | **OB**           | [`service-accounts.conf`](service-accounts.md)                                                                                                                                           |
+| Auto-created home / shell / UID-GID range       | **OB**           | provisioning keys in [`openbastion.conf`](configuration.md)                                                                                                                              |
+| Which Unix groups are synced from LLNG          | **both**         | LLNG `managed_groups` + local `allowed_managed_groups` whitelist                                                                                                                         |
+| Process containment (kill on logout, at/cron)   | **OB**           | [`--enable-hardening`](hardening.md)                                                                                                                                                     |
+| Bastion → backend connection trust              | **both**         | LLNG signs the hop cert; backend `allowed_bastions` ([architecture](bastion-architecture.md))                                                                                            |
+| Revoke an admin everywhere                      | **SSO**          | remove from the group / close the account (see below)                                                                                                                                    |
+| Onboard an admin                                | **SSO**          | add to the right group; they self-serve their SSH cert                                                                                                                                   |
 
 ## SSO side (LemonLDAP::NG)
 
@@ -98,8 +98,13 @@ The setups own two things you may want to extend:
   `sshd`'s "first value wins" rule for single-valued keywords (the `00-` prefix
   makes the Open Bastion settings win over distro drop-ins).
 - **`/etc/pam.d/sshd`** (and `/etc/pam.d/sudo`, `sudo-i`) — the PAM stacks that
-  invoke `pam_openbastion`. You can add stock PAM modules (e.g. `pam_systemd`,
-  `pam_mkhomedir` options) around them.
+  invoke `pam_openbastion`. You can add stock PAM modules around them. Note that
+  `pam_systemd` and `pam_mkhomedir` are **not** optional extras you may add:
+  both setups already write them, and both are required
+  ([full stack](pam-modes.md#pam-configuration-for-sshd)). Dropping
+  `pam_systemd` makes sessions invisible to `who` / `w` / `loginctl` and to the
+  heartbeat's connected-users report; dropping the `session pam_openbastion`
+  line breaks Mode E `sudo`.
 
 > **Re-running a setup regenerates these files.** Keep site additions in
 > separate, higher-numbered `sshd_config.d` drop-ins where possible, and re-apply
