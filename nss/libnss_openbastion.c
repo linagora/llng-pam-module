@@ -678,18 +678,28 @@ static cache_entry_t *cache_find_by_uid(uid_t uid)
  * Usernames are already validated upstream (LLNG directory and
  * query_service_account() enforce `[a-z_][a-z0-9_-]*`), but the file cache
  * turns the name into a filesystem path, so this is defense in depth against
- * path traversal and unexpected bytes:
- *   - reject NULL/empty
- *   - reject any '/' (no traversal, no subdirectories)
- *   - reject a leading '.' (no ".", "..", or hidden files)
- *   - reject anything outside the strict [a-z0-9_-] character class
+ * path traversal and unexpected bytes.
+ *
+ * This deliberately enforces EXACTLY the grammar validate_username() enforces
+ * in src/pam_openbastion.c (`[a-z_][a-z0-9_-]{0,31}`). The two must not drift:
+ * a name this function accepts but the PAM validator refuses would be written
+ * to the cache and then never invalidated by the PAM side, leaving a stale
+ * record no code path can clear. Concretely that means, on top of rejecting
+ * NULL/empty, '/', a leading '.' and anything outside [a-z0-9_-]:
+ *   - the first character must be [a-z_] (a leading digit or '-' is refused,
+ *     as it is by validate_username);
+ *   - the total length is capped at 32, the same conservative POSIX-ish limit.
  *
  * Returns 0 if the name is a safe filename, -1 otherwise.
  */
+#define CACHE_NAME_MAX 32
 static int valid_cache_name(const char *name)
 {
     if (!name || name[0] == '\0') return -1;
-    if (name[0] == '.') return -1;
+    if (strlen(name) > CACHE_NAME_MAX) return -1;
+    /* First character: lowercase letter or underscore (rejects '.', '-', and
+     * any digit) — identical to validate_username()'s first-character rule. */
+    if (!((name[0] >= 'a' && name[0] <= 'z') || name[0] == '_')) return -1;
     for (const char *c = name; *c; c++) {
         unsigned char ch = (unsigned char)*c;
         if (ch == '/') return -1;
@@ -852,8 +862,23 @@ static void file_cache_write_atomic_at(int dirfd, const char *leaf,
         return;
     }
 
-    /* Create exclusively, relative to the verified dir, never following links. */
-    int fd = openat(dirfd, tmpleaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    /* Create exclusively, relative to the verified dir, never following links.
+     *
+     * EEXIST needs a retry rather than a bail-out. The temp leaf is keyed on
+     * the pid, so a process killed between openat() and renameat() leaves
+     * `.tmp.<leaf>.<pid>` behind, and the next process that the kernel hands
+     * that pid to would then get EEXIST here forever: caching for that entry
+     * would be permanently dead with nothing but a syslog line to say why.
+     * Unlink the stale leftover and retry exactly once — the directory is
+     * writable only by root (verified above), so the file we remove can only be
+     * our own crash debris, never an attacker's plant, and a single retry
+     * cannot loop. */
+    int fd = openat(dirfd, tmpleaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        unlinkat(dirfd, tmpleaf, 0);
+        fd = openat(dirfd, tmpleaf,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    }
     if (fd < 0) {
         syslog(LOG_WARNING, "libnss_openbastion: cannot create cache file %s: %s",
                tmpleaf, strerror(errno));
