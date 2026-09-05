@@ -5,6 +5,13 @@ add_executable(test_config test_config.c ../src/config.c ../src/str_utils.c)
 target_include_directories(test_config PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_config COMMAND test_config)
 
+# Config line syntax: inline comments and quoting (follow-up to #183).
+# Includes config.c directly to reach the per-line parser, since config_load()
+# requires a root-owned file that CI cannot create.
+add_executable(test_config_line test_config_line.c ../src/str_utils.c)
+target_include_directories(test_config_line PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_config_line COMMAND test_config_line)
+
 # Test rate limiter
 add_executable(test_rate_limiter test_rate_limiter.c ../src/rate_limiter.c)
 target_include_directories(test_rate_limiter PRIVATE

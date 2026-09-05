@@ -312,6 +312,105 @@ void config_free(pam_openbastion_config_t *config)
 } while (0)
 
 /*
+ * Keys whose value is an opaque secret or a hash: never strip anything from
+ * them, since '#' is a perfectly ordinary character in a generated password,
+ * an API key or a base64 digest. To put a '#' in any *other* value, quote it.
+ */
+static bool key_holds_opaque_secret(const char *key)
+{
+    static const char *const secret_keys[] = {
+        "client_secret",
+        "notify_secret",
+        "webhook_secret",
+        "request_signing_secret",
+        "crowdsec_bouncer_key",
+        "crowdsec_password",
+        "cert_pin",
+        NULL,
+    };
+
+    for (size_t i = 0; secret_keys[i]; i++) {
+        if (strcmp(key, secret_keys[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Remove one layer of matching quotes from a value, in place.
+ * Returns a pointer to the unquoted value (possibly offset from `value`).
+ * Shared by config_load() and config_parse_args() so a value is understood
+ * the same way whether it comes from openbastion.conf or from a pam.d line.
+ */
+static char *strip_quotes(char *value)
+{
+    if (!value || (*value != '"' && *value != '\'')) {
+        return value;
+    }
+
+    char quote = *value;
+    value++;
+    char *end = strrchr(value, quote);
+    if (end) *end = '\0';
+
+    return value;
+}
+
+/*
+ * Strip a trailing inline comment from an (already trimmed) value, in place.
+ *
+ * Before the #183 fix an unrecognised value silently meant `false`, so
+ * `verify_ssl = true # prod` was merely dangerous. Now it is a fatal -6: the
+ * PAM module refuses to start and every SSH and sudo authentication on the
+ * host is denied. An upgrade must never be able to lock an operator out of a
+ * bastion over a comment, so we recognise inline comments instead.
+ *
+ * The rule is deliberately narrow so it cannot eat a legitimate value:
+ *
+ *   - a quoted value is left untouched. The caller's quote stripper ends the
+ *     value at the closing quote, which already discards any trailing
+ *     comment, so `secret = "a # b"` keeps its '#' and
+ *     `verify_ssl = "true" # prod` still parses.
+ *   - keys listed in key_holds_opaque_secret() are exempt entirely.
+ *   - otherwise, only a '#' that starts the value or is preceded by
+ *     whitespace introduces a comment. `url = https://x/#frag` and
+ *     `pass = a#b` are therefore preserved; `verify_ssl = true # prod` is not.
+ */
+static void strip_inline_comment(const char *key, char *value)
+{
+    if (!key || !value) {
+        return;
+    }
+
+    /* Quoted: the quote stripper decides where the value ends. */
+    if (*value == '"' || *value == '\'') {
+        return;
+    }
+
+    if (key_holds_opaque_secret(key)) {
+        return;
+    }
+
+    for (char *p = value; *p; p++) {
+        if (*p != '#') {
+            continue;
+        }
+        if (p != value && !isspace((unsigned char)p[-1])) {
+            continue;  /* '#' inside a token: part of the value */
+        }
+
+        *p = '\0';
+        /* Re-trim the whitespace that preceded the '#'. */
+        while (p > value && isspace((unsigned char)p[-1])) {
+            *--p = '\0';
+        }
+        return;
+    }
+}
+
+/*
  * Safe integer parsing with validation.
  * Returns the parsed value, or default_val if parsing fails.
  * Unlike atoi(), this detects invalid input and doesn't silently return 0.
@@ -715,6 +814,48 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     return 0;
 }
 
+/*
+ * Handle one raw line of openbastion.conf. The buffer is modified in place.
+ * Split out of config_load() so the line syntax (comments, quotes, inline
+ * comments) can be tested without a root-owned file on disk.
+ */
+static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
+{
+    char *trimmed = trim(line);
+
+    /* Skip empty lines and comments */
+    if (*trimmed == '\0' || *trimmed == '#' || *trimmed == ';') {
+        return;
+    }
+
+    /* Skip section headers [section] */
+    if (*trimmed == '[') {
+        return;
+    }
+
+    /* Find = separator */
+    char *eq = strchr(trimmed, '=');
+    if (!eq) {
+        return;  /* Skip malformed lines */
+    }
+
+    *eq = '\0';
+    char *key = trim(trimmed);
+    char *value = trim(eq + 1);
+
+    /*
+     * Drop an inline comment (`verify_ssl = true # prod`) before the strict
+     * boolean parse, which would otherwise reject the whole configuration and
+     * lock the host out. Quoted values and secret-bearing keys are exempt;
+     * see strip_inline_comment().
+     */
+    strip_inline_comment(key, value);
+
+    value = strip_quotes(value);
+
+    parse_line(key, value, config);
+}
+
 int config_load(const char *filename, pam_openbastion_config_t *config)
 {
     /*
@@ -750,42 +891,9 @@ int config_load(const char *filename, pam_openbastion_config_t *config)
     }
 
     char line[1024];
-    int line_num = 0;
 
     while (fgets(line, sizeof(line), f)) {
-        line_num++;
-
-        char *trimmed = trim(line);
-
-        /* Skip empty lines and comments */
-        if (*trimmed == '\0' || *trimmed == '#' || *trimmed == ';') {
-            continue;
-        }
-
-        /* Skip section headers [section] */
-        if (*trimmed == '[') {
-            continue;
-        }
-
-        /* Find = separator */
-        char *eq = strchr(trimmed, '=');
-        if (!eq) {
-            continue;  /* Skip malformed lines */
-        }
-
-        *eq = '\0';
-        char *key = trim(trimmed);
-        char *value = trim(eq + 1);
-
-        /* Remove quotes from value */
-        if (*value == '"' || *value == '\'') {
-            char quote = *value;
-            value++;
-            char *end = strrchr(value, quote);
-            if (end) *end = '\0';
-        }
-
-        parse_line(key, value, config);
+        parse_config_file_line(line, config);
     }
 
     fclose(f);
@@ -813,8 +921,19 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
             memcpy(key, arg, key_len);
             key[key_len] = '\0';  /* Explicit null termination */
 
-            const char *value = eq + 1;
-            parse_line(key, value, config);
+            /*
+             * config_load() strips quotes; do the same here so a pam.d line
+             * such as `ssh_cert_aware="true"` is understood identically
+             * instead of being rejected as an invalid boolean. PAM arguments
+             * carry no comments, so strip_inline_comment() is not applied.
+             */
+            char *value = strdup(eq + 1);
+            if (!value) {
+                syslog(LOG_WARNING, "open-bastion: strdup failed for PAM argument %s", key);
+                continue;
+            }
+            parse_line(key, strip_quotes(value), config);
+            free(value);
         }
         /* Boolean flags */
         else if (strcmp(arg, "debug") == 0) {
