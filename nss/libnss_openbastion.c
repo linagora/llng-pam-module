@@ -42,12 +42,57 @@
 /* Cache settings */
 #define CACHE_TTL 300           /* 5 minutes */
 #define CACHE_MAX_ENTRIES 1000
-#define CACHE_FILE "/var/cache/nss_llng/users.cache"
+
+/*
+ * Longest serialized cache record we are willing to write, newline included.
+ *
+ * The readers pull a record with fgets() into a 1024-byte buffer, so a longer
+ * line comes back TRUNCATED: its field count is wrong and it can never be
+ * parsed again. Refusing to write past this bound is what keeps the on-disk
+ * format and the read buffer in agreement; the margin below 1024 leaves room
+ * for the terminating NUL and for a reader with a slightly smaller buffer.
+ */
+#define CACHE_LINE_MAX 900
+
 /* Overridable so tests/test_nss_cache.c (which includes this file) can point
  * the file cache at a temporary directory instead of the real system path. */
 #ifndef CACHE_DIR
 #define CACHE_DIR "/var/cache/nss_llng"
 #endif
+/* Name-keyed cross-process cache lives in its own subdirectory so usernames
+ * (validated as a filename) can never collide with the numeric per-uid files
+ * that live directly under CACHE_DIR. Separately overridable because a test may
+ * substitute a non-literal CACHE_DIR, which cannot be string-concatenated. */
+#ifndef CACHE_DIR_BYNAME
+#define CACHE_DIR_BYNAME CACHE_DIR "/byname"
+#endif
+
+/*
+ * The single uid that is allowed to own and to write the on-disk cache.
+ *
+ * Production always requires root: the cache files are consumed by privileged
+ * callers (sshd, sudo, cron) which act on the uid/gid we hand back, so anything
+ * an unprivileged user could own or write is untrusted by definition.
+ *
+ * Overridable ONLY by tests/test_nss_cache.c, which runs unprivileged and
+ * therefore owns the throwaway cache directory it drives these helpers against.
+ * Overriding it in the shipped module would be a privilege-escalation bug.
+ */
+#ifndef CACHE_TRUSTED_UID
+#define CACHE_TRUSTED_UID ((uid_t)0)
+#endif
+
+/*
+ * Mode of the cache directories: 0711, i.e. traversable but NOT listable.
+ *
+ * Entries themselves stay 0644 (an NSS module runs inside the calling process,
+ * so getpwuid() must be servable to unprivileged programs — see
+ * file_cache_write_atomic_at), but nobody except root can readdir() the
+ * directory, so the SSO user directory cannot be harvested wholesale by a local
+ * account. This matters most for the name-keyed subdirectory, where the
+ * filenames are the login names themselves. Refs #189.
+ */
+#define CACHE_DIR_MODE 0711
 
 /* Default values for user creation */
 #define DEFAULT_SHELL "/bin/bash"
@@ -768,169 +813,657 @@ static cache_entry_t *cache_find_by_uid(uid_t uid)
 /*
  * File-based cache for cross-process persistence.
  * Format: username:uid:gid:gecos:home:shell:timestamp
- * One file per UID: /var/cache/nss_llng/<uid>
+ * Per-UID file:  /var/cache/nss_llng/<uid>
+ * Per-name file: /var/cache/nss_llng/byname/<username>
  */
 
-/* Save user info to file cache */
-static void file_cache_save(const struct passwd *pw)
+/*
+ * Validate that a username is safe to use as a single path component.
+ *
+ * Usernames are already validated upstream (LLNG directory and
+ * query_service_account() enforce `[a-z_][a-z0-9_-]*`), but the file cache
+ * turns the name into a filesystem path, so this is defense in depth against
+ * path traversal and unexpected bytes.
+ *
+ * This deliberately enforces EXACTLY the grammar validate_username() enforces
+ * in src/pam_openbastion.c (`[a-z_][a-z0-9_-]{0,31}`). The two must not drift:
+ * a name this function accepts but the PAM validator refuses would be written
+ * to the cache and then never invalidated by the PAM side, leaving a stale
+ * record no code path can clear. Concretely that means, on top of rejecting
+ * NULL/empty, '/', a leading '.' and anything outside [a-z0-9_-]:
+ *   - the first character must be [a-z_] (a leading digit or '-' is refused,
+ *     as it is by validate_username);
+ *   - the total length is capped at 32, the same conservative POSIX-ish limit.
+ *
+ * Returns 0 if the name is a safe filename, -1 otherwise.
+ */
+#define CACHE_NAME_MAX 32
+static int valid_cache_name(const char *name)
 {
-    if (!pw || !pw->pw_name) return;
+    if (!name || name[0] == '\0') return -1;
+    if (strlen(name) > CACHE_NAME_MAX) return -1;
+    /* First character: lowercase letter or underscore (rejects '.', '-', and
+     * any digit) — identical to validate_username()'s first-character rule. */
+    if (!((name[0] >= 'a' && name[0] <= 'z') || name[0] == '_')) return -1;
+    for (const char *c = name; *c; c++) {
+        unsigned char ch = (unsigned char)*c;
+        if (ch == '/') return -1;
+        if (!((ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') ||
+              ch == '_' || ch == '-')) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
-    /*
-     * Only root writes this cache. An NSS module is loaded into *every*
-     * process that resolves a user, so without this guard an unprivileged
-     * process could be made to create or rewrite entries the whole host then
-     * trusts. In practice only root ever gets here anyway (the LLNG query needs
-     * the root-only server token), so this costs nothing and closes the door.
-     */
-    if (geteuid() != 0) return;
+/*
+ * Open a cache directory without creating it, and verify it is trustworthy.
+ *
+ * SECURITY: the cache files are consumed by privileged callers (sshd, sudo,
+ * cron) which act on the uid/gid we hand back. If an unprivileged user could
+ * own or write the cache directory they could plant a file claiming
+ * `root:0:0::/root:/bin/bash` and obtain uid 0. We therefore refuse to use a
+ * directory that is not a real directory owned by CACHE_TRUSTED_UID (root in
+ * production) and not group/world writable. All later file operations are
+ * performed relative to this verified fd (openat/renameat/unlinkat) so the path
+ * cannot be swapped under us (symlink/TOCTOU).
+ *
+ * O_PATH rather than O_RDONLY: the directories are 0711 (see CACHE_DIR_MODE),
+ * so an unprivileged process has search but NOT read permission on them and
+ * open(O_RDONLY|O_DIRECTORY) would fail with EACCES. An O_PATH fd needs only
+ * search permission and is still a valid dirfd for openat()/unlinkat() and a
+ * valid target for fstat(), which is all this module does with it.
+ *
+ * This is the READ path: it never creates anything and stays silent on the
+ * ordinary "no cache yet" outcomes (ENOENT/EACCES). An unprivileged `ls -l`
+ * resolving a uid must not mkdir() anything, and must not emit a syslog
+ * warning on a host where the directory does not exist — that would turn every
+ * lookup into a log line.
+ *
+ * Returns a directory fd on success (caller must close it), -1 otherwise.
+ */
+static int open_cache_dir_read(const char *dir)
+{
+    /* Both warnings below describe a PERMANENT misconfiguration, and this
+     * function runs on every getpwnam()/getpwuid() in every process on the
+     * host: logging per lookup would flood syslog for as long as the condition
+     * lasts. Once per process is enough to diagnose it, and the process
+     * lifetime bounds the flood. The atomic exchange keeps concurrent threads
+     * from each emitting a copy. */
+    static int warned_symlink = 0;
+    static int warned_untrusted = 0;
 
-    /*
-     * Directory: root-owned, 0711 — traversable but NOT listable.
-     *
-     * Entries stay readable by unprivileged processes (see the file mode
-     * below), but nobody except root can readdir() the directory, so the SSO
-     * user directory can no longer be harvested wholesale by any local
-     * account. Same trick ob-bastion-setup already applies to
-     * /etc/open-bastion (0711: traversable, unlistable).
-     *
-     * mkdir()'s mode is masked by the caller's umask, and NSS runs inside
-     * arbitrary processes with arbitrary umasks, so set the mode explicitly
-     * afterwards. The chmod is unconditional so that an upgrade also tightens
-     * a 0755 directory left by an earlier version; the directory is root-owned
-     * inside root-only-writable /var/cache, so it cannot be swapped for a
-     * symlink by a local user.
-     */
-    if (mkdir(CACHE_DIR, 0711) == -1 && errno != EEXIST) {
+    int dfd = open(dir, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) {
+        /* ENOENT: no cache yet. EACCES/EPERM: not ours to read. Both are
+         * normal, silent outcomes — the caller simply falls through to LLNG. */
+        if (errno == ELOOP &&
+            __atomic_exchange_n(&warned_symlink, 1, __ATOMIC_RELAXED) == 0) {
+            syslog(LOG_WARNING,
+                   "libnss_openbastion: cache directory %s is a symlink (rejected)", dir);
+        }
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(dfd, &st) != 0) {
+        close(dfd);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != CACHE_TRUSTED_UID ||
+        (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        if (__atomic_exchange_n(&warned_untrusted, 1, __ATOMIC_RELAXED) == 0) {
+            syslog(LOG_WARNING,
+                   "libnss_openbastion: cache directory %s is untrusted "
+                   "(wrong owner or group/world-writable) - ignoring cache "
+                   "(further occurrences in this process are not logged)",
+                   dir);
+        }
+        close(dfd);
+        return -1;
+    }
+
+    return dfd;
+}
+
+/*
+ * Open a cache directory for writing, creating it if missing, and verify it.
+ *
+ * This is the WRITE path, reached only from file_cache_save*(), i.e. only after
+ * a successful LLNG query, which only the cache owner (root, holder of the
+ * server token) can perform. Creating the directory and warning loudly on
+ * failure is appropriate here and here only.
+ *
+ * mkdir()'s mode is masked by the caller's umask, and an NSS module runs inside
+ * arbitrary processes with arbitrary umasks, so the mode is re-asserted through
+ * the verified fd afterwards. Doing it with fchmod() on the fd rather than
+ * chmod() on the path keeps the whole sequence TOCTOU-free, and makes an
+ * upgrade tighten a 0755 directory left behind by an earlier version.
+ *
+ * Returns a directory fd on success (caller must close it), -1 otherwise.
+ */
+static int open_cache_dir_write(const char *dir)
+{
+    if (mkdir(dir, CACHE_DIR_MODE) == -1 && errno != EEXIST) {
         syslog(LOG_WARNING, "libnss_openbastion: cannot create cache directory %s: %s",
-               CACHE_DIR, strerror(errno));
-        return;
+               dir, strerror(errno));
+        return -1;
     }
-    chmod(CACHE_DIR, 0711);
 
-    char filepath[256];
-    int len = snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)pw->pw_uid);
-    if (len < 0 || (size_t)len >= sizeof(filepath)) {
-        syslog(LOG_ERR, "libnss_openbastion: cache filepath truncated for uid %u",
+    /* O_RDONLY rather than the read path's O_PATH: only the cache owner reaches
+     * this function, and it always has read permission on its own 0711
+     * directory. A real (non-O_PATH) fd is what lets fchmod() below re-assert
+     * the mode without ever naming a path again. */
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) {
+        if (errno == ELOOP) {
+            syslog(LOG_WARNING,
+                   "libnss_openbastion: cache directory %s is a symlink (rejected)", dir);
+        } else {
+            syslog(LOG_WARNING, "libnss_openbastion: cannot open cache directory %s: %s",
+                   dir, strerror(errno));
+        }
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(dfd, &st) != 0) {
+        syslog(LOG_WARNING, "libnss_openbastion: cannot stat cache directory %s: %s",
+               dir, strerror(errno));
+        close(dfd);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != CACHE_TRUSTED_UID ||
+        (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: cache directory %s is untrusted "
+               "(wrong owner or group/world-writable) - ignoring cache",
+               dir);
+        close(dfd);
+        return -1;
+    }
+
+    /* Re-assert 0711: the umask may have masked mkdir()'s mode, or the
+     * directory may have been created 0755 by an earlier version (or by the
+     * packaging) and an upgrade must tighten it. fchmod() on the already
+     * verified fd, never chmod() on the path — no TOCTOU window. Best effort:
+     * a failure here does not make the directory unusable, and the ownership
+     * and writability checks above have already vouched for it. */
+    if ((st.st_mode & 07777) != CACHE_DIR_MODE && fchmod(dfd, CACHE_DIR_MODE) != 0) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: cannot set mode %04o on cache directory %s: %s",
+               (unsigned)CACHE_DIR_MODE, dir, strerror(errno));
+    }
+
+    return dfd;
+}
+
+/*
+ * Split a cache line into EXACTLY 7 fields on ':'.
+ *
+ * Unlike strtok_r() this does NOT collapse consecutive delimiters, so an
+ * empty field (e.g. an empty GECOS in "name:uid:gid::home:shell:ts") is
+ * preserved as an empty string instead of shifting later fields left. The
+ * line is modified in place (':' overwritten by '\0'); `out[i]` point into it.
+ * A trailing newline on the last field is stripped.
+ *
+ * Returns 0 if and only if there are exactly 7 fields (6 separators);
+ * any other count is rejected (-1) so a malformed/truncated record can never
+ * be partially interpreted.
+ */
+static int split_cache_line(char *line, char *out[7])
+{
+    int n = 0;
+    char *field = line;
+    for (char *p = line; ; p++) {
+        if (*p == ':' || *p == '\0') {
+            int end = (*p == '\0');
+            if (n >= 7) return -1;     /* too many fields */
+            *p = '\0';
+            out[n++] = field;
+            if (end) break;
+            field = p + 1;
+        }
+    }
+    if (n != 7) return -1;             /* too few fields */
+
+    /* Strip a trailing CR/LF from the last field (timestamp). */
+    char *last = out[6];
+    size_t llen = strlen(last);
+    while (llen > 0 && (last[llen - 1] == '\n' || last[llen - 1] == '\r')) {
+        last[--llen] = '\0';
+    }
+    return 0;
+}
+
+/*
+ * Open a leaf file inside an already-verified cache dir fd and verify it is a
+ * trusted, root-owned, non-group/world-writable regular file before reading.
+ *
+ * Returns a FILE* opened for reading on success (caller fclose()s it), or NULL
+ * on any failure or trust violation. Uses openat() relative to dirfd with
+ * O_NOFOLLOW so the leaf cannot be a symlink and the path cannot be swapped.
+ */
+static FILE *open_cache_file_verified(int dirfd, const char *leaf)
+{
+    int fd = openat(dirfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return NULL;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return NULL;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_uid != CACHE_TRUSTED_UID ||
+        (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: cache file '%s' is untrusted "
+               "(not a root-owned regular file or group/world-writable) - ignoring",
+               leaf);
+        close(fd);
+        return NULL;
+    }
+
+    FILE *f = fdopen(fd, "r");
+    if (!f) {
+        close(fd);
+        return NULL;
+    }
+    return f;
+}
+
+/* True if `s` contains a byte that would break the one-record-per-line,
+ * colon-separated on-disk format. */
+static int field_breaks_format(const char *s)
+{
+    for (const char *c = s; *c; c++) {
+        if (*c == ':' || *c == '\n' || *c == '\r') return 1;
+    }
+    return 0;
+}
+
+/*
+ * Copy at most `budget` bytes of `src` into `dst`, NUL-terminating it, with
+ * ':' and CR/LF folded to a space, and stopping on a UTF-8 character boundary
+ * so a trimmed value never ends mid-sequence (gecos routinely holds accented
+ * display names). Returns the number of bytes written.
+ *
+ * `dst` must have room for budget + 1 bytes.
+ */
+static size_t copy_sanitized_gecos(char *dst, const char *src, size_t budget)
+{
+    size_t i = 0;
+    while (src[i] != '\0') {
+        unsigned char c = (unsigned char)src[i];
+        size_t clen = 1;
+        if ((c & 0xE0) == 0xC0)      clen = 2;
+        else if ((c & 0xF0) == 0xE0) clen = 3;
+        else if ((c & 0xF8) == 0xF0) clen = 4;
+
+        if (i + clen > budget) break;          /* would split the character */
+
+        /* Malformed input: stop rather than copy half a sequence. */
+        for (size_t k = 1; k < clen; k++) {
+            if (((unsigned char)src[i + k] & 0xC0) != 0x80) { clen = 0; break; }
+        }
+        if (clen == 0) break;
+
+        for (size_t k = 0; k < clen; k++) {
+            char ch = src[i + k];
+            dst[i + k] = (ch == ':' || ch == '\n' || ch == '\r') ? ' ' : ch;
+        }
+        i += clen;
+    }
+    dst[i] = '\0';
+    return i;
+}
+
+/*
+ * Serialize a passwd record into the cache's
+ * "name:uid:gid:gecos:home:shell:timestamp" line format, refusing anything a
+ * reader could not parse back.
+ *
+ * Two shapes of record are unreadable, and both used to be written blindly by
+ * the fprintf() this replaces:
+ *
+ *   - a field containing ':' produces 8 fields, which split_cache_line()
+ *     rejects outright;
+ *   - a record longer than the readers' fgets() buffer comes back truncated,
+ *     so its field count is wrong.
+ *
+ * Either one is written by root, then fails to parse on every subsequent
+ * lookup, falls back to an HTTPS round trip to LLNG, and is rewritten
+ * identically by that very lookup: a permanent miss for that user plus
+ * sustained LLNG load. The read side now unlinks an unparsable entry, but
+ * only refusing to produce one actually breaks the loop.
+ *
+ * gecos is cosmetic (a display name), so it is sanitized and, if the record
+ * would otherwise be too long, trimmed to fit. name/home/shell are
+ * load-bearing — a truncated home directory or shell is worse than no cache
+ * entry at all — so a record that cannot be written faithfully is refused and
+ * the lookup simply stays uncached (correct, just slower).
+ *
+ * Returns the record length on success, -1 if it must not be written.
+ */
+static int build_cache_line(char *out, size_t outlen, const struct passwd *pw,
+                            time_t now)
+{
+    const char *name  = pw->pw_name;
+    const char *gecos = pw->pw_gecos ? pw->pw_gecos : "";
+    const char *home  = pw->pw_dir   ? pw->pw_dir   : "";
+    const char *shell = pw->pw_shell ? pw->pw_shell : "";
+
+    if (field_breaks_format(name) || field_breaks_format(home) ||
+        field_breaks_format(shell)) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: refusing to cache uid %u: name, home or "
+               "shell contains a field separator", (unsigned)pw->pw_uid);
+        return -1;
+    }
+
+    char uidbuf[32], gidbuf[32], tsbuf[32];
+    snprintf(uidbuf, sizeof(uidbuf), "%u", (unsigned)pw->pw_uid);
+    snprintf(gidbuf, sizeof(gidbuf), "%u", (unsigned)pw->pw_gid);
+    snprintf(tsbuf,  sizeof(tsbuf),  "%ld", (long)now);
+
+    /* Everything except gecos, plus the 6 separators and the newline. */
+    size_t fixed = strlen(name) + strlen(uidbuf) + strlen(gidbuf) +
+                   strlen(home) + strlen(shell) + strlen(tsbuf) + 6 + 1;
+    if (fixed > CACHE_LINE_MAX) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: refusing to cache uid %u: record too long "
+               "(%zu bytes without gecos, limit %d)",
+               (unsigned)pw->pw_uid, fixed, CACHE_LINE_MAX);
+        return -1;
+    }
+
+    char gecos_buf[CACHE_LINE_MAX + 1];
+    copy_sanitized_gecos(gecos_buf, gecos, CACHE_LINE_MAX - fixed);
+
+    int len = snprintf(out, outlen, "%s:%s:%s:%s:%s:%s:%s\n",
+                       name, uidbuf, gidbuf, gecos_buf, home, shell, tsbuf);
+    if (len < 0 || (size_t)len >= outlen || len > CACHE_LINE_MAX) {
+        syslog(LOG_ERR, "libnss_openbastion: cache record for uid %u did not fit",
                (unsigned)pw->pw_uid);
+        return -1;
+    }
+    return len;
+}
+
+/*
+ * Atomically write a passwd cache record into an already-verified dir fd.
+ *
+ * Once nscd is removed, many unprivileged processes read these files
+ * concurrently with no daemon serializing them. A reader must never observe a
+ * half-written line, so we write to a per-pid temp leaf, fchmod it 0644 while
+ * it is still private, then renameat() it into place (rename is atomic on the
+ * same filesystem). On any error the temp file is removed via unlinkat().
+ *
+ * All operations are relative to `dirfd` (a fd returned by
+ * open_cache_dir_write) using O_NOFOLLOW, which closes the symlink/TOCTOU
+ * vector: the path the dir fd refers to cannot be swapped out under us.
+ */
+static void file_cache_write_atomic_at(int dirfd, const char *leaf,
+                                       const struct passwd *pw)
+{
+    /* Serialize FIRST: a record that cannot be read back must not reach the
+     * directory at all, not even as a temp file we would then have to clean
+     * up. build_cache_line() has already logged the reason. */
+    char record[CACHE_LINE_MAX + 2];
+    int reclen = build_cache_line(record, sizeof(record), pw, time(NULL));
+    if (reclen < 0) return;
+
+    char tmpleaf[128];
+    int tlen = snprintf(tmpleaf, sizeof(tmpleaf), ".tmp.%s.%ld",
+                        leaf, (long)getpid());
+    if (tlen < 0 || (size_t)tlen >= sizeof(tmpleaf)) {
+        syslog(LOG_ERR, "libnss_openbastion: cache temp leaf truncated for %s", leaf);
         return;
     }
 
-    /*
-     * O_NOFOLLOW: never follow a symlink sitting at the entry path. The
-     * directory is root-only-writable so one should not exist, but this is
-     * root truncating a path derived from server-supplied data — refuse to be
-     * the write primitive if that assumption is ever wrong.
-     */
-    int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    /* Create exclusively, relative to the verified dir, never following links.
+     *
+     * EEXIST needs a retry rather than a bail-out. The temp leaf is keyed on
+     * the pid, so a process killed between openat() and renameat() leaves
+     * `.tmp.<leaf>.<pid>` behind, and the next process that the kernel hands
+     * that pid to would then get EEXIST here forever: caching for that entry
+     * would be permanently dead with nothing but a syslog line to say why.
+     * Unlink the stale leftover and retry exactly once — the directory is
+     * writable only by the cache owner (verified above), so the file we remove
+     * can only be our own crash debris, never an attacker's plant, and a
+     * single retry cannot loop. */
+    int fd = openat(dirfd, tmpleaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        unlinkat(dirfd, tmpleaf, 0);
+        fd = openat(dirfd, tmpleaf,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    }
     if (fd < 0) {
         syslog(LOG_WARNING, "libnss_openbastion: cannot create cache file %s: %s",
-               filepath, strerror(errno));
+               tmpleaf, strerror(errno));
         return;
     }
 
     FILE *f = fdopen(fd, "w");
     if (!f) {
+        syslog(LOG_WARNING, "libnss_openbastion: cannot open cache file %s: %s",
+               tmpleaf, strerror(errno));
         close(fd);
+        unlinkat(dirfd, tmpleaf, 0);
         return;
     }
 
-    /* Write in format: username:uid:gid:gecos:home:shell:timestamp */
-    fprintf(f, "%s:%u:%u:%s:%s:%s:%ld\n",
-            pw->pw_name,
-            (unsigned)pw->pw_uid,
-            (unsigned)pw->pw_gid,
-            pw->pw_gecos ? pw->pw_gecos : "",
-            pw->pw_dir ? pw->pw_dir : "",
-            pw->pw_shell ? pw->pw_shell : "",
-            (long)time(NULL));
+    /* Format: username:uid:gid:gecos:home:shell:timestamp, bounded by
+     * build_cache_line() above so the readers' fgets() buffer always holds a
+     * whole record. */
+    fwrite(record, 1, (size_t)reclen, f);
 
     /*
-     * File mode 0644, root-owned. It deliberately stays readable by
-     * unprivileged processes and this cannot be tightened to 0600:
+     * File mode 0644, owned by the cache owner. It deliberately stays readable
+     * by unprivileged processes and this cannot be tightened to 0600:
      *
-     *   - an NSS module runs *inside the calling process*, so getpwuid() is
-     *     served to unprivileged programs by this very code;
-     *   - an unprivileged process cannot read the root-only server token, so
-     *     it can never query LLNG - this file cache is its ONLY source of
-     *     uid -> name data (see _nss_openbastion_getpwuid_r);
+     *   - an NSS module runs *inside the calling process*, so getpwuid() and
+     *     getpwnam() are served to unprivileged programs by this very code;
+     *   - an unprivileged process cannot read the root-only server token, so it
+     *     can never query LLNG — this file cache is its ONLY source of passwd
+     *     data (which is the whole point of the name-keyed cache: without it,
+     *     dropping nscd would leave every `ls -l` and `id` unresolved);
      *   - openssh's client calls getpwuid(getuid()) at startup and refuses to
-     *     run when it fails ("You don't exist, go away!"), so a 0600 cache
-     *     would break ob-ssh / ob-scp / ob-sftp for every bastion user, plus
-     *     ls -l, ps and id.
+     *     run when it fails ("You don't exist, go away!").
      *
-     * Handing the entry to its own user (0600 owned by pw_uid) is worse, not
+     * Handing an entry to its own user (0600 owned by pw_uid) is worse, not
      * better: the owner could then rewrite their own gid/home/shell and feed
      * attacker-chosen passwd data back to root. The content is passwd-shaped
-     * and is what /etc/passwd exposes world-readably on every Unix; the actual
-     * exposure fixed here is bulk enumeration, which the 0711 directory stops.
-     * Genuinely sensitive service accounts are already never written here (see
-     * _nss_openbastion_getpwnam_r).
+     * and is what /etc/passwd exposes world-readably on every Unix; the real
+     * exposure — bulk enumeration of the SSO user directory, made sharper here
+     * because the byname filenames ARE the login names — is what the 0711
+     * directory stops (refs #189). Genuinely sensitive service accounts are
+     * already never written here (see _nss_openbastion_getpwnam_r).
      *
-     * fchmod() on the fd rather than chmod() on the path: no TOCTOU, and it
-     * also normalises an entry created under a restrictive umask.
+     * fchmod() on the temp fd before the rename closes the TOCTOU window and
+     * normalises an entry created under a restrictive umask.
      */
-    fchmod(fileno(f), 0644);
-    fclose(f);
+    /* Checked one at a time, and errno captured immediately: a single
+     * short-circuited condition would report strerror(errno) from whichever
+     * call happened to leave a value behind, not from the one that failed
+     * (ferror() in particular sets nothing). */
+    const char *failed = NULL;
+    int saved_errno = 0;
+    if (fchmod(fileno(f), 0644) != 0) {
+        failed = "fchmod"; saved_errno = errno;
+    } else if (fflush(f) != 0) {
+        failed = "fflush"; saved_errno = errno;
+    } else if (ferror(f)) {
+        failed = "write"; saved_errno = 0;
+    }
+    if (failed) {
+        syslog(LOG_WARNING, "libnss_openbastion: %s failed on cache file %s: %s",
+               failed, tmpleaf, saved_errno ? strerror(saved_errno) : "stream error");
+        fclose(f);
+        unlinkat(dirfd, tmpleaf, 0);
+        return;
+    }
+    if (fclose(f) != 0) {
+        syslog(LOG_WARNING, "libnss_openbastion: error closing cache file %s: %s",
+               tmpleaf, strerror(errno));
+        unlinkat(dirfd, tmpleaf, 0);
+        return;
+    }
+
+    /* Atomic publish, relative to the verified dir. On failure leave nothing. */
+    if (renameat(dirfd, tmpleaf, dirfd, leaf) != 0) {
+        syslog(LOG_WARNING, "libnss_openbastion: cannot rename %s to %s: %s",
+               tmpleaf, leaf, strerror(errno));
+        unlinkat(dirfd, tmpleaf, 0);
+        return;
+    }
 }
 
-/* Load user info from file cache by UID */
-static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer, size_t buflen)
+/* Save user info to per-UID file cache (atomically, via a verified dir fd). */
+static void file_cache_save(const struct passwd *pw)
 {
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/%u", CACHE_DIR, (unsigned)uid);
+    if (!pw || !pw->pw_name) return;
 
-    FILE *f = fopen(filepath, "r");
-    if (!f) return -1;
+    /*
+     * Only the cache owner (root) writes this cache. An NSS module is loaded
+     * into *every* process that resolves a user, so without this guard an
+     * unprivileged process could be made to create or rewrite entries the whole
+     * host then trusts. In practice only root ever gets here anyway (the LLNG
+     * query needs the root-only server token), so this costs nothing and closes
+     * the door.
+     */
+    if (geteuid() != CACHE_TRUSTED_UID) return;
 
-    char line[1024];
-    if (!fgets(line, sizeof(line), f)) {
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
+    int dirfd = open_cache_dir_write(CACHE_DIR);
+    if (dirfd < 0) return;  /* never fall back to path-based writes */
 
-    /* Parse: username:uid:gid:gecos:home:shell:timestamp */
-    char *saveptr;
-    char *username_str = strtok_r(line, ":", &saveptr);
-    char *uid_str = strtok_r(NULL, ":", &saveptr);
-    char *gid_str = strtok_r(NULL, ":", &saveptr);
-    char *gecos_str = strtok_r(NULL, ":", &saveptr);
-    char *home_str = strtok_r(NULL, ":", &saveptr);
-    char *shell_str = strtok_r(NULL, ":", &saveptr);
-    char *timestamp_str = strtok_r(NULL, ":", &saveptr);
-
-    if (!username_str || !uid_str || !gid_str || !timestamp_str) {
-        return -1;
+    char leaf[64];
+    int len = snprintf(leaf, sizeof(leaf), "%u", (unsigned)pw->pw_uid);
+    if (len < 0 || (size_t)len >= sizeof(leaf)) {
+        syslog(LOG_ERR, "libnss_openbastion: cache leaf truncated for uid %u",
+               (unsigned)pw->pw_uid);
+        close(dirfd);
+        return;
     }
 
-    /* Check TTL - use strtol for safe parsing */
+    file_cache_write_atomic_at(dirfd, leaf, pw);
+    close(dirfd);
+}
+
+/* Save user info to per-name file cache (atomically, via a verified dir fd).
+ *
+ * SECURITY: service accounts must NEVER reach this function — only the
+ * LLNG-success path in getpwnam_r calls it. The byname directory is unlistable
+ * (0711) but its entries are 0644, so persisting service-account metadata there
+ * would still leak it to any unprivileged user who guesses the account name. */
+static void file_cache_save_by_name(const struct passwd *pw)
+{
+    if (!pw || !pw->pw_name) return;
+
+    /* Same owner-only rule as file_cache_save(); see the comment there. */
+    if (geteuid() != CACHE_TRUSTED_UID) return;
+
+    /* Defense in depth: never turn an unexpected name into a path. */
+    if (valid_cache_name(pw->pw_name) != 0) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: refusing to cache user with unsafe name");
+        return;
+    }
+
+    /* CACHE_DIR_BYNAME lives inside CACHE_DIR, so the parent must exist (and be
+     * trusted) before the subdirectory can be created. getpwnam_r happens to
+     * call file_cache_save() first, but do not depend on the call order. */
+    int parentfd = open_cache_dir_write(CACHE_DIR);
+    if (parentfd < 0) return;
+    close(parentfd);
+
+    int dirfd = open_cache_dir_write(CACHE_DIR_BYNAME);
+    if (dirfd < 0) return;  /* never fall back to path-based writes */
+
+    file_cache_write_atomic_at(dirfd, pw->pw_name, pw);
+    close(dirfd);
+}
+
+/*
+ * Shared body for the file loaders: given an already-read line and the
+ * verified filepath (relative leaf is `leaf`, opened via dirfd), parse it,
+ * enforce TTL (unlinking expired entries via unlinkat), and populate `pw`
+ * into the caller buffer. On success, `*out_created` (when non-NULL) receives
+ * the timestamp the record was WRITTEN at, not the time it was read, so a
+ * caller promoting the record into a shorter-lived cache can preserve its age.
+ * Returns 0 on success, -1 otherwise.
+ *
+ * A record that cannot be parsed is unlinked, exactly like an expired one. It
+ * is not a transient miss: it can never become readable, so leaving it in
+ * place would mean an HTTPS round trip to LLNG on every single lookup of that
+ * user, forever. build_cache_line() no longer produces such a record, but one
+ * can still be left by an older version, by a truncated write, or by an
+ * attempt at cache poisoning. unlinkat() only succeeds for the cache owner;
+ * an unprivileged reader just misses, exactly as it did before.
+ */
+static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
+                                 struct passwd *pw, char *buffer, size_t buflen,
+                                 const uid_t *want_uid, const char *want_name,
+                                 time_t *out_created)
+{
+    char *fields[7];
+    char *username_str, *uid_str, *gid_str, *gecos_str;
+    char *home_str, *shell_str, *timestamp_str;
     char *endptr;
+    long timestamp;
+    uid_t file_uid;
+    gid_t file_gid;
+
+    /* Split into EXACTLY 7 fields without collapsing empties. */
+    if (split_cache_line(line, fields) != 0) {
+        goto corrupt;
+    }
+    username_str  = fields[0];
+    uid_str       = fields[1];
+    gid_str       = fields[2];
+    gecos_str     = fields[3];
+    home_str      = fields[4];
+    shell_str     = fields[5];
+    timestamp_str = fields[6];
+
+    if (username_str[0] == '\0' || uid_str[0] == '\0' ||
+        gid_str[0] == '\0' || timestamp_str[0] == '\0') {
+        goto corrupt;
+    }
+
+    /* Check TTL - use strtol for safe parsing. */
     errno = 0;
-    long timestamp = strtol(timestamp_str, &endptr, 10);
-    /* Allow trailing whitespace (e.g. newline from fgets) after the number */
+    timestamp = strtol(timestamp_str, &endptr, 10);
     while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
         endptr++;
     }
     if (errno != 0 || endptr == timestamp_str || *endptr != '\0') {
-        return -1;  /* Invalid timestamp */
+        goto corrupt;  /* Invalid timestamp */
     }
     if (time(NULL) - timestamp > g_config.cache_ttl) {
-        /* Expired - remove file */
-        unlink(filepath);
+        /* Expired - remove file relative to the verified dir. */
+        unlinkat(dirfd, leaf, 0);
         return -1;
     }
 
-    /* Check UID matches */
-    uid_t file_uid;
-    if (safe_parse_uid(uid_str, &file_uid) != 0 || file_uid != uid) {
-        return -1;
+    /* Parse UID */
+    if (safe_parse_uid(uid_str, &file_uid) != 0) {
+        goto corrupt;
     }
-
     /* Parse GID */
-    gid_t file_gid;
     if (safe_parse_gid(gid_str, &file_gid) != 0) {
-        return -1;
+        goto corrupt;
+    }
+
+    /* Key consistency checks: the stored record must match what was asked.
+     * A record filed under the wrong key is as unusable as an unparsable one
+     * (the key IS the filename), so it is cleared the same way. */
+    if (want_uid && file_uid != *want_uid) {
+        goto corrupt;
+    }
+    if (want_name && strcmp(username_str, want_name) != 0) {
+        goto corrupt;
     }
 
     /* Copy data to buffer with safe bounds checking */
@@ -947,19 +1480,110 @@ static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer, si
     pw->pw_gid = file_gid;
 
     pw->pw_gecos = p;
-    if (safe_strcpy(&p, &remaining, gecos_str ? gecos_str : "") != 0) return -1;
+    if (safe_strcpy(&p, &remaining, gecos_str) != 0) return -1;
 
     pw->pw_dir = p;
-    if (safe_strcpy(&p, &remaining, home_str ? home_str : "") != 0) return -1;
+    if (safe_strcpy(&p, &remaining, home_str) != 0) return -1;
 
     pw->pw_shell = p;
-    if (safe_strcpy(&p, &remaining, shell_str ? shell_str : "") != 0) return -1;
+    if (safe_strcpy(&p, &remaining, shell_str) != 0) return -1;
 
+    if (out_created) *out_created = (time_t)timestamp;
     return 0;
+
+corrupt:
+    /* Unreadable record: clear it so the next lookup can repopulate a valid
+     * one instead of retrying LLNG forever. See the function comment. */
+    unlinkat(dirfd, leaf, 0);
+    return -1;
 }
 
-/* Add to cache */
-static void cache_add(const char *username, const struct passwd *pw, int valid)
+/* Load user info from file cache by UID (via a verified dir + file fd).
+ * `out_created` (optional) receives the record's own write timestamp. */
+static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer,
+                                  size_t buflen, time_t *out_created)
+{
+    int dirfd = open_cache_dir_read(CACHE_DIR);
+    if (dirfd < 0) return -1;
+
+    char leaf[64];
+    int len = snprintf(leaf, sizeof(leaf), "%u", (unsigned)uid);
+    if (len < 0 || (size_t)len >= sizeof(leaf)) {
+        close(dirfd);
+        return -1;
+    }
+
+    FILE *f = open_cache_file_verified(dirfd, leaf);
+    if (!f) {
+        close(dirfd);
+        return -1;
+    }
+
+    char line[1024];
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        close(dirfd);
+        return -1;
+    }
+    fclose(f);
+
+    int rc = file_cache_parse_into(line, dirfd, leaf, pw, buffer, buflen,
+                                   &uid, NULL, out_created);
+    close(dirfd);
+    return rc;
+}
+
+/* Load user info from file cache by name (via a verified dir + file fd).
+ * Mirrors file_cache_load_by_uid() but keyed on the username file under
+ * CACHE_DIR_BYNAME. `out_created` (optional) receives the record's own write
+ * timestamp. Returns 0 on success, -1 otherwise. */
+static int file_cache_load_by_name(const char *name, struct passwd *pw,
+                                   char *buffer, size_t buflen,
+                                   time_t *out_created)
+{
+    /* Defense in depth: validate the name as a filename BEFORE building a
+     * path, so a hostile or malformed lookup can never escape the cache dir. */
+    if (valid_cache_name(name) != 0) {
+        return -1;
+    }
+
+    int dirfd = open_cache_dir_read(CACHE_DIR_BYNAME);
+    if (dirfd < 0) return -1;
+
+    FILE *f = open_cache_file_verified(dirfd, name);
+    if (!f) {
+        close(dirfd);
+        return -1;
+    }
+
+    char line[1024];
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        close(dirfd);
+        return -1;
+    }
+    fclose(f);
+
+    int rc = file_cache_parse_into(line, dirfd, name, pw, buffer, buflen,
+                                   NULL, name, out_created);
+    close(dirfd);
+    return rc;
+}
+
+/*
+ * Add to the in-memory cache with an explicit creation time.
+ *
+ * `created` is the moment the record was obtained from LLNG, which is NOT
+ * always "now": a record promoted from the on-disk cache was written at some
+ * earlier T0 and must keep that age. Stamping it with time(NULL) instead
+ * would let a long-lived process serve it until T0 + 2*cache_ttl after the
+ * last contact with LLNG, since the file's own TTL would already have been
+ * spent before the memory copy started its own. The module's stated doctrine
+ * is that it never serves data older than cache_ttl, so the age travels with
+ * the record.
+ */
+static void cache_add_at(const char *username, const struct passwd *pw,
+                         int valid, time_t created)
 {
     /* Guard against uninitialized cache */
     if (!g_cache.entries || g_cache.capacity == 0) {
@@ -992,7 +1616,7 @@ static void cache_add(const char *username, const struct passwd *pw, int valid)
 
     cache_entry_t *entry = &g_cache.entries[slot];
     entry->username = strdup(username);
-    entry->timestamp = time(NULL);
+    entry->timestamp = created;
     entry->valid = valid;
     entry->pw_buffer = NULL;
 
@@ -1036,6 +1660,12 @@ static void cache_add(const char *username, const struct passwd *pw, int valid)
     }
 
     pthread_mutex_unlock(&g_cache.lock);
+}
+
+/* Add a record obtained right now (the LLNG and service-account paths). */
+static void cache_add(const char *username, const struct passwd *pw, int valid)
+{
+    cache_add_at(username, pw, valid, time(NULL));
 }
 
 /* Maximum response size to prevent memory exhaustion.
@@ -1679,14 +2309,31 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
      * Deliberately skip file_cache_save() here: the shared file cache
      * lives under /var/cache/nss_llng with a 0711 dir and 0644 entries
      * (unlistable, but an entry is readable by any process that knows the
-     * uid — see file_cache_save for why it cannot be 0600), so persisting
-     * service-account metadata there would expose it to unprivileged users
-     * on the host (including the uid → name reverse lookup). Keeping it in
-     * the per-process in-memory cache only is sufficient for the one-shot
-     * sshd pre-auth getpwnam() path.
+     * key — see file_cache_write_atomic_at for why entries cannot be 0600),
+     * so persisting service-account metadata there would expose it to
+     * unprivileged users on the host (including the uid → name reverse
+     * lookup). Keeping it in the per-process in-memory cache only is
+     * sufficient for the one-shot sshd pre-auth getpwnam() path.
      */
     if (query_service_account(name, result, buffer, buflen) == 0) {
         cache_add(name, result, 1);
+        g_in_nss_lookup = 0;
+        return NSS_STATUS_SUCCESS;
+    }
+
+    /*
+     * Try the cross-process name file cache before going to the network.
+     * Once nscd is gone this is what keeps getpwnam() answers shared between
+     * processes (sshd pre-auth, login, sudo, ...) without an HTTPS round trip.
+     * Only LLNG-resolved users land here (service accounts are kept
+     * memory-only on purpose), so a hit is safe to promote into the in-memory
+     * cache exactly like the getpwuid file-cache-hit path does.
+     */
+    time_t file_created = 0;
+    if (file_cache_load_by_name(name, result, buffer, buflen, &file_created) == 0) {
+        /* Promote with the record's ORIGINAL age, not time(NULL): the memory
+         * copy must expire when the on-disk record would have. */
+        cache_add_at(name, result, 1, file_created);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }
@@ -1710,8 +2357,10 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
     if (qr == 0) {
         /* Add to memory cache */
         cache_add(name, result, 1);
-        /* Also save to file cache for cross-process UID lookups */
+        /* Also save to file cache for cross-process lookups: by UID (getpwuid)
+         * and by name (getpwnam once nscd is gone). */
         file_cache_save(result);
+        file_cache_save_by_name(result);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }
@@ -1809,9 +2458,11 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwuid_r(uid_t uid,
     pthread_mutex_unlock(&g_cache.lock);
 
     /* Try file-based cache (shared across processes) */
-    if (file_cache_load_by_uid(uid, result, buffer, buflen) == 0) {
-        /* Also add to memory cache for future lookups in this process */
-        cache_add(result->pw_name, result, 1);
+    time_t file_created = 0;
+    if (file_cache_load_by_uid(uid, result, buffer, buflen, &file_created) == 0) {
+        /* Also add to memory cache for future lookups in this process, with
+         * the record's original age so it does not outlive the on-disk TTL. */
+        cache_add_at(result->pw_name, result, 1, file_created);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }

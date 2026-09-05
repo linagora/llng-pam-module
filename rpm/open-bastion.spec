@@ -76,6 +76,12 @@ ctest --output-on-failure --verbose
 %install
 %cmake_install
 
+# NSS cross-process passwd cache (libnss_openbastion). debian/open-bastion.dirs
+# provisions the same two directories on the Debian side; without this the fix
+# would be Debian-only and an RPM host would keep hitting LLNG over HTTPS for
+# every getpwnam() from a short-lived process.
+mkdir -p %{buildroot}/var/cache/nss_llng/byname
+
 %files
 %license LICENSE
 %doc README.md
@@ -104,6 +110,13 @@ ctest --output-on-failure --verbose
 %{_bindir}/ob-bastion-id
 %dir %{_prefix}/lib/open-bastion
 %{_prefix}/lib/open-bastion/ob-cert-lib.sh
+# 0711 = traversable but NOT listable. Entries under these directories are 0644
+# so an unprivileged getpwnam()/getpwuid() can read its own record (an NSS
+# module runs inside the calling process), but no local account can readdir()
+# them and enumerate the SSO user directory wholesale - which matters most for
+# byname/, whose filenames are the login names themselves. Refs #189.
+%attr(0711,root,root) %dir /var/cache/nss_llng
+%attr(0711,root,root) %dir /var/cache/nss_llng/byname
 %config(noreplace) %{_sysconfdir}/open-bastion/session-recorder.conf.example
 %config(noreplace) %{_sysconfdir}/open-bastion/ssh-proxy.conf.example
 %dir %{_datadir}/open-bastion
@@ -181,6 +194,10 @@ mkdir -p /var/cache/open-bastion
 chmod 700 /var/cache/open-bastion
 mkdir -p /var/lib/open-bastion
 chmod 711 /var/lib/open-bastion
+# NSS passwd cache: re-assert 0711 on upgrade from a version that shipped it
+# 0755 (the module also does this at runtime on its next write).
+mkdir -p /var/cache/nss_llng/byname
+chmod 711 /var/cache/nss_llng /var/cache/nss_llng/byname
 mkdir -p /var/lib/open-bastion/sessions
 # Tamper-evident layout: root:ob-sessions 0750. The recorded user is NOT in
 # ob-sessions, so o-rwx means it has no access to any recording (incl. its own);

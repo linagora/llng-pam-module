@@ -49,6 +49,7 @@ add_test(NAME test_nss_openbastion COMMAND test_nss_openbastion)
 # Includes libnss_openbastion.c directly to drive the static cache helpers, so it
 # needs the same libs as the module itself (curl/json-c/pthread).
 add_executable(test_nss_cache test_nss_cache.c ../src/str_utils.c)
+target_compile_definitions(test_nss_cache PRIVATE _GNU_SOURCE)
 target_include_directories(test_nss_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
@@ -65,6 +66,10 @@ add_test(NAME test_nss_cache COMMAND test_nss_cache)
 # test_nss_cache: includes libnss_openbastion.c directly to reach the static
 # helper, so it needs the module's own libs.
 add_executable(test_nss_config test_nss_config.c ../src/str_utils.c)
+# Same -D_GNU_SOURCE the shipped module is built with (nss/CMakeLists.txt): the
+# file cache opens its directories with O_PATH, which glibc only declares under
+# _GNU_SOURCE. Including libnss_openbastion.c without it fails to compile.
+target_compile_definitions(test_nss_config PRIVATE _GNU_SOURCE)
 target_include_directories(test_nss_config PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
