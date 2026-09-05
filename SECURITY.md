@@ -237,6 +237,14 @@ Cache entries are always encrypted — there is no plaintext mode:
   salted with a per-directory `.auth_salt`
 - **Authentication**: GCM tag prevents tampering
 
+> **Scope of the key.** The derived key is **per cache directory**, not per
+> user: every entry in one cache directory is encrypted under the same key.
+> Earlier versions of this document described the salt as "the cache username",
+> which wrongly implied per-user key separation. The salt is 16 random bytes
+> from `RAND_bytes()`, generated on first use and persisted next to the cache
+> as `.auth_salt`; it is not derived from the machine id or the username, and
+> its purpose is to stop an attacker precomputing keys for a known machine id.
+
 ```
 File format:
 ["<expires_at> <HMAC-SHA256 hex>\n"][Magic: LLNGCACHE04][IV: 12 bytes][Ciphertext][GCM tag: 16 bytes]
