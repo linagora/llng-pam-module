@@ -211,7 +211,6 @@ secret_store_t *secret_store_init(const secret_store_config_t *config)
 
     /* Copy configuration */
     store->config.enabled = config->enabled;
-    store->config.use_keyring = config->use_keyring;
 
     if (config->store_dir) {
         store->config.store_dir = strdup(config->store_dir);
@@ -221,12 +220,6 @@ secret_store_t *secret_store_init(const secret_store_config_t *config)
 
     if (config->salt) {
         store->config.salt = strdup(config->salt);
-    }
-
-    if (config->keyring_name) {
-        store->config.keyring_name = strdup(config->keyring_name);
-    } else {
-        store->config.keyring_name = strdup("pam_llng");
     }
 
     /* Create store directory if needed */
@@ -262,7 +255,6 @@ void secret_store_destroy(secret_store_t *store)
 
     free(store->config.store_dir);
     free(store->config.salt);
-    free(store->config.keyring_name);
 
     /* Securely clear derived key */
     explicit_bzero(store->derived_key, sizeof(store->derived_key));
@@ -355,15 +347,36 @@ int secret_store_put(secret_store_t *store,
     char path[512];
     build_path(store, key, path, sizeof(path));
 
-    char temp_path[520];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-
-    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
+    /*
+     * Per-process temp name created with O_EXCL (#197): a fixed "<path>.tmp"
+     * opened with O_TRUNC would let two concurrent writers interleave their
+     * writes into the same file and rename the mixture into place.
+     * O_NOFOLLOW|O_EXCL also keeps the symlink-safety of the temp file.
+     */
+    char temp_path[544];
+    int temp_len = snprintf(temp_path, sizeof(temp_path), "%s.tmp.%d", path, (int)getpid());
+    if (temp_len < 0 || temp_len >= (int)sizeof(temp_path)) {
+        explicit_bzero(out, out_size);
         free(out);
         snprintf(store->error_buf, sizeof(store->error_buf),
-                 "Failed to create secret file: %s", strerror(errno));
+                 "Secret temp path too long");
         return -1;
+    }
+
+    int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        /* Stale temp file left by a previous crash of this pid: drop and retry */
+        if (errno == EEXIST) {
+            unlink(temp_path);
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        }
+        if (fd < 0) {
+            explicit_bzero(out, out_size);
+            free(out);
+            snprintf(store->error_buf, sizeof(store->error_buf),
+                     "Failed to create secret file: %s", strerror(errno));
+            return -1;
+        }
     }
 
     ssize_t written = write(fd, out, total_size);
@@ -468,6 +481,29 @@ int secret_store_get(secret_store_t *store,
     size_t ciphertext_len = st.st_size - IV_SIZE - TAG_SIZE;
     unsigned char *ciphertext = data + IV_SIZE;
     unsigned char *tag = data + IV_SIZE + ciphertext_len;
+
+    /*
+     * The caller's buffer must be able to hold the whole plaintext BEFORE we
+     * decrypt anything. AES-256-GCM is a stream cipher: EVP_DecryptUpdate()
+     * writes ciphertext_len bytes into `secret` and the GCM tag is only
+     * verified later, in EVP_DecryptFinal_ex() - so an oversized secret file
+     * would overflow the caller's buffer while the data is still
+     * unauthenticated. Bail out here instead.
+     *
+     * The bound is exactly ciphertext_len: GCM is unpadded, so
+     * EVP_DecryptFinal_ex() writes no additional plaintext and the whole
+     * plaintext is ciphertext_len bytes. Requiring an extra TAG_SIZE would
+     * refuse the natural contract of this API - a caller that allocates
+     * exactly the plaintext length it gets back in *actual_len.
+     */
+    if (ciphertext_len > secret_size) {
+        explicit_bzero(data, st.st_size);
+        free(data);
+        snprintf(store->error_buf, sizeof(store->error_buf),
+                 "Secret too large for output buffer (%zu > %zu)",
+                 ciphertext_len, secret_size);
+        return -1;
+    }
 
     /* Decrypt using AES-256-GCM */
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();

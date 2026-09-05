@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
+  instead of used with a warning** (offline auth cache, desktop SSO). Versions
+  up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`
+  used to document creating the key with
+  `dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1`, which under
+  root's default umask 022 produces a `0644` file — so hosts set up from that
+  recipe are affected. **Effect on upgrade:** the key is ignored, the cache key
+  falls back to machine-id derivation, and every _existing_ offline cache entry
+  becomes undecryptable — a cache miss, not a failure: affected desktop SSO
+  users need one online re-authentication and the cache repopulates. There is no
+  lockout and no manual cache cleanup to do. **Remedy (restores the strong
+  derivation):** `chown root:root /etc/open-bastion/cache.key && chmod 600
+/etc/open-bastion/cache.key`. The rejection is logged to syslog with that
+  exact command. `ob-desktop-setup` has always created the key `0600`, so hosts
+  set up with it are unaffected.
+
+### Security
+
+- **A mistyped boolean in `openbastion.conf` no longer silently means `false`
+  (#183).** The parser mapped every unrecognised value to `false`, so
+  `verify_ssl = TRUE` or `verify_ssl = tru` turned TLS certificate verification
+  OFF without a word — fail-open on the setting that protects every call to the
+  portal, and the same for ~25 other security booleans. Boolean settings now
+  accept only `true`/`yes`/`1`/`on` and `false`/`no`/`0`/`off`; anything else
+  keeps the safe default, logs the offending key and value to syslog, and makes
+  `config_validate()` refuse the configuration (new return code `-6`), which
+  aborts the PAM module instead of running with a guessed value. Inline
+  comments (`verify_ssl = true # prod`) are stripped before that strict parse,
+  so an existing config file cannot become fatal on upgrade; a `#` inside a
+  token and the values of secret-bearing keys are never touched (see
+  `doc/configuration.md`). `ob-cert-daemon` was already safe on this key for a
+  different reason: it treats anything that is not an explicit `false`/`no` as
+  `true`, so a typo leaves verification ON rather than turning it off.
+- **The NSS module no longer disables TLS verification on a typo (#183).**
+  `nss_openbastion.conf` had its own parser with the same fail-open expression
+  (`strcmp(value, "true") == 0 || strcmp(value, "1") == 0`), so `verify_ssl =
+TRUE` or `= yes` silently turned certificate verification OFF for every NSS
+  call to the portal. It now reuses `str_parse_bool_strict()`. Unlike the PAM
+  module it does not refuse to start — it is loaded into every process that
+  resolves a name, and failing there would make all SSO users unresolvable and
+  lock the host out — so it fails closed on the security property instead: an
+  unrecognised value is reported to syslog and the safe value (verification ON)
+  is used.
+- **The request-signing nonce is now covered by the HMAC (#188).** With
+  `request_signing_secret` configured, the client sent `X-Nonce` alongside
+  `X-Signature-256`, but the signed message was only
+  `timestamp.method.path.body` — the nonce was not in it (despite a comment
+  claiming otherwise). A captured request could therefore be replayed with a
+  fresh nonce and still verify, defeating the replay window the nonce exists
+  for. The signed message is now `timestamp.nonce.method.path.body` and the
+  format is documented in `SECURITY.md`.
+- **`ob-builder` validates `apt_url`, `apt_suite` and `apt_component` (#190).**
+  The three values are concatenated into the `deb [signed-by=…] URL SUITE
+COMPONENT` line and interpolated verbatim into the generated installer, which
+  runs as root on every target. They were the only build inputs with no
+  validation, so `apt_url: "https://x/$(…)"` executed at install time and an
+  embedded newline injected arbitrary `sources.list` entries. They are now
+  checked against shell-safe charsets, and a regression test feeds hostile
+  values through both the CLI and the YAML config path.
+
+### Removed
+
+- **Dead token cache, `client_context`, and kernel-keyring settings.** Three
+  things `SECURITY.md` documented as active features were never wired into the
+  PAM chain, so this is a documentation-accuracy fix as much as a cleanup:
+  - The **encrypted token cache** (`src/token_cache.c`) was initialised,
+    destroyed and invalidated, but `cache_lookup()`/`cache_store()` had no
+    caller anywhere outside its own unit test — nothing ever put a token in it
+    or read one back. Removed along with its orphaned settings
+    (`cache_enabled`, `cache_dir`, `cache_ttl`, `cache_ttl_high_risk`,
+    `high_risk_services`, `cache_encrypted`, `cache_invalidate_on_logout`), the
+    `no_cache` / `no_cache_encrypt` module arguments, and the `ENABLE_CACHE`
+    build option. Rewiring it would have reopened an offline authentication
+    path nothing currently needs, so it was deleted rather than reconnected.
+  - **`client_context`** (`src/client_context.c`) was compiled into the module
+    with zero callers. Removed. Its risk-based-TTL logic only ever fed the
+    token cache.
+  - **`secrets_use_keyring` / `secrets_keyring_name`** defaulted to enabled and
+    were documented as "use kernel keyring", but no `add_key`, `request_key` or
+    `keyctl` call existed anywhere — `secret_store` only stored and freed the
+    two fields. Removed, together with the `no_keyring` module argument.
+
+  Unknown configuration keys have always been ignored silently, so an existing
+  `openbastion.conf` still loads; the removed keys simply no longer do anything
+  (they did not before either).
+
+  **Not** removed: `src/auth_cache.c`, a different component that is genuinely
+  used and already fails closed when key derivation fails. The
+  `cache_rate_limit_*` settings also stay — they protect the authorization
+  cache, not the deleted one.
+
+### Changed
+
+- **`SECURITY.md` now documents the cache that actually exists.** The "Token
+  Cache Security" section described the deleted cache, and its stated file
+  layout (`[IV][Tag][Ciphertext]`) did not match the code either. It is
+  replaced by an "Authorization Cache Security" section covering the real
+  `LLNGCACHE04` cache: its true layout (HMAC-authenticated plaintext expiry
+  header, magic, IV, ciphertext, then GCM tag), fail-closed key derivation,
+  `(user, server_group, host)` isolation, server-provided TTL, and the
+  brute-force protection on cache lookups. The French mirror
+  (`doc/security/00-architecture.md`) was corrected the same way.
+
 ### Fixed
 
 - **The SSH key policy is now actually enforced, fail-closed (#181).**
@@ -35,13 +140,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     helper, and the docs tell you to re-run `ob-bastion-setup` /
     `ob-backend-setup` before enabling it.
 
+- **A server-supplied `gid` is no longer validated against the synthetic UID
+  range.** The NSS module briefly checked the portal's `gid` (an LDAP
+  `gidNumber` exported via `pamAccessExportedVars`) against
+  `[min_uid, max_uid]` — default `[10000, 60000]` — so an ordinary group such as
+  `1000` fell outside it and was silently replaced by `default_gid`. GIDs now
+  have their own policy range, `min_gid`/`max_gid` in
+  `nss_openbastion.conf`, defaulting to `[1000, 65533]`: the Debian/RHEL
+  boundary between system groups (`SYS_GID_MAX=999`) and user groups
+  (`GID_MIN=1000`). `gid 0` and `nogroup` are refused whatever the
+  configuration says. An out-of-policy gid is replaced by `default_gid` and
+  logged to syslog with the offending value — never silently.
+
 - **A rejected `/pam/verify` token now fails cleanly instead of looking like a
   server outage.** On any negative verdict — expired or invalid one-time token,
   wrong token type, or an SSH fingerprint the portal refuses — the pam-access
   plugin answers `{"valid":false,"error":"<reason>"}` with no `user` field
   (`user` is only present on a positive verdict). The client required `user`
   unconditionally and bailed out with `Missing required 'user' field in
-  response`, returning `PAM_AUTHINFO_UNAVAIL` — which reads as a server problem
+response`, returning `PAM_AUTHINFO_UNAVAIL` — which reads as a server problem
   and, with `auth sufficient`, fell through to `pam_unix` then `pam_deny`. It
   now treats a `valid:false` verdict as a normal negative result: the reason is
   surfaced, authentication fails with `PAM_AUTH_ERR`, and rate-limiting/CrowdSec

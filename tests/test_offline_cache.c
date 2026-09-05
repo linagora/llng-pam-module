@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -535,6 +536,93 @@ static int test_full_entry(void)
     return 1;
 }
 
+/*
+ * Concurrency regression for #186.
+ *
+ * PAM runs one process per authentication attempt, so failed_attempts is
+ * updated by concurrent processes. Before the fix offline_cache_verify() did
+ * its read-decrypt-mutate-encrypt-write with no inter-process lock: N parallel
+ * wrong-password attempts each read the same counter and each wrote count+1,
+ * so max_failed_attempts was never reached and the lockout could be bypassed.
+ *
+ * The children are released together by a pipe barrier (no sleeps) and the
+ * expected value is exact, so this is a deterministic assertion.
+ */
+#define OC_CONC_CHILDREN 6
+
+static int test_concurrent_failed_attempts(void)
+{
+    if (!has_machine_id()) return 2;
+    offline_cache_t *cache = offline_cache_init(test_dir, NULL);
+    ASSERT(cache != NULL);
+
+    /* Keep the threshold out of reach: a lockout would make later attempts
+     * return ERR_LOCKED without incrementing and blur the exact-N assertion. */
+    offline_cache_set_lockout(cache, OC_CONC_CHILDREN + 1, 3600);
+
+    int ret = offline_cache_store(cache, "concurrent_user", "correct_pass",
+                                  3600, NULL, NULL, NULL);
+    if (ret != OFFLINE_CACHE_OK) {
+        offline_cache_destroy(cache);
+        ASSERT(ret == OFFLINE_CACHE_OK);
+    }
+
+    int barrier[2];
+    if (pipe(barrier) != 0) {
+        offline_cache_destroy(cache);
+        return 0;
+    }
+
+    int started = 0;
+    for (int i = 0; i < OC_CONC_CHILDREN; i++) {
+        pid_t pid = fork();
+        if (pid < 0) break;
+        if (pid == 0) {
+            close(barrier[1]);
+            /* Block until the parent releases every child at once. */
+            char c;
+            ssize_t r;
+            do {
+                r = read(barrier[0], &c, 1);
+            } while (r < 0 && errno == EINTR);
+            close(barrier[0]);
+
+            offline_cache_verify(cache, "concurrent_user", "wrong_pass", NULL);
+            _exit(0);
+        }
+        started++;
+    }
+
+    close(barrier[0]);
+    for (int i = 0; i < started; i++) {
+        if (write(barrier[1], "g", 1) != 1) break;
+    }
+    close(barrier[1]);
+
+    for (int i = 0; i < started; i++) {
+        int status;
+        wait(&status);
+    }
+
+    int ok = (started == OC_CONC_CHILDREN);
+
+    offline_cache_entry_t entry;
+    if (ok && offline_cache_get_entry(cache, "concurrent_user", &entry) == OFFLINE_CACHE_OK) {
+        if (entry.failed_attempts != OC_CONC_CHILDREN) {
+            printf("(failed_attempts=%d expected=%d) ",
+                   entry.failed_attempts, OC_CONC_CHILDREN);
+            ok = 0;
+        }
+        offline_cache_entry_free(&entry);
+    } else {
+        ok = 0;
+    }
+
+    offline_cache_invalidate(cache, "concurrent_user");
+    offline_cache_destroy(cache);
+    return ok;
+}
+
 int main(void)
 {
     printf("Running offline cache tests...\n");
@@ -561,6 +649,7 @@ int main(void)
     TEST(strerror);
     TEST(store_null_params);
     TEST(full_entry);
+    TEST(concurrent_failed_attempts);
 
     cleanup_test_dir();
 

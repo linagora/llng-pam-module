@@ -59,6 +59,10 @@ usr/share/man/man8/ob-record-sink.8
 usr/share/open-bastion/audit/rules.d/open-bastion.rules
 usr/share/open-bastion/audit/cron.daily/open-bastion-audit-rotate
 
+# logrotate template for the JSON audit log (copied to /etc/logrotate.d/ by the
+# admin; not a conffile, since audit_log_file is configurable)
+usr/share/open-bastion/logrotate/open-bastion
+
 # Hardening templates (deployed by `ob-bastion-setup --enable-hardening`)
 usr/share/open-bastion/hardening/logind.conf.d/open-bastion.conf
 usr/share/open-bastion/hardening/security/limits.d/open-bastion.conf

@@ -165,6 +165,31 @@ audit_to_syslog = true
 audit_level = 1  # 0=critical, 1=auth events, 2=all
 ```
 
+With `audit_to_syslog`, events go to the `auth` facility under the
+`pam_openbastion` ident, so they show up alongside the module's own messages:
+
+```bash
+sudo journalctl -t pam_openbastion
+sudo grep pam_openbastion /var/log/auth.log
+```
+
+### Permissions and rotation of the JSON log
+
+The module creates `audit_log_file` as `0640` and refuses to write to it if it
+is world- or group-writable, is a symlink, or is not owned by the effective
+user. It sets the mode **only when it creates the file**, so if you deliberately
+tighten an existing log to `0600` it stays `0600`.
+
+The module does not rotate the log itself: every `sshd` and `sudo` process on
+the host appends to it concurrently, and a renaming or truncating writer would
+race with its peers. It only warns once per process, via syslog, when the file
+passes 100 MB. Install the shipped template instead:
+
+```bash
+sudo cp /usr/share/open-bastion/logrotate/open-bastion /etc/logrotate.d/open-bastion
+# then adjust the path inside it if audit_log_file is not the default
+```
+
 ## Webhook Notifications
 
 Get notified of security events:

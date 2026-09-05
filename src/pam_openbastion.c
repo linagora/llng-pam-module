@@ -46,9 +46,6 @@
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */
 #include "offline_cache.h"
 #endif /* ENABLE_DESKTOP_SSO */
-#ifdef ENABLE_CACHE
-#include "token_cache.h"
-#endif
 
 /* Default configuration file */
 #define DEFAULT_CONFIG_FILE "/etc/open-bastion/openbastion.conf"
@@ -88,9 +85,6 @@ typedef struct {
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */
     offline_cache_t *offline_cache;  /* Offline credential cache for Desktop SSO */
 #endif /* ENABLE_DESKTOP_SSO */
-#ifdef ENABLE_CACHE
-    token_cache_t *cache;
-#endif
     /* Security: Store token file metadata for periodic re-verification (#46) */
     ino_t token_file_inode;
     time_t token_file_mtime;
@@ -265,6 +259,45 @@ static int has_offline_session_marker(const char *user)
     return (stat(marker_path, &st) == 0);
 }
 #endif /* ENABLE_DESKTOP_SSO */
+
+/*
+ * Re-adopt the identity (inode + mtime) of the server token file.
+ *
+ * verify_token_file_security() treats an inode change as a security violation,
+ * and data->token_file_inode is otherwise recorded only once, when the handle
+ * loads the token. But the token file is legitimately replaced by rename():
+ * both the ob-heartbeat timer (every 5 minutes, i.e. exactly
+ * TOKEN_RECHECK_INTERVAL) and our own refresh_server_token_on_demand() persist
+ * that way. A long-lived PAM handle would therefore lock itself out on the next
+ * periodic re-verification — the on-demand refresh poisoning the very handle it
+ * had just healed. Call this after deliberately adopting a new on-disk token so
+ * the recorded identity follows the file we chose to trust.
+ */
+static void readopt_token_file_identity(pam_handle_t *pamh,
+                                        pam_openbastion_data_t *data)
+{
+    if (!data || !data->config.server_token_file) {
+        return;
+    }
+
+    int fd = open(data->config.server_token_file, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        OB_LOG_WARN(pamh, "Cannot re-adopt token file %s after refresh",
+                    data->config.server_token_file);
+        return;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) == 0) {
+        data->token_file_inode = st.st_ino;
+        data->token_file_mtime = st.st_mtime;
+        data->last_token_check = time(NULL);
+    } else {
+        OB_LOG_WARN(pamh, "Cannot stat token file %s after refresh",
+                    data->config.server_token_file);
+    }
+    close(fd);
+}
 
 /*
  * Security: Re-verify token file permissions periodically (fixes #46)
@@ -1174,11 +1207,6 @@ static void cleanup_data(pam_handle_t *pamh, void *data, int error_status)
 
     pam_openbastion_data_t *ob_data = (pam_openbastion_data_t *)data;
     if (ob_data) {
-#ifdef ENABLE_CACHE
-        if (ob_data->cache) {
-            cache_destroy(ob_data->cache);
-        }
-#endif
         if (ob_data->auth_cache) {
             auth_cache_destroy(ob_data->auth_cache);
         }
@@ -1255,6 +1283,17 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
     int validate_result = config_validate(&data->config);
     if (validate_result == -4) {
         OB_LOG_ERR(pamh, "Security error: portal_url must use HTTPS (use verify_ssl=false to disable)");
+        goto error;
+    }
+    if (validate_result == -6) {
+        /*
+         * A boolean setting had an unparseable value (#183). Refusing here is
+         * deliberate: silently treating it as false would, for verify_ssl,
+         * disable TLS verification. The offending key and value were logged to
+         * syslog by config.c.
+         */
+        OB_LOG_ERR(pamh, "Configuration error: a boolean setting has an invalid value "
+                         "(expected true/yes/1/on or false/no/0/off); see syslog for the key");
         goto error;
     }
     if (validate_result != 0) {
@@ -1348,51 +1387,17 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
     }
 
     /*
-     * Optimization: Derive cache encryption keys upfront to avoid duplicate
-     * PBKDF2 overhead (100K iterations = 50-100ms per derivation).
-     * Each cache uses a different directory/salt combination, so we derive
-     * both keys here and pass them to the init functions.
+     * Optimization: Derive the auth cache encryption key upfront to avoid
+     * duplicate PBKDF2 overhead (100K iterations = 50-100ms per derivation),
+     * then pass it to the init function.
      */
-    cache_derived_key_t token_cache_key = {0};
     cache_derived_key_t auth_cache_key = {0};
 
-#ifdef ENABLE_CACHE
-    /* Derive token cache key if enabled and encrypted */
-    if (data->config.cache_enabled && data->config.cache_encrypted) {
-        if (cache_derive_key(data->config.cache_dir, ".cache_salt", &token_cache_key) != 0) {
-            OB_LOG_WARN(pamh, "Failed to derive token cache key, encryption will be disabled");
-        }
-    }
-#endif
-
-    /* Derive auth cache key if enabled */
     if (data->config.auth_cache_enabled) {
         if (cache_derive_key(data->config.auth_cache_dir, ".auth_salt", &auth_cache_key) != 0) {
             OB_LOG_WARN(pamh, "Failed to derive auth cache key");
         }
     }
-
-#ifdef ENABLE_CACHE
-    /* Initialize cache if enabled */
-    if (data->config.cache_enabled) {
-        if (token_cache_key.derived) {
-            /* Use pre-derived key */
-            cache_config_t cache_cfg = {
-                .cache_dir = data->config.cache_dir,
-                .ttl = data->config.cache_ttl,
-                .encrypt = data->config.cache_encrypted
-            };
-            data->cache = cache_init_config_with_key(&cache_cfg, &token_cache_key);
-        } else {
-            /* Fall back to standard init */
-            data->cache = cache_init(data->config.cache_dir,
-                                     data->config.cache_ttl);
-        }
-        if (!data->cache) {
-            OB_LOG_WARN(pamh, "Failed to initialize cache, continuing without");
-        }
-    }
-#endif
 
     /* Initialize audit logging */
     if (data->config.audit_enabled) {
@@ -1468,7 +1473,6 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
     }
 
     /* Securely clear derived keys */
-    explicit_bzero(&token_cache_key, sizeof(token_cache_key));
     explicit_bzero(&auth_cache_key, sizeof(auth_cache_key));
 
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */
@@ -2441,6 +2445,9 @@ static int refresh_server_token_on_demand(pam_handle_t *pamh,
     rc = 0;
 
 out:
+    if (rc == 0) {
+        readopt_token_file_identity(pamh, data);
+    }
     token_info_free(&ti);
     return rc;
 }
@@ -4423,8 +4430,9 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh,
 /*
  * pam_sm_close_session - Close session
  *
- * If cache_invalidate_on_logout is enabled, invalidates the user's
- * cached tokens to ensure re-authentication on next login.
+ * Desktop SSO builds drop the offline session marker here. Core (SSH-only)
+ * builds have no per-session state to clean up, but the user-identity check
+ * below is kept so the marker can never be removed for a different user.
  */
 PAM_VISIBLE PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
                                      int flags,
@@ -4432,6 +4440,8 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
                                      const char **argv)
 {
     (void)flags;
+    (void)argc;
+    (void)argv;
 
     const char *user = NULL;
     const char *session_user = NULL;
@@ -4440,36 +4450,24 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh,
     /* Get username */
     ret = pam_get_user(pamh, &user, NULL);
     if (ret != PAM_SUCCESS || !user || !*user) {
-        /* Can't get user, nothing to invalidate */
+        /* Can't get user, nothing to clean up */
         return PAM_SUCCESS;
     }
 
     /*
      * Security: Verify this is the same user from open_session (#49)
-     * This prevents cache invalidation attacks where close_session could
-     * be called with a different username to invalidate another user's cache.
+     * This prevents close_session being called with a different username to
+     * tear down another user's session state.
      */
     if (pam_get_data(pamh, "ob_session_user", (const void **)&session_user) == PAM_SUCCESS
         && session_user) {
         if (strcmp(user, session_user) != 0) {
             OB_LOG_WARN(pamh,
                 "Security: close_session user mismatch (session=%s, request=%s), "
-                "refusing cache invalidation",
+                "refusing session cleanup",
                 session_user, user);
-            return PAM_SUCCESS;  /* Don't fail, just skip invalidation */
+            return PAM_SUCCESS;  /* Don't fail, just skip cleanup */
         }
-    }
-
-    /* Initialize module to access cache */
-    pam_openbastion_data_t *data = get_module_data(pamh, argc, argv);
-    if (!data) {
-        return PAM_SUCCESS;  /* No config, nothing to do */
-    }
-
-    /* Invalidate cache for this user if configured */
-    if (data->config.cache_invalidate_on_logout && data->cache) {
-        OB_LOG_DEBUG(pamh, "Invalidating cache for user %s on session close", user);
-        cache_invalidate_user(data->cache, user);
     }
 
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */

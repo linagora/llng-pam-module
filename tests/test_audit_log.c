@@ -392,6 +392,113 @@ static int test_log_rejects_world_writable(void)
     return still_empty;
 }
 
+/* Helper: log one event to test_log_file and return audit_log_event()'s rc */
+static int log_one_event(void)
+{
+    audit_config_t config = {
+        .enabled = true,
+        .log_file = (char *)test_log_file,
+        .log_to_syslog = false,
+        .level = 2
+    };
+
+    audit_context_t *ctx = audit_init(&config);
+    if (!ctx) return -1;
+
+    audit_event_t event;
+    audit_event_init(&event, AUDIT_AUTH_SUCCESS);
+    event.user = "testuser";
+    event.service = "sshd";
+    event.result_code = 0;
+    audit_event_set_end_time(&event);
+
+    int ret = audit_log_event(ctx, &event);
+    audit_destroy(ctx);
+    return ret;
+}
+
+/*
+ * A log file the module creates itself must end up at 0640 regardless of the
+ * ambient umask (the open() mode alone is masked).
+ */
+static int test_log_created_with_0640(void)
+{
+    cleanup();
+
+    mode_t old_umask = umask(0077);
+    int ret = log_one_event();
+    umask(old_umask);
+
+    if (ret != 0) {
+        cleanup();
+        return 0;
+    }
+
+    struct stat st;
+    int ok = (stat(test_log_file, &st) == 0)
+             && ((st.st_mode & 07777) == 0640)
+             && (st.st_size > 0);
+
+    cleanup();
+    return ok;
+}
+
+/*
+ * An administrator who tightened an existing log to 0600 must keep it: the
+ * mode is only forced when we create the file, never on every append.
+ */
+static int test_log_preserves_stricter_mode(void)
+{
+    cleanup();
+
+    int fd = open(test_log_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    if (fchmod(fd, 0600) != 0) {
+        close(fd);
+        cleanup();
+        return 0;
+    }
+    close(fd);
+
+    int ret = log_one_event();
+    if (ret != 0) {
+        cleanup();
+        return 0;
+    }
+
+    struct stat st;
+    int ok = (stat(test_log_file, &st) == 0)
+             && ((st.st_mode & 07777) == 0600)   /* not widened back to 0640 */
+             && (st.st_size > 0);                /* and the event was written */
+
+    cleanup();
+    return ok;
+}
+
+/* The JSON "module" field must carry the current module name, not pam_llng */
+static int test_module_field_name(void)
+{
+    cleanup();
+
+    if (log_one_event() != 0) {
+        cleanup();
+        return 0;
+    }
+
+    FILE *f = fopen(test_log_file, "r");
+    if (!f) return 0;
+
+    char line[4096];
+    int ok = 0;
+    if (fgets(line, sizeof(line), f)) {
+        ok = (strstr(line, "\"module\":\"pam_openbastion\"") != NULL);
+    }
+    fclose(f);
+
+    cleanup();
+    return ok;
+}
+
 int main(void)
 {
     printf("Running audit log tests...\n\n");
@@ -410,6 +517,9 @@ int main(void)
     TEST(audit_log_convenience);
     TEST(log_rejects_symlink);
     TEST(log_rejects_world_writable);
+    TEST(log_created_with_0640);
+    TEST(log_preserves_stricter_mode);
+    TEST(module_field_name);
 
     cleanup();
 

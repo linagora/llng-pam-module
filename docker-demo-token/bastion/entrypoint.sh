@@ -51,8 +51,13 @@ EOF
 
 # Enroll server via Device Authorization Grant
 echo "=== Server Enrollment via Device Authorization ==="
-COOKIE_FILE="/tmp/admin_cookies"
-touch "$COOKIE_FILE"
+# The admin SSO session cookie is a live credential for the whole portal, so it
+# gets an unpredictable per-run name, 0600, and removal on every exit path —
+# not a fixed /tmp path any other process in the container can pre-create,
+# read, or find left behind. Same pattern as quick-start/server/entrypoint.sh.
+COOKIE_FILE=$(mktemp /tmp/admin_cookies.XXXXXX)
+chmod 600 "$COOKIE_FILE"
+trap 'rm -f "$COOKIE_FILE"' EXIT
 
 # Step 1: Get login token
 echo "Getting login token..."
@@ -72,8 +77,9 @@ if grep -q "lemonldap" "$COOKIE_FILE"; then
     echo "Admin login successful"
 else
     echo "ERROR: Failed to login as admin"
-    echo "Cookie file contents:"
-    cat "$COOKIE_FILE" || true
+    # Never dump the cookie jar: it would print a usable session cookie
+    # into the container log.
+    echo "  (session cookie withheld from the log)"
     exit 1
 fi
 
@@ -278,9 +284,18 @@ session    required     pam_unix.so
 session    optional     pam_mkhomedir.so skel=/etc/skel umask=0022
 EOF
 
-# Fix session recording directory permissions
+# Session recording tree: match production exactly (root:ob-sessions 0750, see
+# debian/open-bastion.postinst and src/ob-record-sink.c). Recordings are written
+# by the root sink; the recorded user is NOT in ob-sessions and the tree is
+# o-rwx, so it cannot list, read, unlink or truncate its own recording (#151).
+# A world-writable (1777) or user-traversable demo tree quietly demonstrates
+# the opposite of what the product does.
+if ! getent group ob-sessions >/dev/null 2>&1; then
+    groupadd --system ob-sessions
+fi
 mkdir -p /var/lib/open-bastion/sessions
-chmod 1777 /var/lib/open-bastion/sessions
+chown root:ob-sessions /var/lib/open-bastion/sessions
+chmod 0750 /var/lib/open-bastion/sessions
 
 # Ensure sshd_config.d is included
 if ! grep -q "Include /etc/ssh/sshd_config.d" /etc/ssh/sshd_config; then

@@ -54,15 +54,11 @@ static int check_file_permissions_fd(int fd)
 
 /* Default values */
 #define DEFAULT_TIMEOUT                 10
-#define DEFAULT_CACHE_TTL               300
-#define DEFAULT_CACHE_TTL_HIGH_RISK     60
-#define DEFAULT_CACHE_DIR               "/var/cache/open-bastion"
 #define DEFAULT_AUTH_CACHE_DIR          "/var/cache/open-bastion/auth"
 #define DEFAULT_AUTH_CACHE_FORCE_ONLINE "/etc/open-bastion/force_online"
 #define DEFAULT_SERVER_GROUP            "default"
 #define DEFAULT_AUDIT_LOG_FILE          "/var/log/open-bastion/audit.json"
 #define DEFAULT_RATE_LIMIT_STATE_DIR    "/var/lib/open-bastion/ratelimit"
-#define DEFAULT_KEYRING_NAME            "open-bastion"
 
 /* TLS version constants for min_tls_version configuration */
 #define TLS_VERSION_1_2 12
@@ -77,14 +73,6 @@ void config_init(pam_openbastion_config_t *config)
     config->verify_ssl = true;
     config->log_level = 1;  /* warn */
     config->min_tls_version = TLS_VERSION_1_3;  /* TLS 1.3 by default */
-
-    /* Cache settings */
-    config->cache_enabled = true;
-    config->cache_ttl = DEFAULT_CACHE_TTL;
-    config->cache_ttl_high_risk = DEFAULT_CACHE_TTL_HIGH_RISK;
-    config->cache_dir = strdup(DEFAULT_CACHE_DIR);
-    config->cache_encrypted = true;  /* Encrypted by default */
-    config->cache_invalidate_on_logout = true;  /* Invalidate on logout by default */
 
     /* Authorization cache settings (for offline mode) */
     config->auth_cache_enabled = true;
@@ -116,8 +104,6 @@ void config_init(pam_openbastion_config_t *config)
 
     /* Secret storage - secure defaults */
     config->secrets_encrypted = true;
-    config->secrets_use_keyring = true;
-    config->secrets_keyring_name = strdup(DEFAULT_KEYRING_NAME);
 
     /* Webhooks - disabled by default */
     config->notify_enabled = false;
@@ -203,10 +189,6 @@ void config_free(pam_openbastion_config_t *config)
     free(config->ca_cert);
     free(config->cert_pin);
 
-    /* Cache settings */
-    free(config->cache_dir);
-    free(config->high_risk_services);
-
     /* Authorization cache settings */
     free(config->auth_cache_dir);
     free(config->auth_cache_force_online);
@@ -222,9 +204,6 @@ void config_free(pam_openbastion_config_t *config)
 
     /* Rate limiting settings */
     free(config->rate_limit_state_dir);
-
-    /* Secret storage */
-    free(config->secrets_keyring_name);
 
     /* Webhooks */
     free(config->notify_url);
@@ -267,7 +246,6 @@ void config_free(pam_openbastion_config_t *config)
 
 /* Use shared string utilities from str_utils.h */
 #define trim str_trim
-#define parse_bool str_parse_bool
 
 /* Maximum lengths for security-sensitive configuration values */
 #define MAX_URL_LENGTH 512
@@ -287,6 +265,129 @@ void config_free(pam_openbastion_config_t *config)
         syslog(LOG_WARNING, "open-bastion: strdup failed for %s", key); \
     } \
 } while (0)
+
+/*
+ * Helper macro for boolean field assignment (fail-closed, issue #183).
+ *
+ * str_parse_bool() used to map every unrecognised value to false. A typo such
+ * as "verify_ssl = TRUE" or "verify_ssl = tru" therefore silently turned OFF
+ * TLS certificate verification. Only the documented tokens are accepted now;
+ * anything else leaves the field at its (safe) default, logs the offending
+ * key and value, and latches config->invalid_bool_value so config_validate()
+ * refuses the whole configuration rather than running with a guessed value.
+ *
+ * Must be used inside a function with a `config` pointer in scope.
+ */
+#define SET_BOOL_FIELD(field, value, key) do { \
+    bool _b; \
+    if (str_parse_bool_strict((value), &_b)) { \
+        (field) = _b; \
+    } else { \
+        syslog(LOG_ERR, "open-bastion: invalid boolean value for '%s': '%s' " \
+               "(expected one of true/yes/1/on or false/no/0/off)", \
+               (key), (value) ? (value) : ""); \
+        config->invalid_bool_value = true; \
+    } \
+} while (0)
+
+/*
+ * Keys whose value is an opaque secret or a hash: never strip anything from
+ * them, since '#' is a perfectly ordinary character in a generated password,
+ * an API key or a base64 digest. To put a '#' in any *other* value, quote it.
+ */
+static bool key_holds_opaque_secret(const char *key)
+{
+    static const char *const secret_keys[] = {
+        "client_secret",
+        "notify_secret",
+        "webhook_secret",
+        "request_signing_secret",
+        "crowdsec_bouncer_key",
+        "crowdsec_password",
+        "cert_pin",
+        NULL,
+    };
+
+    for (size_t i = 0; secret_keys[i]; i++) {
+        if (strcmp(key, secret_keys[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Remove one layer of matching quotes from a value, in place.
+ * Returns a pointer to the unquoted value (possibly offset from `value`).
+ * Shared by config_load() and config_parse_args() so a value is understood
+ * the same way whether it comes from openbastion.conf or from a pam.d line.
+ */
+static char *strip_quotes(char *value)
+{
+    if (!value || (*value != '"' && *value != '\'')) {
+        return value;
+    }
+
+    char quote = *value;
+    value++;
+    char *end = strrchr(value, quote);
+    if (end) *end = '\0';
+
+    return value;
+}
+
+/*
+ * Strip a trailing inline comment from an (already trimmed) value, in place.
+ *
+ * Before the #183 fix an unrecognised value silently meant `false`, so
+ * `verify_ssl = true # prod` was merely dangerous. Now it is a fatal -6: the
+ * PAM module refuses to start and every SSH and sudo authentication on the
+ * host is denied. An upgrade must never be able to lock an operator out of a
+ * bastion over a comment, so we recognise inline comments instead.
+ *
+ * The rule is deliberately narrow so it cannot eat a legitimate value:
+ *
+ *   - a quoted value is left untouched. The caller's quote stripper ends the
+ *     value at the closing quote, which already discards any trailing
+ *     comment, so `secret = "a # b"` keeps its '#' and
+ *     `verify_ssl = "true" # prod` still parses.
+ *   - keys listed in key_holds_opaque_secret() are exempt entirely.
+ *   - otherwise, only a '#' that starts the value or is preceded by
+ *     whitespace introduces a comment. `url = https://x/#frag` and
+ *     `pass = a#b` are therefore preserved; `verify_ssl = true # prod` is not.
+ */
+static void strip_inline_comment(const char *key, char *value)
+{
+    if (!key || !value) {
+        return;
+    }
+
+    /* Quoted: the quote stripper decides where the value ends. */
+    if (*value == '"' || *value == '\'') {
+        return;
+    }
+
+    if (key_holds_opaque_secret(key)) {
+        return;
+    }
+
+    for (char *p = value; *p; p++) {
+        if (*p != '#') {
+            continue;
+        }
+        if (p != value && !isspace((unsigned char)p[-1])) {
+            continue;  /* '#' inside a token: part of the value */
+        }
+
+        *p = '\0';
+        /* Re-trim the whitespace that preceded the '#'. */
+        while (p > value && isspace((unsigned char)p[-1])) {
+            *--p = '\0';
+        }
+        return;
+    }
+}
 
 /*
  * Safe integer parsing with validation.
@@ -403,7 +504,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->timeout = parse_int(value, DEFAULT_TIMEOUT, 1, 300);
     }
     else if (strcmp(key, "verify_ssl") == 0) {
-        config->verify_ssl = parse_bool(value);
+        SET_BOOL_FIELD(config->verify_ssl, value, key);
     }
     else if (strcmp(key, "ca_cert") == 0) {
         SET_STRING_FIELD(config->ca_cert, value, key);
@@ -417,31 +518,9 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "cert_pin") == 0) {
         SET_STRING_FIELD(config->cert_pin, value, key);
     }
-    /* Cache settings */
-    else if (strcmp(key, "cache_enabled") == 0 || strcmp(key, "cache") == 0) {
-        config->cache_enabled = parse_bool(value);
-    }
-    else if (strcmp(key, "cache_dir") == 0) {
-        SET_STRING_FIELD(config->cache_dir, value, key);
-    }
-    else if (strcmp(key, "cache_ttl") == 0) {
-        config->cache_ttl = parse_int(value, DEFAULT_CACHE_TTL, 0, 86400);
-    }
-    else if (strcmp(key, "cache_ttl_high_risk") == 0) {
-        config->cache_ttl_high_risk = parse_int(value, DEFAULT_CACHE_TTL_HIGH_RISK, 0, 86400);
-    }
-    else if (strcmp(key, "high_risk_services") == 0) {
-        SET_STRING_FIELD(config->high_risk_services, value, key);
-    }
-    else if (strcmp(key, "cache_encrypted") == 0) {
-        config->cache_encrypted = parse_bool(value);
-    }
-    else if (strcmp(key, "cache_invalidate_on_logout") == 0) {
-        config->cache_invalidate_on_logout = parse_bool(value);
-    }
     /* Authorization cache settings (offline mode) */
     else if (strcmp(key, "auth_cache_enabled") == 0 || strcmp(key, "auth_cache") == 0) {
-        config->auth_cache_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->auth_cache_enabled, value, key);
     }
     else if (strcmp(key, "auth_cache_dir") == 0) {
         SET_STRING_FIELD(config->auth_cache_dir, value, key);
@@ -451,7 +530,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /* Authorization mode */
     else if (strcmp(key, "authorize_only") == 0) {
-        config->authorize_only = parse_bool(value);
+        SET_BOOL_FIELD(config->authorize_only, value, key);
     }
     /* Logging */
     else if (strcmp(key, "log_level") == 0 || strcmp(key, "debug") == 0) {
@@ -463,13 +542,13 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /* Audit settings */
     else if (strcmp(key, "audit_enabled") == 0 || strcmp(key, "audit") == 0) {
-        config->audit_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->audit_enabled, value, key);
     }
     else if (strcmp(key, "audit_log_file") == 0 || strcmp(key, "audit_file") == 0) {
         SET_STRING_FIELD(config->audit_log_file, value, key);
     }
     else if (strcmp(key, "audit_to_syslog") == 0 || strcmp(key, "audit_syslog") == 0) {
-        config->audit_to_syslog = parse_bool(value);
+        SET_BOOL_FIELD(config->audit_to_syslog, value, key);
     }
     else if (strcmp(key, "audit_level") == 0) {
         if (strcmp(value, "critical") == 0) config->audit_level = 0;
@@ -479,7 +558,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /* Rate limiting settings */
     else if (strcmp(key, "rate_limit_enabled") == 0 || strcmp(key, "rate_limit") == 0) {
-        config->rate_limit_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->rate_limit_enabled, value, key);
     }
     else if (strcmp(key, "rate_limit_state_dir") == 0) {
         SET_STRING_FIELD(config->rate_limit_state_dir, value, key);
@@ -498,30 +577,24 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /* Token binding settings */
     else if (strcmp(key, "token_bind_ip") == 0 || strcmp(key, "bind_ip") == 0) {
-        config->token_bind_ip = parse_bool(value);
+        SET_BOOL_FIELD(config->token_bind_ip, value, key);
     }
     else if (strcmp(key, "token_bind_fingerprint") == 0 || strcmp(key, "bind_fingerprint") == 0) {
-        config->token_bind_fingerprint = parse_bool(value);
+        SET_BOOL_FIELD(config->token_bind_fingerprint, value, key);
     }
     else if (strcmp(key, "token_check_revocation") == 0 || strcmp(key, "check_revocation") == 0) {
-        config->token_check_revocation = parse_bool(value);
+        SET_BOOL_FIELD(config->token_check_revocation, value, key);
     }
     else if (strcmp(key, "token_rotate_refresh") == 0 || strcmp(key, "rotate_refresh") == 0) {
-        config->token_rotate_refresh = parse_bool(value);
+        SET_BOOL_FIELD(config->token_rotate_refresh, value, key);
     }
     /* Secret storage settings */
     else if (strcmp(key, "secrets_encrypted") == 0) {
-        config->secrets_encrypted = parse_bool(value);
-    }
-    else if (strcmp(key, "secrets_use_keyring") == 0 || strcmp(key, "use_keyring") == 0) {
-        config->secrets_use_keyring = parse_bool(value);
-    }
-    else if (strcmp(key, "secrets_keyring_name") == 0 || strcmp(key, "keyring_name") == 0) {
-        SET_STRING_FIELD(config->secrets_keyring_name, value, key);
+        SET_BOOL_FIELD(config->secrets_encrypted, value, key);
     }
     /* Webhook settings */
     else if (strcmp(key, "notify_enabled") == 0 || strcmp(key, "notify") == 0) {
-        config->notify_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->notify_enabled, value, key);
     }
     else if (strcmp(key, "notify_url") == 0 || strcmp(key, "webhook_url") == 0) {
         SET_STRING_FIELD(config->notify_url, value, key);
@@ -535,7 +608,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /* User creation settings */
     else if (strcmp(key, "create_user") == 0 || strcmp(key, "create_user_enabled") == 0) {
-        config->create_user_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->create_user_enabled, value, key);
     }
     else if (strcmp(key, "create_user_shell") == 0) {
         SET_STRING_FIELD(config->create_user_shell, value, key);
@@ -564,17 +637,17 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */
     /* Desktop SSO / OAuth2 token authentication */
     else if (strcmp(key, "oauth2_token_auth") == 0) {
-        config->oauth2_token_auth = parse_bool(value);
+        SET_BOOL_FIELD(config->oauth2_token_auth, value, key);
     }
     else if (strcmp(key, "oauth2_token_cache") == 0) {
-        config->oauth2_token_cache = parse_bool(value);
+        SET_BOOL_FIELD(config->oauth2_token_cache, value, key);
     }
     else if (strcmp(key, "oauth2_token_min_ttl") == 0) {
         config->oauth2_token_min_ttl = parse_int(value, 60, 0, 3600);
     }
     /* Offline credential cache settings */
     else if (strcmp(key, "offline_cache_enabled") == 0) {
-        config->offline_cache_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->offline_cache_enabled, value, key);
     }
     else if (strcmp(key, "offline_cache_dir") == 0) {
         SET_STRING_FIELD(config->offline_cache_dir, value, key);
@@ -592,7 +665,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         SET_STRING_FIELD(config->offline_cache_key_file, value, key);
     }
     else if (strcmp(key, "offline_revalidation_enabled") == 0) {
-        config->offline_revalidation_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->offline_revalidation_enabled, value, key);
     }
     else if (strcmp(key, "offline_revalidation_grace") == 0) {
         config->offline_revalidation_grace = parse_int(value, 14400, 600, 86400);  /* 10 min to 24 hours */
@@ -603,7 +676,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
 #endif /* ENABLE_DESKTOP_SSO */
     /* CrowdSec integration options */
     else if (strcmp(key, "crowdsec_enabled") == 0 || strcmp(key, "crowdsec") == 0) {
-        config->crowdsec_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->crowdsec_enabled, value, key);
     }
     else if (strcmp(key, "crowdsec_url") == 0) {
         SET_STRING_FIELD(config->crowdsec_url, value, key);
@@ -612,7 +685,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         config->crowdsec_timeout = parse_int(value, 5, 1, 60);
     }
     else if (strcmp(key, "crowdsec_fail_open") == 0) {
-        config->crowdsec_fail_open = parse_bool(value);
+        SET_BOOL_FIELD(config->crowdsec_fail_open, value, key);
     }
     else if (strcmp(key, "crowdsec_bouncer_key") == 0) {
         SET_STRING_FIELD(config->crowdsec_bouncer_key, value, key);
@@ -634,7 +707,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
         SET_STRING_FIELD(config->crowdsec_scenario, value, key);
     }
     else if (strcmp(key, "crowdsec_send_all_alerts") == 0) {
-        config->crowdsec_send_all_alerts = parse_bool(value);
+        SET_BOOL_FIELD(config->crowdsec_send_all_alerts, value, key);
     }
     else if (strcmp(key, "crowdsec_max_failures") == 0) {
         config->crowdsec_max_failures = parse_int(value, 5, 0, 100);
@@ -651,7 +724,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     /* SSH key policy options */
     else if (strcmp(key, "ssh_key_policy_enabled") == 0 ||
              strcmp(key, "ssh_key_policy") == 0) {
-        config->ssh_key_policy_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->ssh_key_policy_enabled, value, key);
     }
     else if (strcmp(key, "ssh_key_allowed_types") == 0 ||
              strcmp(key, "ssh_allowed_types") == 0) {
@@ -670,7 +743,7 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     /* Cache brute-force protection (#92) */
     else if (strcmp(key, "cache_rate_limit_enabled") == 0 ||
              strcmp(key, "cache_rate_limit") == 0) {
-        config->cache_rate_limit_enabled = parse_bool(value);
+        SET_BOOL_FIELD(config->cache_rate_limit_enabled, value, key);
     }
     else if (strcmp(key, "cache_rate_limit_max_attempts") == 0) {
         config->cache_rate_limit_max_attempts = parse_int(value, 3, 1, 100);
@@ -690,6 +763,48 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     /* Unknown keys are silently ignored */
 
     return 0;
+}
+
+/*
+ * Handle one raw line of openbastion.conf. The buffer is modified in place.
+ * Split out of config_load() so the line syntax (comments, quotes, inline
+ * comments) can be tested without a root-owned file on disk.
+ */
+static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
+{
+    char *trimmed = trim(line);
+
+    /* Skip empty lines and comments */
+    if (*trimmed == '\0' || *trimmed == '#' || *trimmed == ';') {
+        return;
+    }
+
+    /* Skip section headers [section] */
+    if (*trimmed == '[') {
+        return;
+    }
+
+    /* Find = separator */
+    char *eq = strchr(trimmed, '=');
+    if (!eq) {
+        return;  /* Skip malformed lines */
+    }
+
+    *eq = '\0';
+    char *key = trim(trimmed);
+    char *value = trim(eq + 1);
+
+    /*
+     * Drop an inline comment (`verify_ssl = true # prod`) before the strict
+     * boolean parse, which would otherwise reject the whole configuration and
+     * lock the host out. Quoted values and secret-bearing keys are exempt;
+     * see strip_inline_comment().
+     */
+    strip_inline_comment(key, value);
+
+    value = strip_quotes(value);
+
+    parse_line(key, value, config);
 }
 
 int config_load(const char *filename, pam_openbastion_config_t *config)
@@ -727,42 +842,9 @@ int config_load(const char *filename, pam_openbastion_config_t *config)
     }
 
     char line[1024];
-    int line_num = 0;
 
     while (fgets(line, sizeof(line), f)) {
-        line_num++;
-
-        char *trimmed = trim(line);
-
-        /* Skip empty lines and comments */
-        if (*trimmed == '\0' || *trimmed == '#' || *trimmed == ';') {
-            continue;
-        }
-
-        /* Skip section headers [section] */
-        if (*trimmed == '[') {
-            continue;
-        }
-
-        /* Find = separator */
-        char *eq = strchr(trimmed, '=');
-        if (!eq) {
-            continue;  /* Skip malformed lines */
-        }
-
-        *eq = '\0';
-        char *key = trim(trimmed);
-        char *value = trim(eq + 1);
-
-        /* Remove quotes from value */
-        if (*value == '"' || *value == '\'') {
-            char quote = *value;
-            value++;
-            char *end = strrchr(value, quote);
-            if (end) *end = '\0';
-        }
-
-        parse_line(key, value, config);
+        parse_config_file_line(line, config);
     }
 
     fclose(f);
@@ -790,8 +872,19 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
             memcpy(key, arg, key_len);
             key[key_len] = '\0';  /* Explicit null termination */
 
-            const char *value = eq + 1;
-            parse_line(key, value, config);
+            /*
+             * config_load() strips quotes; do the same here so a pam.d line
+             * such as `ssh_cert_aware="true"` is understood identically
+             * instead of being rejected as an invalid boolean. PAM arguments
+             * carry no comments, so strip_inline_comment() is not applied.
+             */
+            char *value = strdup(eq + 1);
+            if (!value) {
+                syslog(LOG_WARNING, "open-bastion: strdup failed for PAM argument %s", key);
+                continue;
+            }
+            parse_line(key, strip_quotes(value), config);
+            free(value);
         }
         /* Boolean flags */
         else if (strcmp(arg, "debug") == 0) {
@@ -799,12 +892,6 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
         }
         else if (strcmp(arg, "authorize_only") == 0) {
             config->authorize_only = true;
-        }
-        else if (strcmp(arg, "no_cache") == 0 || strcmp(arg, "nocache") == 0) {
-            config->cache_enabled = false;
-        }
-        else if (strcmp(arg, "no_cache_encrypt") == 0 || strcmp(arg, "nocacheencrypt") == 0) {
-            config->cache_encrypted = false;
         }
         else if (strcmp(arg, "no_auth_cache") == 0 || strcmp(arg, "noauthcache") == 0) {
             config->auth_cache_enabled = false;
@@ -839,9 +926,6 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
         /* Secret storage flags */
         else if (strcmp(arg, "no_encrypt_secrets") == 0) {
             config->secrets_encrypted = false;
-        }
-        else if (strcmp(arg, "no_keyring") == 0 || strcmp(arg, "nokeyring") == 0) {
-            config->secrets_use_keyring = false;
         }
         /* User creation flags */
         else if (strcmp(arg, "create_user") == 0) {
@@ -904,6 +988,17 @@ static void ensure_parent_dir(const char *filepath)
 
 int config_validate(const pam_openbastion_config_t *config)
 {
+    /*
+     * Security (#183): a boolean setting carried a value that is neither a
+     * recognised true nor a recognised false. Refuse the configuration rather
+     * than running with a guessed value — "verify_ssl = TRUE" must not end up
+     * disabling TLS verification. The offending key and value were already
+     * logged by SET_BOOL_FIELD().
+     */
+    if (config->invalid_bool_value) {
+        return -6;  /* Unparseable boolean value in configuration */
+    }
+
     if (!config->portal_url || strlen(config->portal_url) == 0) {
         return -1;  /* portal_url is required */
     }

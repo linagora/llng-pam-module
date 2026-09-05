@@ -248,9 +248,20 @@ case "$1" in
                 's#^\([[:space:]]*SERVER_TOKEN_FILE=\)"\{0,1\}/etc/open-bastion/token"\{0,1\}#\1"/var/lib/open-bastion/token"#' \
                 /etc/open-bastion/ssh-proxy.conf
 
-            # Clear secret from debconf database for security
-            db_set open-bastion/client-secret ""
         fi
+
+        # Clear the OIDC client secret from the debconf database, ALWAYS.
+        #
+        # This used to sit inside the `if [ "$MODE" != "none" ]` block above, so
+        # an admin who answered pam-mode=none left the secret sitting in
+        # /var/cache/debconf/passwords.dat forever — exactly the case where it is
+        # never used for anything.
+        #
+        # db_reset, not `db_set ""`: db_set leaves the question flagged as seen
+        # with an empty answer, so a later reconfigure silently reuses the blank
+        # instead of asking again. db_reset restores the template default and
+        # clears the seen flag, which is what "forget this secret" should mean.
+        db_reset open-bastion/client-secret || true
         ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

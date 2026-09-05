@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <syslog.h>
+#include <sys/file.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
@@ -368,6 +369,68 @@ static void build_cache_path(offline_cache_t *cache, const char *user,
     char hash[64];
     hash_username(user, hash, sizeof(hash));
     snprintf(path, path_size, "%s/%s.cred", cache->cache_dir, hash);
+}
+
+/*
+ * Per-user inter-process lock (#186).
+ *
+ * offline_cache_verify updates failed_attempts / locked_until with a
+ * read-modify-write over the encrypted entry (read_cache_entry -> mutate JSON ->
+ * update_cache_entry). PAM runs one process per authentication attempt, so N
+ * parallel wrong-password attempts would each read the same counter and each
+ * write count+1: max_failed_attempts is never reached and the lockout is
+ * bypassed. The lock serializes the whole sequence.
+ *
+ * A companion "<hash>.lock" file is used rather than the entry itself:
+ * update_cache_entry replaces the entry with an atomic rename(), so its inode
+ * changes on every update and a lock held on it would stop excluding anything.
+ * The name deliberately does NOT contain ".cred" so the ".cred" scans
+ * (store quota, cleanup, invalidate_all, stats) ignore it, and it is never
+ * unlinked: its inode must stay stable while the entry exists.
+ */
+static void build_cache_lock_path(offline_cache_t *cache, const char *user,
+                                  char *path, size_t path_size)
+{
+    char hash[64];
+    hash_username(user, hash, sizeof(hash));
+    snprintf(path, path_size, "%s/%s.lock", cache->cache_dir, hash);
+}
+
+/*
+ * Returns a locked fd, or -1 when the lock could not be taken. Callers then
+ * proceed unlocked (degraded, pre-#186 behaviour): refusing the verification
+ * outright would turn an unwritable lock file into a denial of service on
+ * offline logins.
+ */
+static int lock_cache_entry(offline_cache_t *cache, const char *user)
+{
+    char lock_path[PATH_MAX];
+    build_cache_lock_path(cache, user, lock_path, sizeof(lock_path));
+
+    /* O_NOFOLLOW: a symlink planted at the lock path is a security violation,
+     * removed and retried once (same handling as read_cache_entry). */
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == ELOOP) {
+        unlink(lock_path);
+        fd = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    }
+    if (fd < 0) {
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Release a lock taken by lock_cache_entry(). Safe on -1 (lock not held). */
+static void unlock_cache_entry(int fd)
+{
+    if (fd < 0) return;
+    flock(fd, LOCK_UN);
+    close(fd);
 }
 
 /* Base64 encode */
@@ -1093,13 +1156,16 @@ static int update_cache_entry(offline_cache_t *cache, const char *user,
     return OFFLINE_CACHE_OK;
 }
 
-int offline_cache_verify(offline_cache_t *cache,
-                         const char *user,
-                         const char *password,
-                         offline_cache_entry_t *entry)
+/*
+ * Password verification + failed_attempts/locked_until update. MUST be called
+ * with the per-user lock held (see lock_cache_entry): the read/mutate/write
+ * sequence below is not atomic.
+ */
+static int offline_cache_verify_locked(offline_cache_t *cache,
+                                       const char *user,
+                                       const char *password,
+                                       offline_cache_entry_t *entry)
 {
-    if (!cache || !user || !password) return OFFLINE_CACHE_ERR_INVALID;
-
     if (entry) {
         memset(entry, 0, sizeof(*entry));
     }
@@ -1247,6 +1313,22 @@ int offline_cache_verify(offline_cache_t *cache,
     return OFFLINE_CACHE_OK;
 }
 
+int offline_cache_verify(offline_cache_t *cache,
+                         const char *user,
+                         const char *password,
+                         offline_cache_entry_t *entry)
+{
+    if (!cache || !user || !password) return OFFLINE_CACHE_ERR_INVALID;
+
+    /* Serialize the whole read-modify-write against the other PAM processes
+     * verifying the same user, so N parallel failures count as N (#186). */
+    int lock_fd = lock_cache_entry(cache, user);
+    int ret = offline_cache_verify_locked(cache, user, password, entry);
+    unlock_cache_entry(lock_fd);
+
+    return ret;
+}
+
 bool offline_cache_has_entry(offline_cache_t *cache, const char *user)
 {
     if (!cache || !user) return false;
@@ -1365,9 +1447,14 @@ int offline_cache_reset_failures(offline_cache_t *cache, const char *user)
 {
     if (!cache || !user) return OFFLINE_CACHE_ERR_INVALID;
 
+    /* Same lock as offline_cache_verify: clearing the counter must not land in
+     * the middle of a concurrent increment (which would restore it). */
+    int lock_fd = lock_cache_entry(cache, user);
+
     struct json_object *json = NULL;
     int ret = read_cache_entry(cache, user, &json);
     if (ret != OFFLINE_CACHE_OK) {
+        unlock_cache_entry(lock_fd);
         return ret;
     }
 
@@ -1378,6 +1465,7 @@ int offline_cache_reset_failures(offline_cache_t *cache, const char *user)
 
     ret = update_cache_entry(cache, user, json);
     json_object_put(json);
+    unlock_cache_entry(lock_fd);
     return ret;
 }
 

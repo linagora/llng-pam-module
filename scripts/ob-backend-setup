@@ -1939,6 +1939,22 @@ main() {
     # Remove trailing slash
     PORTAL_URL="${PORTAL_URL%/}"
 
+    # Validate the URL shape before it is used anywhere.
+    #
+    # PORTAL_URL is interpolated into generated artefacts, notably
+    # /usr/local/bin/open-bastion-refresh-krl (an unquoted heredoc, run from
+    # root cron every ${KRL_REFRESH_INTERVAL} minutes). No privilege boundary is
+    # crossed here — this script already requires root and the value is the
+    # admin's own --portal argument — but a URL containing shell metacharacters
+    # would silently produce a broken or surprising cron script. The character
+    # class is the same one ob-builder enforces with is_valid_url(), so a portal
+    # accepted by the builder is accepted here.
+    if ! [[ "$PORTAL_URL" =~ ^https?://[A-Za-z0-9._:/?#@!()*+,\;=~%-]+$ ]]; then
+        error "Invalid portal URL: $PORTAL_URL"
+        error "Expected http(s)://host[:port][/path] without shell metacharacters"
+        exit 1
+    fi
+
     # Pick up client_secret from env if not provided via --client-secret-file.
     # Storing it in OB_CLIENT_SECRET keeps it out of /proc/<pid>/cmdline.
     if [ -z "$CLIENT_SECRET" ] && [ -n "${OB_CLIENT_SECRET:-}" ]; then

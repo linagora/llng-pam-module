@@ -28,15 +28,6 @@ typedef struct {
     int min_tls_version;     /* Minimum TLS version: 12=1.2, 13=1.3 (default: 13) */
     char *cert_pin;          /* Certificate pin (sha256//base64 format, optional) */
 
-    /* Cache settings (for token cache) */
-    bool cache_enabled;      /* Enable token caching (default: true) */
-    char *cache_dir;         /* Cache directory (default: /var/cache/open-bastion) */
-    int cache_ttl;           /* Cache TTL in seconds (default: 300) */
-    int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
-    char *high_risk_services; /* Comma-separated list of high-risk PAM services */
-    bool cache_encrypted;    /* Encrypt cache files with AES-256-GCM (default: true) */
-    bool cache_invalidate_on_logout; /* Invalidate cache when session closes (default: true) */
-
     /* Authorization cache settings (for offline mode) */
     bool auth_cache_enabled;        /* Enable authorization caching (default: true) */
     char *auth_cache_dir;           /* Auth cache directory (default: /var/cache/open-bastion/auth) */
@@ -70,8 +61,6 @@ typedef struct {
 
     /* Secret storage */
     bool secrets_encrypted;         /* Encrypt secrets at rest (default: true) */
-    bool secrets_use_keyring;       /* Use kernel keyring (default: true) */
-    char *secrets_keyring_name;     /* Keyring name (default: "open-bastion") */
 
     /* Webhook notifications */
     bool notify_enabled;            /* Enable webhook notifications (default: false) */
@@ -149,6 +138,15 @@ typedef struct {
 
     /* Group synchronization (#38) */
     char *allowed_managed_groups;          /* Comma-separated whitelist of groups allowed to be managed locally (optional) */
+
+    /*
+     * Parse-error latch (#183). Set when a boolean setting carried a value
+     * that is neither a recognised true nor a recognised false (e.g.
+     * "verify_ssl = TRUE" or "verify_ssl = tru"). Such a value used to be
+     * silently treated as false, which disabled TLS verification without any
+     * warning. config_validate() now refuses the whole configuration instead.
+     */
+    bool invalid_bool_value;
 } pam_openbastion_config_t;
 
 /*
@@ -175,7 +173,35 @@ void config_init(pam_openbastion_config_t *config);
 
 /*
  * Validate configuration
- * Returns 0 if valid, -1 if invalid (with error logged)
+ * Returns 0 if valid, negative if invalid (with error logged):
+ *   -1  missing mandatory setting (portal_url, client credentials, ...)
+ *   -4  portal_url is not HTTPS while verify_ssl is enabled
+ *   -5  incomplete or invalid CrowdSec configuration
+ *   -6  a boolean setting had an unparseable value (see syslog for the key)
+ *
+ * API contract for callers
+ * ------------------------
+ * Every negative return code is fatal: the configuration MUST be refused and
+ * the caller MUST NOT fall back to defaults. This matters most for -6.
+ *
+ * -6 means at least one boolean key carried a value that is neither a
+ * recognised true nor a recognised false (#183). The affected field kept its
+ * safe default and the offending key/value pair was logged to syslog by
+ * config.c, but the operator's *intent* is unknown — the value may have been
+ * meant to turn a protection off, or (worse) to turn one on. Continuing would
+ * run the module with a guessed security posture.
+ *
+ * Concretely, a caller that treats -6 as a warning re-introduces the exact
+ * defect this code exists to prevent: `verify_ssl = TRUE` silently running
+ * with TLS verification in whatever state the default happened to be.
+ *
+ * Today the only caller that reaches this path is pam_openbastion
+ * (src/pam_openbastion.c), which aborts module initialisation. Any new caller
+ * must do the same: abort, and surface the syslog line to the operator.
+ *
+ * Note that config_load() itself never reports -6. The latch lives in
+ * config->invalid_bool_value and is only converted into a return code here,
+ * so a caller that skips config_validate() will not notice the problem at all.
  */
 int config_validate(const pam_openbastion_config_t *config);
 

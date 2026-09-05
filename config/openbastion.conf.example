@@ -1,5 +1,26 @@
 # Open Bastion PAM Configuration File
 # /etc/open-bastion/openbastion.conf
+#
+# Syntax
+# ------
+# key = value, one per line. A '#' or ';' at the start of a line comments out
+# the whole line.
+#
+# Booleans accept exactly true/yes/1/on and false/no/0/off, lowercase only.
+# Anything else (TRUE, tru, enabled, an empty value) is a FATAL error: the PAM
+# module logs the key to syslog and refuses to start rather than guess. An
+# unrecognised value used to mean "false", which turned verify_ssl OFF on a
+# typo.
+#
+# Inline comments: a '#' preceded by whitespace ends the value.
+#     verify_ssl = true            # this comment is ignored
+# A '#' inside a token is kept, so URL fragments and passwords survive:
+#     portal_url = https://sso.example.com/#frag
+# The keys client_secret, notify_secret, webhook_secret,
+# request_signing_secret, crowdsec_bouncer_key, crowdsec_password and cert_pin
+# are never stripped — their value is taken literally, '#' included.
+# For any other key, quote the value if it must contain " #":
+#     server_group = "prod # 2"
 
 # ==============================================================================
 # Required Settings
@@ -65,21 +86,22 @@ verify_ssl = true
 # ca_cert = /etc/ssl/certs/my-ca.pem
 
 # ==============================================================================
-# Cache Settings
+# Authorization Cache Settings (offline mode)
 # ==============================================================================
 
-# Enable token caching to reduce server load
+# Enable the authorization cache, which lets an already-authorized user log in
+# while the portal is unreachable. The TTL is decided by the server
+# (offline.ttl in the /pam/authorize response), not here.
 # Default: true
-cache_enabled = true
+auth_cache_enabled = true
 
-# Cache directory
-# Default: /var/cache/open-bastion
-cache_dir = /var/cache/open-bastion
+# Authorization cache directory
+# Default: /var/cache/open-bastion/auth
+# auth_cache_dir = /var/cache/open-bastion/auth
 
-# Cache TTL in seconds (time to live)
-# Cached results expire after this time
-# Default: 300 (5 minutes)
-cache_ttl = 300
+# Creating this file forces every authorization online, bypassing the cache
+# Default: /etc/open-bastion/force_online
+# auth_cache_force_online = /etc/open-bastion/force_online
 
 # ==============================================================================
 # Operation Mode
