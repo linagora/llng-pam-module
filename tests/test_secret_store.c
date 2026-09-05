@@ -485,9 +485,7 @@ static int test_temp_file_is_private(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -570,9 +568,7 @@ static int test_concurrent_put(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
