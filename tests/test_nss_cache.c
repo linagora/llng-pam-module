@@ -323,7 +323,7 @@ static int test_name_roundtrip(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("alice", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("alice", &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (strcmp(out.pw_name, "alice") != 0) return 0;
     if (strcmp(out.pw_passwd, "x") != 0) return 0;
     if (out.pw_uid != 12345 || out.pw_gid != 100) return 0;
@@ -346,7 +346,7 @@ static int test_name_roundtrip_empty_gecos(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("nogecos", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("nogecos", &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (out.pw_uid != 20001 || out.pw_gid != 100) return 0;
     if (strcmp(out.pw_gecos, "") != 0) return 0;
     if (strcmp(out.pw_dir, "/home/nogecos") != 0) return 0;
@@ -364,7 +364,7 @@ static int test_uid_roundtrip_and_key_check(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_uid(31337, &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_uid(31337, &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (strcmp(out.pw_name, "byuid") != 0) return 0;
 
     /* File named "999" but claiming uid 31337: the key check must reject it. */
@@ -372,7 +372,7 @@ static int test_uid_roundtrip_and_key_check(void)
     snprintf(rec, sizeof(rec), "byuid:31337:100:By Uid:/home/byuid:/bin/bash:%ld\n",
              (long)time(NULL));
     if (write_raw_entry(test_cache_root(), "999", rec) != 0) return 0;
-    if (file_cache_load_by_uid(999, &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_uid(999, &out, buf, sizeof(buf), NULL) == 0) return 0;
     return 1;
 }
 
@@ -387,7 +387,7 @@ static int test_name_expired_rejected_and_unlinked(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("stale", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("stale", &out, buf, sizeof(buf), NULL) == 0) return 0;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/stale", test_cache_byname());
@@ -406,7 +406,7 @@ static int test_name_mismatch_rejected(void)
 
     struct passwd out = {0};
     char buf[1024];
-    return file_cache_load_by_name("alice", &out, buf, sizeof(buf)) != 0;
+    return file_cache_load_by_name("alice", &out, buf, sizeof(buf), NULL) != 0;
 }
 
 /* A missing entry simply misses - no crash, no directory creation. */
@@ -415,7 +415,7 @@ static int test_name_missing(void)
     reset_cache_dirs();
     struct passwd out = {0};
     char buf[1024];
-    return file_cache_load_by_name("nobody_here", &out, buf, sizeof(buf)) != 0;
+    return file_cache_load_by_name("nobody_here", &out, buf, sizeof(buf), NULL) != 0;
 }
 
 /* ------------------------------------------------------------------------
@@ -443,7 +443,7 @@ static int test_oversized_gecos_is_trimmed_not_poisoned(void)
 
     struct passwd out = {0};
     char buf[4096];
-    if (file_cache_load_by_name("bigg", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("bigg", &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (out.pw_uid != 70001) return 0;
     if (strlen(out.pw_gecos) == 0) return 0;
     if (strlen(out.pw_gecos) > CACHE_LINE_MAX) return 0;
@@ -471,7 +471,7 @@ static int test_separator_in_gecos_is_folded(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("colon", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("colon", &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (strchr(out.pw_gecos, ':') != NULL) return 0;
     if (strchr(out.pw_gecos, '\n') != NULL) return 0;
     if (strcmp(out.pw_gecos, "Doe John x y") != 0) return 0;
@@ -498,7 +498,7 @@ static int test_gecos_trim_keeps_utf8_valid(void)
 
     struct passwd out = {0};
     char buf[4096];
-    if (file_cache_load_by_name("accent", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("accent", &out, buf, sizeof(buf), NULL) != 0) return 0;
     size_t len = strlen(out.pw_gecos);
     if (len == 0 || (len % 2) != 0) return 0;      /* whole 2-byte chars only */
     for (size_t i = 0; i < len; i += 2) {
@@ -571,7 +571,7 @@ static int test_unparsable_entry_is_unlinked(void)
     /* (a) too few fields */
     reset_cache_dirs();
     if (write_raw_entry(test_cache_byname(), "broken", "not-a-record\n") != 0) return 0;
-    if (file_cache_load_by_name("broken", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("broken", &out, buf, sizeof(buf), NULL) == 0) return 0;
     snprintf(path, sizeof(path), "%s/broken", test_cache_byname());
     if (stat(path, &st) == 0) return 0;
 
@@ -585,7 +585,7 @@ static int test_unparsable_entry_is_unlinked(void)
     snprintf(big + off + 1500, sizeof(big) - off - 1500,
              ":/home/toolong:/bin/bash:%ld\n", (long)time(NULL));
     if (write_raw_entry(test_cache_byname(), "toolong", big) != 0) return 0;
-    if (file_cache_load_by_name("toolong", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("toolong", &out, buf, sizeof(buf), NULL) == 0) return 0;
     snprintf(path, sizeof(path), "%s/toolong", test_cache_byname());
     if (stat(path, &st) == 0) return 0;
 
@@ -594,7 +594,7 @@ static int test_unparsable_entry_is_unlinked(void)
     reset_cache_dirs();
     if (write_raw_entry(test_cache_byname(), "badts",
                         "badts:70007:100::/home/badts:/bin/sh:not-a-number\n") != 0) return 0;
-    if (file_cache_load_by_name("badts", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("badts", &out, buf, sizeof(buf), NULL) == 0) return 0;
     snprintf(path, sizeof(path), "%s/badts", test_cache_byname());
     if (stat(path, &st) == 0) return 0;
 
@@ -603,10 +603,50 @@ static int test_unparsable_entry_is_unlinked(void)
     snprintf(rec, sizeof(rec), "someone_else:70008:100::/home/x:/bin/sh:%ld\n",
              (long)time(NULL));
     if (write_raw_entry(test_cache_byname(), "claimed", rec) != 0) return 0;
-    if (file_cache_load_by_name("claimed", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("claimed", &out, buf, sizeof(buf), NULL) == 0) return 0;
     snprintf(path, sizeof(path), "%s/claimed", test_cache_byname());
     if (stat(path, &st) == 0) return 0;
     return 1;
+}
+
+/*
+ * Promotion file -> memory must carry the record's ORIGINAL write time.
+ * Stamping the memory copy with time(NULL) would let a long-lived process
+ * serve a record until ~T0 + 2*cache_ttl after the last LLNG contact, against
+ * the module's "never serves stale data" doctrine.
+ */
+static int test_file_promotion_keeps_record_age(void)
+{
+    reset_cache_dirs();
+    g_config.cache_ttl = 100;
+    time_t t0 = time(NULL) - 95;                   /* written nearly a TTL ago */
+
+    char rec[256];
+    snprintf(rec, sizeof(rec), "aging:70009:100:Aging:/home/aging:/bin/bash:%ld\n",
+             (long)t0);
+    if (write_raw_entry(test_cache_byname(), "aging", rec) != 0) return 0;
+
+    struct passwd out = {0};
+    char buf[1024];
+    time_t created = 0;
+    if (file_cache_load_by_name("aging", &out, buf, sizeof(buf), &created) != 0) return 0;
+    if (created != t0) return 0;                   /* the file's own timestamp */
+
+    cache_teardown();
+    if (init_cache() != 0) return 0;
+    g_config.cache_ttl = 100;
+    cache_add_at("aging", &out, 1, created);
+    if (g_cache.entries[0].timestamp != t0) { cache_teardown(); return 0; }
+
+    /* Still live at ttl=100 (age 95)... */
+    if (cache_find("aging") == NULL) { cache_teardown(); return 0; }
+    /* ...and gone at ttl=90, which it would NOT be had the promotion reset the
+     * age to time(NULL). */
+    g_config.cache_ttl = 90;
+    int ok = (cache_find("aging") == NULL);
+    cache_teardown();
+    g_config.cache_ttl = CACHE_TTL;
+    return ok;
 }
 
 /*
@@ -622,8 +662,8 @@ static int test_read_path_never_creates_dirs(void)
     char buf[1024];
     struct stat st;
 
-    if (file_cache_load_by_name("ghost", &out, buf, sizeof(buf)) == 0) return 0;
-    if (file_cache_load_by_uid(4242, &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_name("ghost", &out, buf, sizeof(buf), NULL) == 0) return 0;
+    if (file_cache_load_by_uid(4242, &out, buf, sizeof(buf), NULL) == 0) return 0;
 
     if (stat(test_cache_root(), &st) == 0) return 0;     /* must still not exist */
     if (stat(test_cache_byname(), &st) == 0) return 0;
@@ -662,13 +702,13 @@ static int test_load_rejects_writable_file(void)
     struct passwd out = {0};
     char buf[1024];
     /* Sanity: it loads while the mode is 0644. */
-    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf), NULL) != 0) return 0;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/victim", test_cache_byname());
     if (chmod(path, 0666) != 0) return 0;
     /* Now group+world writable: MUST be refused. */
-    return file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0;
+    return file_cache_load_by_name("victim", &out, buf, sizeof(buf), NULL) != 0;
 }
 
 /*
@@ -684,10 +724,10 @@ static int test_load_rejects_writable_dir(void)
 
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf), NULL) != 0) return 0;
 
     if (chmod(test_cache_byname(), 0777) != 0) return 0;
-    int refused = (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0);
+    int refused = (file_cache_load_by_name("victim", &out, buf, sizeof(buf), NULL) != 0);
     chmod(test_cache_byname(), 0711);
     return refused;
 }
@@ -775,7 +815,7 @@ static int test_stale_temp_file_does_not_block_save(void)
     /* The entry must have been published... */
     struct passwd out = {0};
     char buf[1024];
-    if (file_cache_load_by_name("retry", &out, buf, sizeof(buf)) != 0) return 0;
+    if (file_cache_load_by_name("retry", &out, buf, sizeof(buf), NULL) != 0) return 0;
     if (out.pw_uid != 60001) return 0;
     /* ...and the stale temp must be gone (consumed by the rename). */
     if (access(tmp, F_OK) == 0) return 0;
@@ -858,6 +898,7 @@ int main(void)
     RUN(test_unrepresentable_home_refuses_write);
     RUN(test_oversized_home_refuses_write);
     RUN(test_unparsable_entry_is_unlinked);
+    RUN(test_file_promotion_keeps_record_age);
 
     printf("\n  Cache trust checks (anti cache-poisoning):\n");
     RUN(test_load_rejects_writable_file);

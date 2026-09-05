@@ -1264,7 +1264,10 @@ static void file_cache_save_by_name(const struct passwd *pw)
  * Shared body for the file loaders: given an already-read line and the
  * verified filepath (relative leaf is `leaf`, opened via dirfd), parse it,
  * enforce TTL (unlinking expired entries via unlinkat), and populate `pw`
- * into the caller buffer. Returns 0 on success, -1 otherwise.
+ * into the caller buffer. On success, `*out_created` (when non-NULL) receives
+ * the timestamp the record was WRITTEN at, not the time it was read, so a
+ * caller promoting the record into a shorter-lived cache can preserve its age.
+ * Returns 0 on success, -1 otherwise.
  *
  * A record that cannot be parsed is unlinked, exactly like an expired one. It
  * is not a transient miss: it can never become readable, so leaving it in
@@ -1276,7 +1279,8 @@ static void file_cache_save_by_name(const struct passwd *pw)
  */
 static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
                                  struct passwd *pw, char *buffer, size_t buflen,
-                                 const uid_t *want_uid, const char *want_name)
+                                 const uid_t *want_uid, const char *want_name,
+                                 time_t *out_created)
 {
     char *fields[7];
     char *username_str, *uid_str, *gid_str, *gecos_str;
@@ -1359,6 +1363,7 @@ static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
     pw->pw_shell = p;
     if (safe_strcpy(&p, &remaining, shell_str) != 0) return -1;
 
+    if (out_created) *out_created = (time_t)timestamp;
     return 0;
 
 corrupt:
@@ -1368,9 +1373,10 @@ corrupt:
     return -1;
 }
 
-/* Load user info from file cache by UID (via a verified dir + file fd). */
+/* Load user info from file cache by UID (via a verified dir + file fd).
+ * `out_created` (optional) receives the record's own write timestamp. */
 static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer,
-                                  size_t buflen)
+                                  size_t buflen, time_t *out_created)
 {
     int dirfd = open_cache_dir_read(CACHE_DIR);
     if (dirfd < 0) return -1;
@@ -1397,16 +1403,18 @@ static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer,
     fclose(f);
 
     int rc = file_cache_parse_into(line, dirfd, leaf, pw, buffer, buflen,
-                                   &uid, NULL);
+                                   &uid, NULL, out_created);
     close(dirfd);
     return rc;
 }
 
 /* Load user info from file cache by name (via a verified dir + file fd).
  * Mirrors file_cache_load_by_uid() but keyed on the username file under
- * CACHE_DIR_BYNAME. Returns 0 on success, -1 otherwise. */
+ * CACHE_DIR_BYNAME. `out_created` (optional) receives the record's own write
+ * timestamp. Returns 0 on success, -1 otherwise. */
 static int file_cache_load_by_name(const char *name, struct passwd *pw,
-                                   char *buffer, size_t buflen)
+                                   char *buffer, size_t buflen,
+                                   time_t *out_created)
 {
     /* Defense in depth: validate the name as a filename BEFORE building a
      * path, so a hostile or malformed lookup can never escape the cache dir. */
@@ -1432,13 +1440,25 @@ static int file_cache_load_by_name(const char *name, struct passwd *pw,
     fclose(f);
 
     int rc = file_cache_parse_into(line, dirfd, name, pw, buffer, buflen,
-                                   NULL, name);
+                                   NULL, name, out_created);
     close(dirfd);
     return rc;
 }
 
-/* Add to cache */
-static void cache_add(const char *username, const struct passwd *pw, int valid)
+/*
+ * Add to the in-memory cache with an explicit creation time.
+ *
+ * `created` is the moment the record was obtained from LLNG, which is NOT
+ * always "now": a record promoted from the on-disk cache was written at some
+ * earlier T0 and must keep that age. Stamping it with time(NULL) instead
+ * would let a long-lived process serve it until T0 + 2*cache_ttl after the
+ * last contact with LLNG, since the file's own TTL would already have been
+ * spent before the memory copy started its own. The module's stated doctrine
+ * is that it never serves data older than cache_ttl, so the age travels with
+ * the record.
+ */
+static void cache_add_at(const char *username, const struct passwd *pw,
+                         int valid, time_t created)
 {
     /* Guard against uninitialized cache */
     if (!g_cache.entries || g_cache.capacity == 0) {
@@ -1471,7 +1491,7 @@ static void cache_add(const char *username, const struct passwd *pw, int valid)
 
     cache_entry_t *entry = &g_cache.entries[slot];
     entry->username = strdup(username);
-    entry->timestamp = time(NULL);
+    entry->timestamp = created;
     entry->valid = valid;
     entry->pw_buffer = NULL;
 
@@ -1515,6 +1535,12 @@ static void cache_add(const char *username, const struct passwd *pw, int valid)
     }
 
     pthread_mutex_unlock(&g_cache.lock);
+}
+
+/* Add a record obtained right now (the LLNG and service-account paths). */
+static void cache_add(const char *username, const struct passwd *pw, int valid)
+{
+    cache_add_at(username, pw, valid, time(NULL));
 }
 
 /* Maximum response size to prevent memory exhaustion.
@@ -2097,8 +2123,11 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
      * memory-only on purpose), so a hit is safe to promote into the in-memory
      * cache exactly like the getpwuid file-cache-hit path does.
      */
-    if (file_cache_load_by_name(name, result, buffer, buflen) == 0) {
-        cache_add(name, result, 1);
+    time_t file_created = 0;
+    if (file_cache_load_by_name(name, result, buffer, buflen, &file_created) == 0) {
+        /* Promote with the record's ORIGINAL age, not time(NULL): the memory
+         * copy must expire when the on-disk record would have. */
+        cache_add_at(name, result, 1, file_created);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }
@@ -2223,9 +2252,11 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwuid_r(uid_t uid,
     pthread_mutex_unlock(&g_cache.lock);
 
     /* Try file-based cache (shared across processes) */
-    if (file_cache_load_by_uid(uid, result, buffer, buflen) == 0) {
-        /* Also add to memory cache for future lookups in this process */
-        cache_add(result->pw_name, result, 1);
+    time_t file_created = 0;
+    if (file_cache_load_by_uid(uid, result, buffer, buflen, &file_created) == 0) {
+        /* Also add to memory cache for future lookups in this process, with
+         * the record's original age so it does not outlive the on-disk TTL. */
+        cache_add_at(result->pw_name, result, 1, file_created);
         g_in_nss_lookup = 0;
         return NSS_STATUS_SUCCESS;
     }
