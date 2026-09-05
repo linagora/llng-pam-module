@@ -63,14 +63,16 @@ You can restrict allowed key types with [SSH Key Policy](security.md#ssh-key-pol
 ```
 # /etc/pam.d/sshd
 #
-# AUTHENTICATION: Handled by SSH keys (not PAM)
-# - Unix passwords: NOT USED (disable PasswordAuthentication in sshd_config)
+# AUTHENTICATION: refused. SSH keys are validated by sshd, which never calls
+# pam_authenticate() on that path, so this stack is only reached by password or
+# keyboard-interactive authentication -- which this mode does not allow.
+# - Unix passwords: REFUSED here, and disable PasswordAuthentication in sshd_config
 # - LLNG tokens: NOT USED
 # - SSH keys: REQUIRED
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       required     pam_permit.so
+auth       required     pam_deny.so
 
 account    required     pam_openbastion.so
 account    required     pam_unix.so
@@ -172,20 +174,17 @@ PermitRootLogin no
 This is what `ob-bastion-setup` writes (from v0.6.3 — see #220). Reproduce it
 exactly if you configure PAM by hand: every line below is load-bearing.
 
-> **What actually keeps passwords out.** The `auth` phase is _not_ the barrier.
-> `pam_permit` returns `PAM_SUCCESS` on the intended path, so if sshd ever runs
-> this stack, a password is accepted at the `auth` phase and only the LLNG
-> `account` check stands between the caller and a session. The control that
-> keeps passwords out is **`PasswordAuthentication no`** in the sshd drop-in,
-> which the setup scripts also write.
+> **Two independent controls keep passwords out.** First,
+> **`PasswordAuthentication no`** in the sshd drop-in, which the setup scripts
+> also write: sshd then never runs this stack for a password at all. Second,
+> the `auth` phase itself now refuses — `pam_deny` returns `PAM_AUTH_ERR`, so
+> even if password or keyboard-interactive authentication were re-enabled, no
+> password is accepted here.
 >
-> The `pam_permit` / `pam_deny` pair is a _backstop_, not the primary control:
-> `success=1` jumps over exactly one module, so the stack ends on the recorded
-> success, while any other outcome — a missing or erroring module — falls
-> through to `pam_deny` instead of failing open silently.
->
-> Note this means re-enabling `PasswordAuthentication` on a certificate-mode
-> host is unsafe regardless of the PAM stack. See #180.
+> The certificate path is unaffected: sshd validates keys and certificates
+> itself and never calls `pam_authenticate()` on that path, so this stack is
+> only ever reached by password or keyboard-interactive authentication — which
+> this mode does not allow. See #180.
 
 ```
 # /etc/pam.d/sshd   (bastion / standalone — written by ob-bastion-setup)
@@ -197,7 +196,6 @@ exactly if you configure PAM by hand: every line below is load-bearing.
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       [success=1 default=ignore] pam_permit.so
 auth       required     pam_deny.so
 
 account    required     pam_openbastion.so ssh_cert_aware=true
@@ -221,14 +219,14 @@ session    optional     pam_systemd.so
 
 Line by line, and why each matters:
 
-| Line                             | Why it is there                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth … pam_permit` + `pam_deny` | The certificate path never calls `pam_authenticate()`. The pair makes the stack fail **closed** if it is ever reached (sshd left with password or keyboard-interactive auth on). `PasswordAuthentication no` in `sshd_config` is still what keeps passwords out.                                                                 |
-| `account … ssh_cert_aware=true`  | See the note below — the module currently ignores this argument.                                                                                                                                                                                                                                                                 |
-| **no** `account … pam_unix.so`   | In Mode E users exist only in NSS, not in `/etc/passwd`. `pam_unix`'s account check has no shadow entry to look at and can refuse the login. The same reasoning is already spelled out for `/etc/pam.d/sudo` below.                                                                                                              |
-| `session … pam_mkhomedir.so`     | Without it an SSO user lands in a non-existent home directory on a bastion. (On a backend, `pam_openbastion create_user=true` provisions the home instead.)                                                                                                                                                                      |
-| `session … pam_openbastion.so`   | This is where the module manages `open-bastion-sudo` group membership from the SSO's `sudo_allowed` flag. **Omit it and Mode E sudo breaks**: sudoers grants only `%open-bastion-sudo`, and nothing ever adds the user to it.                                                                                                    |
-| `session … pam_systemd.so`       | Registers the session with `systemd-logind`. Without it, cert-hop sessions are invisible to `who`, `w`, `loginctl` and to the heartbeat's connected-users report (fixed in 0.5.1). Both setups append this line only when `pam_systemd.so` is actually installed, so a non-systemd host does not get a per-login `dlopen` error. |
+| Line                            | Why it is there                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `auth required pam_deny.so`     | The certificate path never calls `pam_authenticate()`, so this stack is only reached by password or keyboard-interactive authentication, which certificate modes do not allow. `pam_deny` refuses it outright (`PAM_AUTH_ERR`). `PasswordAuthentication no` in `sshd_config` remains the first line of defence — this is the second. |
+| `account … ssh_cert_aware=true` | See the note below — the module currently ignores this argument.                                                                                                                                                                                                                                                                     |
+| **no** `account … pam_unix.so`  | In Mode E users exist only in NSS, not in `/etc/passwd`. `pam_unix`'s account check has no shadow entry to look at and can refuse the login. The same reasoning is already spelled out for `/etc/pam.d/sudo` below.                                                                                                                  |
+| `session … pam_mkhomedir.so`    | Without it an SSO user lands in a non-existent home directory on a bastion. (On a backend, `pam_openbastion create_user=true` provisions the home instead.)                                                                                                                                                                          |
+| `session … pam_openbastion.so`  | This is where the module manages `open-bastion-sudo` group membership from the SSO's `sudo_allowed` flag. **Omit it and Mode E sudo breaks**: sudoers grants only `%open-bastion-sudo`, and nothing ever adds the user to it.                                                                                                        |
+| `session … pam_systemd.so`      | Registers the session with `systemd-logind`. Without it, cert-hop sessions are invisible to `who`, `w`, `loginctl` and to the heartbeat's connected-users report (fixed in 0.5.1). Both setups append this line only when `pam_systemd.so` is actually installed, so a non-systemd host does not get a per-login `dlopen` error.     |
 
 > **`ssh_cert_aware=true` is currently a no-op.** Both setup scripts pass it as
 > a module argument, but no code reads it: PAM module arguments of the form
