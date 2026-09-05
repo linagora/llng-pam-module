@@ -31,16 +31,6 @@ target_include_directories(test_audit_log PRIVATE
 target_link_libraries(test_audit_log pthread ${JSON_C_LIBRARIES} ${OPENSSL_LIBRARIES})
 add_test(NAME test_audit_log COMMAND test_audit_log)
 
-# Test client context
-add_executable(test_client_context test_client_context.c ../src/client_context.c)
-target_include_directories(test_client_context PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${PAM_INCLUDE_DIR}
-    ${OPENSSL_INCLUDE_DIRS}
-)
-target_link_libraries(test_client_context ${PAM_LIBRARY} ${OPENSSL_LIBRARIES})
-add_test(NAME test_client_context COMMAND test_client_context)
-
 # Test secret store
 add_executable(test_secret_store test_secret_store.c ../src/secret_store.c)
 target_include_directories(test_secret_store PRIVATE
@@ -210,19 +200,6 @@ add_test(NAME test_crowdsec COMMAND test_crowdsec)
 add_executable(test_service_account test_service_account.c ../src/service_account.c ../src/config.c ../src/str_utils.c)
 target_include_directories(test_service_account PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME test_service_account COMMAND test_service_account)
-
-# Test token cache (encryption, salt, persistence)
-add_executable(test_token_cache test_token_cache.c ../src/token_cache.c ../src/cache_key.c)
-target_include_directories(test_token_cache PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${JSON_C_INCLUDE_DIRS}
-    ${OPENSSL_INCLUDE_DIRS}
-)
-target_link_libraries(test_token_cache
-    ${JSON_C_LIBRARIES}
-    ${OPENSSL_LIBRARIES}
-)
-add_test(NAME test_token_cache COMMAND test_token_cache)
 
 # Test token manager file I/O (load/save, symlink rejection)
 add_executable(test_token_manager_io test_token_manager_io.c ../src/token_manager.c ../src/jwt_utils.c)

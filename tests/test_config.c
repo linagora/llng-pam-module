@@ -35,8 +35,6 @@ static int test_init_defaults(void)
     int ok = 1;
     ok = ok && (config.timeout == 10);
     ok = ok && (config.verify_ssl == true);
-    ok = ok && (config.cache_enabled == true);
-    ok = ok && (config.cache_ttl == 300);
     ok = ok && (config.server_group != NULL && strcmp(config.server_group, "default") == 0);
 
     config_free(&config);
@@ -53,8 +51,7 @@ static int test_parse_args(void)
         "portal_url=https://test.example.com",
         "client_id=test-client",
         "timeout=30",
-        "debug",
-        "no_cache"
+        "debug"
     };
     int argc = sizeof(argv) / sizeof(argv[0]);
 
@@ -66,7 +63,6 @@ static int test_parse_args(void)
     ok = ok && (config.client_id != NULL && strcmp(config.client_id, "test-client") == 0);
     ok = ok && (config.timeout == 30);
     ok = ok && (config.log_level == 3);  /* debug */
-    ok = ok && (config.cache_enabled == false);
 
     config_free(&config);
     return ok;

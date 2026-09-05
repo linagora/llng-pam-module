@@ -86,21 +86,22 @@ verify_ssl = true
 # ca_cert = /etc/ssl/certs/my-ca.pem
 
 # ==============================================================================
-# Cache Settings
+# Authorization Cache Settings (offline mode)
 # ==============================================================================
 
-# Enable token caching to reduce server load
+# Enable the authorization cache, which lets an already-authorized user log in
+# while the portal is unreachable. The TTL is decided by the server
+# (offline.ttl in the /pam/authorize response), not here.
 # Default: true
-cache_enabled = true
+auth_cache_enabled = true
 
-# Cache directory
-# Default: /var/cache/open-bastion
-cache_dir = /var/cache/open-bastion
+# Authorization cache directory
+# Default: /var/cache/open-bastion/auth
+# auth_cache_dir = /var/cache/open-bastion/auth
 
-# Cache TTL in seconds (time to live)
-# Cached results expire after this time
-# Default: 300 (5 minutes)
-cache_ttl = 300
+# Creating this file forces every authorization online, bypassing the cache
+# Default: /etc/open-bastion/force_online
+# auth_cache_force_online = /etc/open-bastion/force_online
 
 # ==============================================================================
 # Operation Mode

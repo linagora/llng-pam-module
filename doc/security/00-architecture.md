@@ -244,48 +244,73 @@ AuthorizedPrincipalsCommandUser nobody
 | `pamAccessServerGroups`      | —       | (Optionnel) **mapping d'autorité `client_id → server_group`** : quand il est non vide, `/pam/authorize` et `/pam/bastion-token` imposent ce `server_group` au lieu de croire celui de la requête. À **ne pas confondre** avec les _règles_ d'accès par groupe (`pamAccessSshRules` / `pamAccessSudoRules`, `server_group → règle`). Inadapté quand un `client_id` couvre un projet **multi-groupes** → laisser vide. `/pam/bastion-cert` n'utilise **aucun** groupe : il ne s'appuie que sur le voucher |
 | `sshCaActivation`            | 0       | Doit être mis à **1** pour activer le plugin ssh-ca requis par ce mécanisme                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
-## Sécurité du Cache de Tokens
+## Sécurité du Cache d'Autorisation
+
+Le **cache d'autorisation** (`auth_cache`) est le seul cache côté PAM du module.
+Il conserve le résultat d'un appel `/pam/authorize` réussi afin qu'un
+utilisateur déjà autorisé puisse encore se connecter lorsque le portail LLNG est
+injoignable. Il ne met jamais en cache d'identifiants, de tokens ou de matériel
+de mot de passe — uniquement un verdict d'autorisation et les attributs de
+compte associés.
+
+Les entrées ne sont écrites que par les builds incluant les composants Desktop
+SSO (`-DINSTALL_DESKTOP=ON`, ce qu'utilisent les paquets `.deb` et `.rpm`). Un
+build SSH seul lit le cache mais ne l'alimente jamais.
 
 ### Chiffrement au Repos
 
-Lorsque `cache_encrypted = true` _(défaut)_, les tokens en cache sont chiffrés en utilisant :
+Les entrées du cache sont toujours chiffrées — il n'existe pas de mode en clair :
 
 - **Algorithme** : AES-256-GCM _(chiffrement authentifié)_
 - **Dérivation de clé** : PBKDF2-SHA256 avec 100 000 itérations
-- **Source de la clé** : Machine ID (`/etc/machine-id`) + nom d'utilisateur du cache comme sel
+- **Source de la clé** : Machine ID (`/etc/machine-id`), ou un `.instance_id`
+  propre à l'installation si `/etc/machine-id` est indisponible (conteneurs,
+  chroots), salé par un `.auth_salt` propre au répertoire
 - **Authentification** : Le tag GCM empêche la falsification
 
 ```
 Format du fichier :
-[Texte clair : "expires_at\n"][Magic : LLNGCACHE02][IV : 12 octets][Tag : 16 octets][Texte chiffré]
+["<expires_at> <HMAC-SHA256 hex>\n"][Magic : LLNGCACHE04][IV : 12 octets][Texte chiffré][Tag GCM : 16 octets]
 ```
 
-L'en-tête d'horodatage en clair permet des vérifications rapides d'expiration sans déchiffrement
-_(optimisation des performances)_. Cependant, l'horodatage est **dupliqué à l'intérieur du payload chiffré**
-pour vérification d'intégrité. Si un attaquant modifie l'en-tête en clair pour étendre la validité du cache,
-la discordance avec l'horodatage chiffré entraîne un rejet immédiat et la suppression du fichier cache.
+L'en-tête d'expiration en clair permet des vérifications rapides d'expiration et
+le nettoyage sans déchiffrer le payload. Il est authentifié par un HMAC-SHA256
+sur l'horodatage, avec la même clé dérivée : un attaquant ne peut donc pas
+étendre la validité du cache en l'éditant. Un en-tête dont le HMAC échoue est
+ignoré et l'entrée passe par un déchiffrement authentifié complet.
+
+### Dérivation de Clé Fail-Closed
+
+`auth_cache_init()` renvoie `NULL` si la dérivation de clé échoue. Il n'y a pas
+de repli non chiffré : si le cache ne peut pas être chiffré, il n'est pas
+utilisé du tout et l'autorisation repasse par le chemin en ligne.
 
 ### Isolation du Cache
 
-- Le cache de chaque utilisateur est stocké dans un fichier séparé
+- Les entrées sont indexées sur `(user, server_group, host)`, un fichier par entrée
 - Permissions du fichier : 0600 _(lecture/écriture propriétaire uniquement)_
-- Permissions du répertoire : 0700
+- Permissions du répertoire : 0700 _(`/var/cache/open-bastion/auth` par défaut)_
+- Écriture dans un fichier temporaire puis renommage atomique
+- Lecture avec `O_NOFOLLOW` ; un lien symbolique à la place d'un fichier de cache est supprimé, pas suivi
 
-### Invalidation du Cache
+### TTL et Invalidation
 
-Lorsque `cache_invalidate_on_logout = true` _(défaut)_ :
+Le TTL n'est pas un réglage local : il provient du serveur, dans le champ
+`offline.ttl` de la réponse `/pam/authorize`, et l'entrée n'est écrite que si le
+serveur active explicitement le mode hors ligne pour cet utilisateur. Les
+entrées expirées sont supprimées à l'accès et par `auth_cache_cleanup()`.
 
-- Le cache de l'utilisateur est effacé à la fermeture de sa session PAM
-- Empêche la réutilisation de tokens périmés
+Mettre `auth_cache_enabled = false` désactive complètement le cache ; créer le
+fichier `auth_cache_force_online` (`/etc/open-bastion/force_online` par défaut)
+force toute autorisation en ligne sans changement de configuration.
 
-### TTL Basé sur le Risque
+### Protection contre la Force Brute
 
-| Type de service        | TTL par défaut |
-| ---------------------- | -------------- |
-| Services normaux       | 300 secondes   |
-| Services à haut risque | 60 secondes    |
-
-Configurer les services à haut risque via `high_risk_services` _(séparés par des virgules)_.
+Comme un verdict en cache peut être rejoué hors ligne, les consultations du
+cache sont limitées en débit indépendamment du chemin en ligne
+(`cache_rate_limit_*`). Les succès comme les échecs comptent dans le verrouillage :
+un attaquant ne peut donc pas sonder quels comptes ont une entrée en cache sans
+en subir la pénalité.
 
 ## Limitation de Débit
 
@@ -418,11 +443,9 @@ Pour la surveillance de sécurité en temps réel :
 
 ### Gestion des Secrets
 
-| Paramètre              | Défaut         | Description                   |
-| ---------------------- | -------------- | ----------------------------- |
-| `secrets_encrypted`    | true           | Chiffrer les secrets au repos |
-| `secrets_use_keyring`  | true           | Utiliser le trousseau noyau   |
-| `secrets_keyring_name` | "open-bastion" | Identifiant du trousseau      |
+| Paramètre           | Défaut | Description                   |
+| ------------------- | ------ | ----------------------------- |
+| `secrets_encrypted` | true   | Chiffrer les secrets au repos |
 
 ### Permissions des Fichiers
 

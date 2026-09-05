@@ -28,15 +28,6 @@ typedef struct {
     int min_tls_version;     /* Minimum TLS version: 12=1.2, 13=1.3 (default: 13) */
     char *cert_pin;          /* Certificate pin (sha256//base64 format, optional) */
 
-    /* Cache settings (for token cache) */
-    bool cache_enabled;      /* Enable token caching (default: true) */
-    char *cache_dir;         /* Cache directory (default: /var/cache/open-bastion) */
-    int cache_ttl;           /* Cache TTL in seconds (default: 300) */
-    int cache_ttl_high_risk; /* Cache TTL for high-risk services (default: 60) */
-    char *high_risk_services; /* Comma-separated list of high-risk PAM services */
-    bool cache_encrypted;    /* Encrypt cache files with AES-256-GCM (default: true) */
-    bool cache_invalidate_on_logout; /* Invalidate cache when session closes (default: true) */
-
     /* Authorization cache settings (for offline mode) */
     bool auth_cache_enabled;        /* Enable authorization caching (default: true) */
     char *auth_cache_dir;           /* Auth cache directory (default: /var/cache/open-bastion/auth) */
@@ -70,8 +61,6 @@ typedef struct {
 
     /* Secret storage */
     bool secrets_encrypted;         /* Encrypt secrets at rest (default: true) */
-    bool secrets_use_keyring;       /* Use kernel keyring (default: true) */
-    char *secrets_keyring_name;     /* Keyring name (default: "open-bastion") */
 
     /* Webhook notifications */
     bool notify_enabled;            /* Enable webhook notifications (default: false) */

@@ -255,7 +255,7 @@ static int load_or_generate_salt(const char *cache_dir,
 
 /*
  * Derive encryption key from machine-id (or fallback instance-id) with salt.
- * This is the shared implementation used by both token_cache and auth_cache.
+ * This is the shared implementation used by auth_cache and offline_cache.
  *
  * Fallback chain:
  * 1. /etc/machine-id (preferred, stable across reboots)

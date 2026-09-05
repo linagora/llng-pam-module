@@ -2,7 +2,7 @@
  * cache_key.h - Shared PBKDF2 key derivation for cache encryption
  *
  * Provides shared key derivation to avoid duplicate PBKDF2 operations
- * across token_cache and auth_cache.
+ * across auth_cache and offline_cache.
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0

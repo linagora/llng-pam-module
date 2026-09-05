@@ -66,12 +66,10 @@ timeout = 10
 verify_ssl = true
 # ca_cert = /etc/ssl/certs/custom-ca.pem
 
-# Cache settings
-cache_enabled = true
-cache_dir = /var/cache/open-bastion
-cache_ttl = 300
-cache_ttl_high_risk = 60
-high_risk_services = sudo,su
+# Authorization cache (offline mode); TTL comes from the server
+auth_cache_enabled = true
+# auth_cache_dir = /var/cache/open-bastion/auth
+# auth_cache_force_online = /etc/open-bastion/force_online
 
 # Logging: error, warn, info, debug
 log_level = warn
@@ -119,7 +117,7 @@ auth required pam_openbastion.so portal_url=https://auth.example.com debug
 | `server_group=GROUP` | Override server group                  |
 | `debug`              | Enable debug logging                   |
 | `authorize_only`     | Skip password check (for SSH key mode) |
-| `no_cache`           | Disable token caching                  |
+| `no_auth_cache`      | Disable the authorization cache        |
 | `insecure`           | Skip SSL verification                  |
 | `no_audit`           | Disable audit logging                  |
 | `no_rate_limit`      | Disable rate limiting                  |
