@@ -472,6 +472,63 @@ static int test_output_buffer_too_small(void)
     return ok;
 }
 
+/*
+ * The bound must be exactly the plaintext length: AES-256-GCM is unpadded, so
+ * a caller that allocates exactly what *actual_len will report is a correct
+ * caller and must not be refused. Guards against re-introducing the
+ * "+ TAG_SIZE" margin flagged in review of PR #222.
+ */
+static int test_output_buffer_exact_size(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt",
+        .use_keyring = false,
+        .keyring_name = NULL
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char secret[64];
+    for (size_t i = 0; i < sizeof(secret); i++) {
+        secret[i] = (unsigned char)(0x40 + (i & 0x1f));
+    }
+
+    if (secret_store_put(store, "exact:key", secret, sizeof(secret)) != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* Exactly sizeof(secret) bytes of usable buffer, with canaries around it. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *exact = area + 64;
+    size_t actual_len = 0;
+
+    int ok = (secret_store_get(store, "exact:key", exact, sizeof(secret),
+                               &actual_len) == 0);
+    if (ok && actual_len != sizeof(secret)) ok = 0;
+    if (ok && memcmp(exact, secret, sizeof(secret)) != 0) ok = 0;
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 64 + sizeof(secret)) continue;
+        if (area[i] != 0xAA) ok = 0;   /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "exact:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
 /* Test error message */
 static int test_error_message(void)
 {
@@ -539,6 +596,7 @@ int main(void)
     TEST(disabled);
     TEST(binary_data);
     TEST(output_buffer_too_small);
+    TEST(output_buffer_exact_size);
     TEST(error_message);
     TEST(rotate_key_not_implemented);
 

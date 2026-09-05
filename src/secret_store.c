@@ -477,11 +477,13 @@ int secret_store_get(secret_store_t *store,
      * would overflow the caller's buffer while the data is still
      * unauthenticated. Bail out here instead.
      *
-     * ciphertext_len + TAG_SIZE (rather than ciphertext_len) keeps the margin
-     * EVP_DecryptFinal_ex() may need and matches the explicit_bzero(secret,
-     * secret_size) already performed on the tag-mismatch path below.
+     * The bound is exactly ciphertext_len: GCM is unpadded, so
+     * EVP_DecryptFinal_ex() writes no additional plaintext and the whole
+     * plaintext is ciphertext_len bytes. Requiring an extra TAG_SIZE would
+     * refuse the natural contract of this API - a caller that allocates
+     * exactly the plaintext length it gets back in *actual_len.
      */
-    if (ciphertext_len + TAG_SIZE > secret_size) {
+    if (ciphertext_len > secret_size) {
         explicit_bzero(data, st.st_size);
         free(data);
         snprintf(store->error_buf, sizeof(store->error_buf),
