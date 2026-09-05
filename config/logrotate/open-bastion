@@ -1,0 +1,31 @@
+# logrotate template for the Open Bastion JSON audit log.
+#
+# This is a TEMPLATE, not an active configuration: copy it into place with
+#
+#     cp /usr/share/open-bastion/logrotate/open-bastion /etc/logrotate.d/open-bastion
+#
+# and adjust the path if you set `audit_log_file` to something other than the
+# default in /etc/open-bastion/openbastion.conf. It is shipped read-only, the
+# same way as the auditd templates under /usr/share/open-bastion/audit/, so it
+# is never a dpkg conffile / rpm config(noreplace).
+#
+# Rotation is deliberately left to logrotate rather than done inside the PAM
+# module: the audit log is appended to concurrently by every sshd and sudo
+# process on the host, so a module that renamed or truncated it would race with
+# its own peers. The module only warns (once per process, via syslog) when the
+# file grows past 100 MB.
+#
+# `create 0640 root root` recreates the file with the same mode the module uses
+# when it creates the log itself. If you deliberately keep the log at 0600,
+# change it here too — the module preserves a stricter mode on an existing file
+# but cannot know your intent for a freshly rotated one.
+
+/var/log/open-bastion/audit.json {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -106,9 +107,7 @@ static int test_init(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -134,9 +133,7 @@ static int test_put_get(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -176,9 +173,7 @@ static int test_exists(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -209,9 +204,7 @@ static int test_delete(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -245,9 +238,7 @@ static int test_not_found(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -276,9 +267,7 @@ static int test_different_keys(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -317,9 +306,7 @@ static int test_overwrite(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -349,9 +336,7 @@ static int test_disabled(void)
     secret_store_config_t config = {
         .enabled = false,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -375,9 +360,7 @@ static int test_binary_data(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -411,15 +394,127 @@ static int test_binary_data(void)
     return 1;
 }
 
+/*
+ * Test that a stored secret larger than the caller's output buffer is refused
+ * instead of overflowing it. Before the fix, secret_store_get() passed the
+ * caller's buffer straight to EVP_DecryptUpdate() with the on-disk ciphertext
+ * length and never compared it to secret_size, so the overflow happened before
+ * the GCM tag was even verified.
+ *
+ * The canary bytes around the (deliberately undersized) buffer must be intact
+ * on return.
+ */
+static int test_output_buffer_too_small(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char big_secret[512];
+    for (size_t i = 0; i < sizeof(big_secret); i++) {
+        big_secret[i] = (unsigned char)(i & 0xff);
+    }
+
+    int ret = secret_store_put(store, "toobig:key", big_secret, sizeof(big_secret));
+    if (ret != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* 64-byte window inside a 192-byte area; the surrounding bytes are canaries. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *small = area + 64;
+    size_t actual_len = 12345;
+
+    ret = secret_store_get(store, "toobig:key", small, 64, &actual_len);
+
+    int ok = (ret == -1);
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 128) continue;  /* the buffer we handed over */
+        if (area[i] != 0xAA) ok = 0;       /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "toobig:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
+/*
+ * The bound must be exactly the plaintext length: AES-256-GCM is unpadded, so
+ * a caller that allocates exactly what *actual_len will report is a correct
+ * caller and must not be refused. Guards against re-introducing the
+ * "+ TAG_SIZE" margin flagged in review of PR #222.
+ */
+static int test_output_buffer_exact_size(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char secret[64];
+    for (size_t i = 0; i < sizeof(secret); i++) {
+        secret[i] = (unsigned char)(0x40 + (i & 0x1f));
+    }
+
+    if (secret_store_put(store, "exact:key", secret, sizeof(secret)) != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* Exactly sizeof(secret) bytes of usable buffer, with canaries around it. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *exact = area + 64;
+    size_t actual_len = 0;
+
+    int ok = (secret_store_get(store, "exact:key", exact, sizeof(secret),
+                               &actual_len) == 0);
+    if (ok && actual_len != sizeof(secret)) ok = 0;
+    if (ok && memcmp(exact, secret, sizeof(secret)) != 0) ok = 0;
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 64 + sizeof(secret)) continue;
+        if (area[i] != 0xAA) ok = 0;   /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "exact:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
 /* Test error message */
 static int test_error_message(void)
 {
     secret_store_config_t config = {
         .enabled = false,
         .store_dir = (char *)test_store_dir,
-        .salt = NULL,
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = NULL
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -445,9 +540,7 @@ static int test_rotate_key_not_implemented(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -460,6 +553,222 @@ static int test_rotate_key_not_implemented(void)
 
     secret_store_destroy(store);
     return (ret == -1);  /* Should return -1 (not implemented) */
+}
+
+/* Find the single file with the given suffix in dir. Returns 1 on success. */
+static int find_file_with_suffix(const char *dir, const char *suffix,
+                                 char *out, size_t out_size)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int found = 0;
+    struct dirent *e;
+    size_t slen = strlen(suffix);
+    while ((e = readdir(d)) != NULL) {
+        size_t nlen = strlen(e->d_name);
+        if (nlen > slen && strcmp(e->d_name + nlen - slen, suffix) == 0) {
+            snprintf(out, out_size, "%s/%s", dir, e->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * Regression for #197: the atomic-write temp file must be per-process.
+ *
+ * secret_store_put() used to write through a fixed "<path>.tmp" opened with
+ * O_TRUNC, so two concurrent writers interleaved into a single file and
+ * renamed the mixture into place. A sentinel planted at the old fixed name
+ * must now be left strictly untouched — the writer uses "<path>.tmp.<pid>"
+ * created with O_EXCL.
+ */
+static int test_temp_file_is_private(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    char store_dir[] = "/tmp/test_secret_tmpname_XXXXXX";
+    if (mkdtemp(store_dir) == NULL) return 0;
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        remove_directory(store_dir);
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    const char *secret = "first-value";
+    int ok = (secret_store_put(store, "tmpname:key", secret, strlen(secret)) == 0);
+
+    char entry_path[512] = {0};
+    ok = ok && find_file_with_suffix(store_dir, ".enc", entry_path, sizeof(entry_path));
+
+    /* Plant a sentinel at the temp name the pre-#197 code would have reused. */
+    char legacy_tmp[600];
+    const char *sentinel = "SENTINEL-MUST-SURVIVE";
+    if (ok) {
+        snprintf(legacy_tmp, sizeof(legacy_tmp), "%s.tmp", entry_path);
+        int fd = open(legacy_tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        ok = (fd >= 0);
+        if (ok) {
+            ok = (write(fd, sentinel, strlen(sentinel)) == (ssize_t)strlen(sentinel));
+            close(fd);
+        }
+    }
+
+    /* Overwrite the entry: this must not go through the fixed temp name. */
+    const char *second = "second-value-longer";
+    ok = ok && (secret_store_put(store, "tmpname:key", second, strlen(second)) == 0);
+
+    if (ok) {
+        char buf[128] = {0};
+        int fd = open(legacy_tmp, O_RDONLY);
+        ok = (fd >= 0);
+        if (ok) {
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            ok = (n == (ssize_t)strlen(sentinel) && strcmp(buf, sentinel) == 0);
+        }
+    }
+
+    /* And the entry itself must hold the new value. */
+    if (ok) {
+        char got[128] = {0};
+        size_t got_len = 0;
+        ok = (secret_store_get(store, "tmpname:key", got, sizeof(got), &got_len) == 0) &&
+             got_len == strlen(second) && strcmp(got, second) == 0;
+    }
+
+    secret_store_destroy(store);
+    remove_directory(store_dir);
+    return ok;
+}
+
+/*
+ * Concurrency regression for #197: concurrent writers must never publish a
+ * mixture of each other's bytes.
+ *
+ * Each child writes a distinctly sized value for the same key; with the old
+ * shared "<path>.tmp" the interleaved content failed AES-GCM authentication on
+ * read. With a private temp file per process every rename publishes one
+ * writer's complete value, so the final get() always succeeds and always
+ * returns one of the values written.
+ */
+#define SS_CONC_CHILDREN 6
+#define SS_CONC_ROUNDS   10
+
+static int test_concurrent_put(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    char store_dir[] = "/tmp/test_secret_conc_XXXXXX";
+    if (mkdtemp(store_dir) == NULL) return 0;
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        remove_directory(store_dir);
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    /* Derive the key/salt once up front so the children only race on the write. */
+    if (secret_store_put(store, "conc:key", "seed", 4) != 0) {
+        secret_store_destroy(store);
+        remove_directory(store_dir);
+        return 0;
+    }
+
+    int barrier[2];
+    if (pipe(barrier) != 0) {
+        secret_store_destroy(store);
+        remove_directory(store_dir);
+        return 0;
+    }
+
+    int started = 0;
+    for (int i = 0; i < SS_CONC_CHILDREN; i++) {
+        pid_t pid = fork();
+        if (pid < 0) break;
+        if (pid == 0) {
+            close(barrier[1]);
+            char c;
+            ssize_t r;
+            do {
+                r = read(barrier[0], &c, 1);
+            } while (r < 0 && errno == EINTR);
+            close(barrier[0]);
+
+            /* Distinct length per child so an interleave cannot go unnoticed. */
+            char value[128];
+            int len = snprintf(value, sizeof(value), "child-%d", i);
+            for (int pad = 0; pad < i * 10 && len < (int)sizeof(value) - 1; pad++) {
+                value[len++] = 'x';
+            }
+            value[len] = '\0';
+
+            for (int j = 0; j < SS_CONC_ROUNDS; j++) {
+                secret_store_put(store, "conc:key", value, (size_t)len);
+            }
+            _exit(0);
+        }
+        started++;
+    }
+
+    close(barrier[0]);
+    for (int i = 0; i < started; i++) {
+        if (write(barrier[1], "g", 1) != 1) break;
+    }
+    close(barrier[1]);
+
+    for (int i = 0; i < started; i++) {
+        int status;
+        wait(&status);
+    }
+
+    int ok = (started == SS_CONC_CHILDREN);
+
+    char got[128] = {0};
+    size_t got_len = 0;
+    if (ok && secret_store_get(store, "conc:key", got, sizeof(got), &got_len) != 0) {
+        printf("(entry unreadable after concurrent writes) ");
+        ok = 0;
+    }
+    if (ok && strncmp(got, "child-", 6) != 0) {
+        printf("(entry corrupted: '%s') ", got);
+        ok = 0;
+    }
+
+    /* No fixed-name temp file may be left behind either. */
+    char entry_path[512];
+    if (ok && find_file_with_suffix(store_dir, ".tmp", entry_path, sizeof(entry_path))) {
+        printf("(stale shared temp file %s) ", entry_path);
+        ok = 0;
+    }
+
+    secret_store_destroy(store);
+    remove_directory(store_dir);
+    return ok;
 }
 
 int main(void)
@@ -477,8 +786,12 @@ int main(void)
     TEST(overwrite);
     TEST(disabled);
     TEST(binary_data);
+    TEST(output_buffer_too_small);
+    TEST(output_buffer_exact_size);
     TEST(error_message);
     TEST(rotate_key_not_implemented);
+    TEST(temp_file_is_private);
+    TEST(concurrent_put);
 
     cleanup();
 

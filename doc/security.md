@@ -72,8 +72,35 @@ ssh_key_allowed_types = ed25519,ecdsa,sk
 | `ssh_key_min_rsa_bits`   | `2048`  | Minimum RSA key size in bits      |
 | `ssh_key_min_ecdsa_bits` | `256`   | Minimum ECDSA key size in bits    |
 
-**Note:** This feature requires `ExposeAuthInfo yes` in `sshd_config` to function.
-This is also required for [Service Accounts](service-accounts.md) fingerprint validation.
+### Requirements and failure mode
+
+The module learns which key was presented from the `ob-ssh-principals`
+helper installed by `ob-bastion-setup` / `ob-backend-setup`, which sshd
+calls as `AuthorizedPrincipalsCommand ... %u %f %t %k`. sshd does not
+export `SSH_USER_AUTH` to the PAM environment during `pam_acct_mgmt` on
+current OpenSSH, so this spool is the channel. Check that the installed
+helper is recent enough:
+
+```bash
+grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+```
+
+The check is **fail-closed**: with `ssh_key_policy_enabled = true`, a key
+whose type or size cannot be determined is **denied**, and the reason is
+logged. Consequences:
+
+- Enable the policy only on a host whose setup script has been re-run with
+  the version that installs the v1 helper. A package upgrade alone replaces
+  the PAM module but not the helper in `/usr/local/sbin`; the postinst warns
+  about that combination.
+- `ssh_key_min_rsa_bits` is enforced from the RSA modulus decoded out of
+  the key blob. An RSA key whose size cannot be measured is rejected.
+- With the policy disabled (the default), none of this runs and behaviour
+  is unchanged.
+
+`ExposeAuthInfo yes` in `sshd_config` remains useful as a fallback for sshd
+variants that do propagate the information, and is required for
+[Service Accounts](service-accounts.md) fingerprint validation.
 
 ## Cache Brute-Force Protection
 
@@ -136,6 +163,31 @@ audit_enabled = true
 audit_log_file = /var/log/open-bastion/audit.json
 audit_to_syslog = true
 audit_level = 1  # 0=critical, 1=auth events, 2=all
+```
+
+With `audit_to_syslog`, events go to the `auth` facility under the
+`pam_openbastion` ident, so they show up alongside the module's own messages:
+
+```bash
+sudo journalctl -t pam_openbastion
+sudo grep pam_openbastion /var/log/auth.log
+```
+
+### Permissions and rotation of the JSON log
+
+The module creates `audit_log_file` as `0640` and refuses to write to it if it
+is world- or group-writable, is a symlink, or is not owned by the effective
+user. It sets the mode **only when it creates the file**, so if you deliberately
+tighten an existing log to `0600` it stays `0600`.
+
+The module does not rotate the log itself: every `sshd` and `sudo` process on
+the host appends to it concurrently, and a renaming or truncating writer would
+race with its peers. It only warns once per process, via syslog, when the file
+passes 100 MB. Install the shipped template instead:
+
+```bash
+sudo cp /usr/share/open-bastion/logrotate/open-bastion /etc/logrotate.d/open-bastion
+# then adjust the path inside it if audit_log_file is not the default
 ```
 
 ## Webhook Notifications

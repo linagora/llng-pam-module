@@ -2,7 +2,7 @@
  * cache_key.h - Shared PBKDF2 key derivation for cache encryption
  *
  * Provides shared key derivation to avoid duplicate PBKDF2 operations
- * across token_cache and auth_cache.
+ * across auth_cache and offline_cache.
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -31,7 +31,7 @@ typedef struct {
 /*
  * Derive encryption key from machine-id with salt from given directory
  * cache_dir: Directory containing the salt file
- * salt_filename: Name of the salt file (e.g., ".auth_salt" or ".cache_salt")
+ * salt_filename: Name of the salt file (e.g., ".auth_salt")
  * out: Output parameter for derived key
  * Returns 0 on success, -1 on failure
  *

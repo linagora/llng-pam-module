@@ -34,6 +34,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,72 @@ static void strip_quotes(char *s)
     }
 }
 
+/*
+ * Open a file for reading with the file discipline used everywhere else in
+ * Open Bastion (check_file_permissions_fd() in src/config.c, load_config() and
+ * load_server_token() in nss/libnss_openbastion.c):
+ *
+ *   - O_NOFOLLOW so a symlink planted at the path is refused outright,
+ *   - fstat() on the *opened* fd, so ownership and mode are checked on the very
+ *     inode we are about to read — never a stat() on a path that can be swapped
+ *     between the check and the open (TOCTOU),
+ *   - regular file only (no fifo/device that would block or feed us garbage).
+ *
+ * strict != 0: the file must be root-only (no group/other bits at all), for
+ *              openbastion.conf and the server token.
+ * strict == 0: the file may be world-*readable* but must not be group- or
+ *              world-*writable*. ssh-proxy.conf is deliberately 0644 (ob-ssh
+ *              runs as the connecting user and reads it); it carries no secret,
+ *              only values an attacker must not be able to rewrite.
+ *
+ * Returns a FILE* owning the checked fd, or NULL (with a journal line).
+ */
+static FILE *open_checked(const char *path, int strict)
+{
+    char msg[512];
+
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ELOOP) {
+            snprintf(msg, sizeof(msg), "%s is a symlink (rejected)", path);
+            fail(msg);
+        }
+        return NULL;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return NULL;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        snprintf(msg, sizeof(msg), "%s is not a regular file (rejected)", path);
+        fail(msg);
+        close(fd);
+        return NULL;
+    }
+    if (st.st_uid != 0) {
+        snprintf(msg, sizeof(msg), "%s is not owned by root (rejected)", path);
+        fail(msg);
+        close(fd);
+        return NULL;
+    }
+    mode_t forbidden = strict ? (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
+                              : (S_IWGRP | S_IWOTH);
+    if (st.st_mode & forbidden) {
+        snprintf(msg, sizeof(msg), "%s has insecure permissions %04o (rejected)",
+                 path, (unsigned)(st.st_mode & 07777));
+        fail(msg);
+        close(fd);
+        return NULL;
+    }
+
+    FILE *f = fdopen(fd, "r");
+    if (!f)
+        close(fd);
+    return f;
+}
+
 /* ── configuration ────────────────────────────────────────────────────────── */
 
 struct ob_cfg {
@@ -106,10 +173,12 @@ struct ob_cfg {
     long timeout;
 };
 
-/* openbastion.conf: ini-style "key = value". We only need portal_url/verify_ssl. */
+/* openbastion.conf: ini-style "key = value". We only need portal_url/verify_ssl.
+ * Root-only by construction (every installer writes it 0600 root) and read the
+ * same way by the PAM module, so require the strict discipline here too. */
 static void load_ini(struct ob_cfg *cfg)
 {
-    FILE *f = fopen(OB_CONFIG, "r");
+    FILE *f = open_checked(OB_CONFIG, 1);
     if (!f)
         return;
     char line[1024];
@@ -137,12 +206,10 @@ static void load_ini(struct ob_cfg *cfg)
  * not group/world-writable (mirrors ob-cert-lib.sh / the old helper). */
 static void load_proxy(struct ob_cfg *cfg)
 {
-    struct stat st;
-    if (stat(PROXY_CONFIG, &st) != 0)
-        return;
-    if (st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        return;
-    FILE *f = fopen(PROXY_CONFIG, "r");
+    /* Same ownership/writability policy as before, but enforced on the opened
+     * fd (open_checked) instead of a stat() the file could be swapped out from
+     * under. Not strict: this file is 0644 on purpose. */
+    FILE *f = open_checked(PROXY_CONFIG, 0);
     if (!f)
         return;
     char line[1024];
@@ -169,10 +236,15 @@ static void load_proxy(struct ob_cfg *cfg)
     fclose(f);
 }
 
-/* Read the server token: plain text, or JSON with .access_token. */
+/* Read the server token: plain text, or JSON with .access_token.
+ * The token is the bastion's credential to LLNG: refuse it unless it is a
+ * root-owned regular file with no group/other bits (0600), and refuse to follow
+ * a symlink to it. SERVER_TOKEN_FILE comes from ssh-proxy.conf, which is
+ * world-readable — so the path itself is attacker-visible and must not be
+ * trusted to point at something safe. */
 static char *read_server_token(const char *path)
 {
-    FILE *f = fopen(path, "r");
+    FILE *f = open_checked(path, 1);
     if (!f)
         return NULL;
     char *buf = malloc(MAX_TOKEN);
