@@ -20,6 +20,41 @@
  * (init_cache/cache_add/cache_find) against the real g_cache/g_config state.
  */
 
+/* ---------------------------------------------------------------------------
+ * Harness overrides. These MUST precede the #include of the module: they are
+ * the only reason a unit test can drive the real file-cache helpers instead of
+ * a hand-written copy of them.
+ * ------------------------------------------------------------------------- */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+/* Point the on-disk cache at a throwaway directory: the module must never
+ * touch the real /var/cache/nss_llng from a unit test. Function-valued rather
+ * than a literal so each run gets a private mkdtemp() root — two ctest jobs
+ * running in parallel must not share cache state, and a fixed /tmp path is a
+ * symlink target an unrelated local user could pre-create. */
+const char *test_cache_root(void);
+const char *test_cache_byname(void);
+#define CACHE_DIR        test_cache_root()
+#define CACHE_DIR_BYNAME test_cache_byname()
+
+/*
+ * The module refuses any cache directory or entry not owned by
+ * CACHE_TRUSTED_UID, and refuses to write the cache at all unless it is
+ * running as that uid. In production that is root, which is exactly the point.
+ * The tests run unprivileged and own the temp directory they created, so they
+ * substitute their own uid here. Everything else about the trust check - the
+ * S_ISDIR/S_ISREG type check and the group/world-writable rejection, which are
+ * what the cache-poisoning tests below exercise - is unchanged and is the
+ * shipped code.
+ */
+#define CACHE_TRUSTED_UID (getuid())
+
 #include "../nss/libnss_openbastion.c"
 
 #include <assert.h>
@@ -123,6 +158,464 @@ static int test_expire_by_uid_then_evict_no_double_free(void)
     return 1;
 }
 
+/* ===========================================================================
+ * Name-keyed cross-process file cache
+ *
+ * These drive the REAL helpers from libnss_openbastion.c (valid_cache_name,
+ * split_cache_line, open_cache_dir_read/write, open_cache_file_verified,
+ * file_cache_save/_by_name, file_cache_load_by_uid/_by_name) through the
+ * #include above, redirected at a temp directory by the CACHE_DIR /
+ * CACHE_TRUSTED_UID overrides. Nothing here is a re-implementation: a test
+ * that passes against a copy proves nothing about the shipped module.
+ * ========================================================================= */
+
+static char g_test_base[128];
+
+static const char *test_base(void)
+{
+    if (g_test_base[0] == '\0') {
+        snprintf(g_test_base, sizeof(g_test_base), "/tmp/ob_nss_cache_test_XXXXXX");
+        if (!mkdtemp(g_test_base)) {
+            perror("mkdtemp");
+            exit(1);
+        }
+    }
+    return g_test_base;
+}
+
+/* The cache root itself is NOT pre-created: several tests assert that the read
+ * path leaves a missing directory missing. */
+const char *test_cache_root(void)
+{
+    static char path[192];
+    snprintf(path, sizeof(path), "%s/cache", test_base());
+    return path;
+}
+
+const char *test_cache_byname(void)
+{
+    static char path[224];
+    snprintf(path, sizeof(path), "%s/byname", test_cache_root());
+    return path;
+}
+
+static void rm_rf(const char *dir)
+{
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
+    if (system(cmd) != 0) {
+        /* best-effort cleanup */
+    }
+}
+
+/* Every test starts from "no cache directory at all". */
+static void reset_cache_dirs(void)
+{
+    /* chmod back first: a test may have left the dir unreadable on purpose. */
+    chmod(test_cache_byname(), 0755);
+    chmod(test_cache_root(), 0755);
+    rm_rf(test_cache_root());
+    g_config.cache_ttl = CACHE_TTL;
+}
+
+static struct passwd make_user(const char *name, uid_t uid, const char *gecos)
+{
+    static char home[256];
+    struct passwd pw;
+    snprintf(home, sizeof(home), "/home/%s", name);
+    pw.pw_name = (char *)name;
+    pw.pw_passwd = (char *)"x";
+    pw.pw_uid = uid;
+    pw.pw_gid = 100;
+    pw.pw_gecos = (char *)gecos;
+    pw.pw_dir = home;
+    pw.pw_shell = (char *)"/bin/bash";
+    return pw;
+}
+
+/*
+ * Hand-write a raw record the module itself would never produce (forged
+ * timestamp, mismatched key). Creates the directories the way the module does.
+ *
+ * fchmod() on the descriptor rather than chmod() on the path: naming the file
+ * a second time after creating it is a check-then-act on a name that could be
+ * swapped underneath us (cpp/toctou-race-condition).
+ */
+static int write_raw_entry(const char *dir, const char *leaf, const char *content)
+{
+    if (mkdir(test_cache_root(), 0711) != 0 && errno != EEXIST) return -1;
+    if (mkdir(dir, 0711) != 0 && errno != EEXIST) return -1;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, leaf);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    if (fputs(content, f) == EOF) { fclose(f); return -1; }
+    if (fchmod(fileno(f), 0644) != 0) { fclose(f); return -1; }
+    if (fclose(f) != 0) return -1;
+    return 0;
+}
+
+static int entry_mode(const char *dir, const char *leaf, mode_t *out)
+{
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/%s", dir, leaf);
+    if (stat(path, &st) != 0) return -1;
+    *out = st.st_mode & 07777;
+    return 0;
+}
+
+/*
+ * valid_cache_name() must accept exactly what validate_username()
+ * (src/pam_openbastion.c) accepts: `[a-z_][a-z0-9_-]{0,31}`. A name only one
+ * of the two accepts would be written to the cache and then never invalidated
+ * by the PAM side, leaving a stale record no code path can clear.
+ */
+static int test_valid_cache_name_matches_pam_validator(void)
+{
+    /* Accepted by both. */
+    if (valid_cache_name("alice") != 0) return 0;
+    if (valid_cache_name("bob123") != 0) return 0;
+    if (valid_cache_name("svc_account") != 0) return 0;
+    if (valid_cache_name("with-dash") != 0) return 0;
+    if (valid_cache_name("_underscore") != 0) return 0;
+    if (valid_cache_name("a") != 0) return 0;
+
+    /* Path traversal / charset. */
+    if (valid_cache_name(NULL) == 0) return 0;
+    if (valid_cache_name("") == 0) return 0;
+    if (valid_cache_name("/etc/passwd") == 0) return 0;
+    if (valid_cache_name("foo/bar") == 0) return 0;
+    if (valid_cache_name("../escape") == 0) return 0;
+    if (valid_cache_name(".hidden") == 0) return 0;
+    if (valid_cache_name(".") == 0) return 0;
+    if (valid_cache_name("..") == 0) return 0;
+    if (valid_cache_name("UPPER") == 0) return 0;
+    if (valid_cache_name("white space") == 0) return 0;
+    if (valid_cache_name("co:lon") == 0) return 0;
+    if (valid_cache_name("new\nline") == 0) return 0;
+
+    /* Rejected specifically because validate_username() rejects them: a
+     * leading digit or hyphen, and anything over 32 characters. */
+    if (valid_cache_name("0digitstart") == 0) return 0;
+    if (valid_cache_name("-dashstart") == 0) return 0;
+
+    char maxlen[CACHE_NAME_MAX + 1];
+    memset(maxlen, 'a', CACHE_NAME_MAX);
+    maxlen[CACHE_NAME_MAX] = '\0';
+    if (valid_cache_name(maxlen) != 0) return 0;       /* exactly 32: OK */
+
+    char toolong[CACHE_NAME_MAX + 2];
+    memset(toolong, 'a', CACHE_NAME_MAX + 1);
+    toolong[CACHE_NAME_MAX + 1] = '\0';
+    if (valid_cache_name(toolong) == 0) return 0;      /* 33: rejected */
+
+    return 1;
+}
+
+/* Round-trip through the real save/load: every passwd field survives. */
+static int test_name_roundtrip(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("alice", 12345, "Alice Example");
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("alice", &out, buf, sizeof(buf)) != 0) return 0;
+    if (strcmp(out.pw_name, "alice") != 0) return 0;
+    if (strcmp(out.pw_passwd, "x") != 0) return 0;
+    if (out.pw_uid != 12345 || out.pw_gid != 100) return 0;
+    if (strcmp(out.pw_gecos, "Alice Example") != 0) return 0;
+    if (strcmp(out.pw_dir, "/home/alice") != 0) return 0;
+    if (strcmp(out.pw_shell, "/bin/bash") != 0) return 0;
+    return 1;
+}
+
+/*
+ * An EMPTY gecos must round-trip: split_cache_line() does not collapse
+ * consecutive ':' the way strtok_r() would, so the empty field is preserved
+ * instead of shifting home/shell/timestamp one place left.
+ */
+static int test_name_roundtrip_empty_gecos(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("nogecos", 20001, "");
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("nogecos", &out, buf, sizeof(buf)) != 0) return 0;
+    if (out.pw_uid != 20001 || out.pw_gid != 100) return 0;
+    if (strcmp(out.pw_gecos, "") != 0) return 0;
+    if (strcmp(out.pw_dir, "/home/nogecos") != 0) return 0;
+    if (strcmp(out.pw_shell, "/bin/bash") != 0) return 0;
+    return 1;
+}
+
+/* The uid-keyed cache still round-trips, and its key-consistency check
+ * rejects a record filed under the wrong uid. */
+static int test_uid_roundtrip_and_key_check(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("byuid", 31337, "By Uid");
+    file_cache_save(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_uid(31337, &out, buf, sizeof(buf)) != 0) return 0;
+    if (strcmp(out.pw_name, "byuid") != 0) return 0;
+
+    /* File named "999" but claiming uid 31337: the key check must reject it. */
+    char rec[256];
+    snprintf(rec, sizeof(rec), "byuid:31337:100:By Uid:/home/byuid:/bin/bash:%ld\n",
+             (long)time(NULL));
+    if (write_raw_entry(test_cache_root(), "999", rec) != 0) return 0;
+    if (file_cache_load_by_uid(999, &out, buf, sizeof(buf)) == 0) return 0;
+    return 1;
+}
+
+/* An entry older than the TTL is refused AND unlinked. */
+static int test_name_expired_rejected_and_unlinked(void)
+{
+    reset_cache_dirs();
+    char rec[256];
+    snprintf(rec, sizeof(rec), "stale:30000:100:Stale:/home/stale:/bin/bash:%ld\n",
+             (long)time(NULL) - (g_config.cache_ttl + 60));
+    if (write_raw_entry(test_cache_byname(), "stale", rec) != 0) return 0;
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("stale", &out, buf, sizeof(buf)) == 0) return 0;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/stale", test_cache_byname());
+    if (access(path, F_OK) == 0) return 0;   /* must have been unlinked */
+    return 1;
+}
+
+/* A record whose stored username differs from the requested key is refused,
+ * so a file planted as "alice" cannot answer with a "mallory" (or root) record. */
+static int test_name_mismatch_rejected(void)
+{
+    reset_cache_dirs();
+    char rec[256];
+    snprintf(rec, sizeof(rec), "mallory:0:0:root:/root:/bin/bash:%ld\n", (long)time(NULL));
+    if (write_raw_entry(test_cache_byname(), "alice", rec) != 0) return 0;
+
+    struct passwd out = {0};
+    char buf[1024];
+    return file_cache_load_by_name("alice", &out, buf, sizeof(buf)) != 0;
+}
+
+/* A missing entry simply misses - no crash, no directory creation. */
+static int test_name_missing(void)
+{
+    reset_cache_dirs();
+    struct passwd out = {0};
+    char buf[1024];
+    return file_cache_load_by_name("nobody_here", &out, buf, sizeof(buf)) != 0;
+}
+
+/*
+ * The READ path must never mkdir() and must never warn on an absent cache.
+ * On a host where /var/cache/nss_llng does not exist, every unprivileged
+ * getpwnam()/getpwuid() - an ordinary `ls -l` - would otherwise turn into an
+ * EACCES plus a syslog warning, i.e. a log flood.
+ */
+static int test_read_path_never_creates_dirs(void)
+{
+    reset_cache_dirs();
+    struct passwd out = {0};
+    char buf[1024];
+    struct stat st;
+
+    if (file_cache_load_by_name("ghost", &out, buf, sizeof(buf)) == 0) return 0;
+    if (file_cache_load_by_uid(4242, &out, buf, sizeof(buf)) == 0) return 0;
+
+    if (stat(test_cache_root(), &st) == 0) return 0;     /* must still not exist */
+    if (stat(test_cache_byname(), &st) == 0) return 0;
+    return 1;
+}
+
+/* save refuses an unsafe name outright: no file, no directory. */
+static int test_name_save_rejects_unsafe(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("../evil", 40000, "");
+    in.pw_dir = (char *)"/home/evil";
+    file_cache_save_by_name(&in);
+
+    struct stat st;
+    if (stat(test_cache_byname(), &st) == 0) {
+        /* If the dir somehow exists it must at least be empty of the entry. */
+        char path[512];
+        snprintf(path, sizeof(path), "%s/../evil", test_cache_byname());
+        if (access(path, F_OK) == 0) return 0;
+    }
+    return 1;
+}
+
+/*
+ * SECURITY (cache poisoning): a group/world-writable ENTRY is refused even
+ * though its content is valid. Without this, any local user who can write the
+ * file feeds root a `uid 0` passwd record.
+ */
+static int test_load_rejects_writable_file(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("victim", 12345, "Victim");
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    /* Sanity: it loads while the mode is 0644. */
+    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0) return 0;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/victim", test_cache_byname());
+    if (chmod(path, 0666) != 0) return 0;
+    /* Now group+world writable: MUST be refused. */
+    return file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0;
+}
+
+/*
+ * SECURITY (cache poisoning): a group/world-writable DIRECTORY is refused
+ * before any entry inside it is even opened - an attacker who can write the
+ * directory can replace entries at will.
+ */
+static int test_load_rejects_writable_dir(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("victim", 12345, "Victim");
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0) return 0;
+
+    if (chmod(test_cache_byname(), 0777) != 0) return 0;
+    int refused = (file_cache_load_by_name("victim", &out, buf, sizeof(buf)) != 0);
+    chmod(test_cache_byname(), 0711);
+    return refused;
+}
+
+/* SECURITY: save into an untrusted (world-writable) directory is refused and
+ * never falls back to a path-based write. */
+static int test_save_rejects_writable_dir(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("victim", 12345, "Victim");
+    file_cache_save_by_name(&in);          /* creates the dirs */
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/victim", test_cache_byname());
+    if (unlink(path) != 0) return 0;
+    if (chmod(test_cache_byname(), 0777) != 0) return 0;
+
+    file_cache_save_by_name(&in);
+    int refused = (access(path, F_OK) != 0);
+    chmod(test_cache_byname(), 0711);
+    return refused;
+}
+
+/*
+ * Directory mode: 0711 - traversable so an unprivileged getpwnam()/getpwuid()
+ * still reaches its entry, but NOT listable, so the SSO user directory cannot
+ * be enumerated wholesale by a local account. The byname filenames ARE the
+ * login names, which is why this matters here (refs #189). Entries stay 0644:
+ * an NSS module serves unprivileged callers from inside their own process.
+ */
+static int test_cache_dirs_are_0711_entries_0644(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("modecheck", 50000, "Mode Check");
+    file_cache_save_by_name(&in);
+    file_cache_save(&in);
+
+    struct stat st;
+    if (stat(test_cache_root(), &st) != 0) return 0;
+    if ((st.st_mode & 07777) != 0711) return 0;
+    if (stat(test_cache_byname(), &st) != 0) return 0;
+    if ((st.st_mode & 07777) != 0711) return 0;
+
+    mode_t m;
+    if (entry_mode(test_cache_byname(), "modecheck", &m) != 0 || m != 0644) return 0;
+    if (entry_mode(test_cache_root(), "50000", &m) != 0 || m != 0644) return 0;
+
+    /* Upgrade path: a 0755 directory left by an earlier version is tightened
+     * on the next write, not left wide open. */
+    if (chmod(test_cache_root(), 0755) != 0) return 0;
+    if (chmod(test_cache_byname(), 0755) != 0) return 0;
+    file_cache_save_by_name(&in);
+    if (stat(test_cache_root(), &st) != 0 || (st.st_mode & 07777) != 0711) return 0;
+    if (stat(test_cache_byname(), &st) != 0 || (st.st_mode & 07777) != 0711) return 0;
+    return 1;
+}
+
+/*
+ * A `.tmp.<leaf>.<pid>` left behind by a process killed between openat() and
+ * renameat() must not permanently kill caching for that entry: the temp leaf
+ * is pid-keyed, so the next process to be handed that pid would hit EEXIST
+ * forever. The save path unlinks the leftover and retries once.
+ */
+static int test_stale_temp_file_does_not_block_save(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("retry", 60001, "Retry");
+    file_cache_save_by_name(&in);          /* creates the dirs */
+
+    char entry[512], tmp[512];
+    snprintf(entry, sizeof(entry), "%s/retry", test_cache_byname());
+    snprintf(tmp, sizeof(tmp), "%s/.tmp.retry.%ld", test_cache_byname(), (long)getpid());
+    if (unlink(entry) != 0) return 0;
+
+    /* Forge exactly the debris a SIGKILL mid-write would leave: same pid, so
+     * this process is the one that "reuses" it. */
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    fputs("garbage-from-a-killed-process\n", f);
+    if (fchmod(fileno(f), 0600) != 0) { fclose(f); return 0; }
+    fclose(f);
+
+    file_cache_save_by_name(&in);
+
+    /* The entry must have been published... */
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("retry", &out, buf, sizeof(buf)) != 0) return 0;
+    if (out.pw_uid != 60001) return 0;
+    /* ...and the stale temp must be gone (consumed by the rename). */
+    if (access(tmp, F_OK) == 0) return 0;
+    return 1;
+}
+
+/*
+ * split_cache_line() accepts EXACTLY 7 fields, so a truncated or padded record
+ * can never be partially interpreted, and empty fields are preserved rather
+ * than collapsed.
+ */
+static int test_split_field_count(void)
+{
+    char line[128];
+    char *out[7];
+
+    snprintf(line, sizeof(line), "a:b:c");
+    if (split_cache_line(line, out) == 0) return 0;              /* too few */
+
+    snprintf(line, sizeof(line), "a:b:c:d:e:f:g:h");
+    if (split_cache_line(line, out) == 0) return 0;              /* too many */
+
+    snprintf(line, sizeof(line), "name:1000:1000::/home/n:/bin/sh:123\n");
+    if (split_cache_line(line, out) != 0) return 0;
+    if (strcmp(out[0], "name") != 0) return 0;
+    if (out[3][0] != '\0') return 0;                             /* empty gecos kept */
+    if (strcmp(out[4], "/home/n") != 0) return 0;
+    if (strcmp(out[6], "123") != 0) return 0;                    /* newline stripped */
+    return 1;
+}
+
 int main(void)
 {
     int ok = 1;
@@ -143,6 +636,43 @@ int main(void)
         ok = 0;
     }
 
-    printf("%s\n", ok ? "All NSS cache tests passed" : "NSS cache tests FAILED");
+#define RUN(fn) do { \
+        printf("  Testing %s... ", #fn); \
+        if (fn()) { \
+            printf("PASS\n"); \
+        } else { \
+            printf("FAIL\n"); \
+            ok = 0; \
+        } \
+    } while (0)
+
+    printf("\n  Name-keyed file cache (real implementation):\n");
+    RUN(test_valid_cache_name_matches_pam_validator);
+    RUN(test_name_roundtrip);
+    RUN(test_name_roundtrip_empty_gecos);
+    RUN(test_uid_roundtrip_and_key_check);
+    RUN(test_name_expired_rejected_and_unlinked);
+    RUN(test_name_mismatch_rejected);
+    RUN(test_name_missing);
+    RUN(test_read_path_never_creates_dirs);
+    RUN(test_name_save_rejects_unsafe);
+    RUN(test_split_field_count);
+    RUN(test_cache_dirs_are_0711_entries_0644);
+    RUN(test_stale_temp_file_does_not_block_save);
+
+    printf("\n  Cache trust checks (anti cache-poisoning):\n");
+    RUN(test_load_rejects_writable_file);
+    RUN(test_load_rejects_writable_dir);
+    RUN(test_save_rejects_writable_dir);
+#undef RUN
+
+    /* Leave nothing behind in /tmp. */
+    if (g_test_base[0] != '\0') {
+        chmod(test_cache_byname(), 0755);
+        chmod(test_cache_root(), 0755);
+        rm_rf(g_test_base);
+    }
+
+    printf("\n%s\n", ok ? "All NSS cache tests passed" : "NSS cache tests FAILED");
     return ok ? 0 : 1;
 }
