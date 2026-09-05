@@ -1,5 +1,15 @@
 # Configuration Reference
 
+## Boolean values
+
+Boolean settings accept exactly `true`, `yes`, `1`, `on` and `false`, `no`,
+`0`, `off` — lowercase only. Any other value (an empty value, `TRUE`, `tru`,
+`enabled`, …) is a **fatal configuration error**: the offending key and value
+are logged to syslog and the PAM module refuses to start rather than guessing.
+
+This is deliberate. Before, an unrecognised value silently meant `false`, so a
+typo in `verify_ssl` disabled TLS certificate verification without any warning.
+
 ## Main Configuration File
 
 ### /etc/open-bastion/openbastion.conf

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A mistyped boolean in `openbastion.conf` no longer silently means `false`
+  (#183).** The parser mapped every unrecognised value to `false`, so
+  `verify_ssl = TRUE` or `verify_ssl = tru` turned TLS certificate verification
+  OFF without a word — fail-open on the setting that protects every call to the
+  portal, and the same for ~25 other security booleans. Boolean settings now
+  accept only `true`/`yes`/`1`/`on` and `false`/`no`/`0`/`off`; anything else
+  keeps the safe default, logs the offending key and value to syslog, and makes
+  `config_validate()` refuse the configuration (new return code `-6`), which
+  aborts the PAM module instead of running with a guessed value. This matches
+  what `ob-cert-daemon` already did for the same key.
+- **The request-signing nonce is now covered by the HMAC (#188).** With
+  `request_signing_secret` configured, the client sent `X-Nonce` alongside
+  `X-Signature-256`, but the signed message was only
+  `timestamp.method.path.body` — the nonce was not in it (despite a comment
+  claiming otherwise). A captured request could therefore be replayed with a
+  fresh nonce and still verify, defeating the replay window the nonce exists
+  for. The signed message is now `timestamp.nonce.method.path.body` and the
+  format is documented in `SECURITY.md`.
+- **`ob-builder` validates `apt_url`, `apt_suite` and `apt_component` (#190).**
+  The three values are concatenated into the `deb [signed-by=…] URL SUITE
+  COMPONENT` line and interpolated verbatim into the generated installer, which
+  runs as root on every target. They were the only build inputs with no
+  validation, so `apt_url: "https://x/$(…)"` executed at install time and an
+  embedded newline injected arbitrary `sources.list` entries. They are now
+  checked against shell-safe charsets, and a regression test feeds hostile
+  values through both the CLI and the YAML config path.
+
 ### Fixed
 
 - **A rejected `/pam/verify` token now fails cleanly instead of looking like a

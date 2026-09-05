@@ -52,7 +52,17 @@ When `request_signing_secret` is configured, requests include:
 
 - `X-Timestamp`: Unix timestamp _(server should reject if too old)_
 - `X-Nonce`: Unique `timestamp_ms-uuid` format _(server should reject duplicates)_
-- `X-Signature-256`: HMAC-SHA256 signature of the request
+- `X-Signature-256`: `sha256=<hex>`, HMAC-SHA256 of the request
+
+The signed message is, with `.` as separator and an empty string for a bodyless request:
+
+```
+<timestamp>.<nonce>.<method>.<path>.<body>
+```
+
+The nonce is part of the signed message: leaving it out would let an attacker
+replay a captured request with a fresh `X-Nonce` while keeping a valid
+signature, defeating the replay window.
 
 This provides defense-in-depth against request tampering, even if TLS is somehow compromised.
 

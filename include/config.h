@@ -149,6 +149,15 @@ typedef struct {
 
     /* Group synchronization (#38) */
     char *allowed_managed_groups;          /* Comma-separated whitelist of groups allowed to be managed locally (optional) */
+
+    /*
+     * Parse-error latch (#183). Set when a boolean setting carried a value
+     * that is neither a recognised true nor a recognised false (e.g.
+     * "verify_ssl = TRUE" or "verify_ssl = tru"). Such a value used to be
+     * silently treated as false, which disabled TLS verification without any
+     * warning. config_validate() now refuses the whole configuration instead.
+     */
+    bool invalid_bool_value;
 } pam_openbastion_config_t;
 
 /*
@@ -175,7 +184,11 @@ void config_init(pam_openbastion_config_t *config);
 
 /*
  * Validate configuration
- * Returns 0 if valid, -1 if invalid (with error logged)
+ * Returns 0 if valid, negative if invalid (with error logged):
+ *   -1  missing mandatory setting (portal_url, client credentials, ...)
+ *   -4  portal_url is not HTTPS while verify_ssl is enabled
+ *   -5  incomplete or invalid CrowdSec configuration
+ *   -6  a boolean setting had an unparseable value (see syslog for the key)
  */
 int config_validate(const pam_openbastion_config_t *config);
 
