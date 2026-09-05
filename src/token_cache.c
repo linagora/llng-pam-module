@@ -644,13 +644,29 @@ int cache_store(token_cache_t *cache,
         return -1;
     }
 
-    /* Use atomic write: write to temp file then rename */
-    char temp_path[PATH_MAX + 8];  /* PATH_MAX + ".tmp" + margin */
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-
-    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
+    /*
+     * Use atomic write: write to a private temp file, then rename.
+     * The temp name is per-process and created with O_EXCL (#197): a fixed
+     * "<path>.tmp" opened with O_TRUNC would let two concurrent writers
+     * interleave their writes into the same file and rename the mixture into
+     * place. O_NOFOLLOW|O_EXCL also keeps the symlink-safety of the temp file.
+     */
+    char temp_path[PATH_MAX + 32];  /* PATH_MAX + ".tmp.<pid>" + margin */
+    int path_len = snprintf(temp_path, sizeof(temp_path), "%s.tmp.%d", path, (int)getpid());
+    if (path_len < 0 || path_len >= (int)sizeof(temp_path)) {
         return -1;
+    }
+
+    int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        /* Stale temp file left by a previous crash of this pid: drop and retry */
+        if (errno == EEXIST) {
+            unlink(temp_path);
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        }
+        if (fd < 0) {
+            return -1;
+        }
     }
 
     int result = 0;

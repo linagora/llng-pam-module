@@ -134,5 +134,66 @@ else
     ok "fail-closed: unreachable sink → connector non-zero"
 fi
 
+# ── Test 5: a duplicate session_id must never truncate existing metadata (#198)
+#
+# File names are <ts>_<session_id>.{typescript,json} and session_id comes from
+# the client, so a replayed id landing in the same second collides. The
+# typescript is created with O_EXCL and rejects the duplicate — but the
+# metadata used to be written FIRST with O_TRUNC, so it was already destroyed
+# by the time the connection got refused.
+#
+# Deterministic setup: wait for a fresh second, plant the metadata file the
+# sink is about to pick, then connect. If the sink still landed on another
+# second (files under a different prefix appeared) the attempt is inconclusive
+# and retried with a new id.
+dup_metadata_attempt() { # $1 session_id -> echoes the timestamp used
+    local sid="$1" before ts
+    before=$(date +%Y%m%d-%H%M%S)
+    while [ "$(date +%Y%m%d-%H%M%S)" = "$before" ]; do sleep 0.05; done
+    ts=$(date +%Y%m%d-%H%M%S)
+
+    mkdir -p "$SESS/$USER_NAME"
+    printf 'PRE-EXISTING-METADATA' >"$SESS/$USER_NAME/${ts}_${sid}.json"
+
+    OB_RECORD_SOCKET="$SOCK" "$CONNECT" "$(hdr "$sid" transfer)" /dev/null \
+        >/dev/null 2>&1
+    # Let the (short-lived) sink instance finish before inspecting the tree.
+    sleep 1
+    echo "$ts"
+}
+
+dup_ok=0
+dup_msg="sink never landed on the pre-created timestamp (inconclusive)"
+for attempt in 1 2 3 4 5; do
+    dsid="dupid00$attempt"
+    dts=$(dup_metadata_attempt "$dsid")
+    djson="$SESS/$USER_NAME/${dts}_${dsid}.json"
+    dts_file="$SESS/$USER_NAME/${dts}_${dsid}.typescript"
+    # Another prefix => the sink used a different second: retry.
+    other=0
+    for f in "$SESS/$USER_NAME"/*_"$dsid".json; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$djson" ] || other=1
+    done
+    if [ "$other" = 1 ]; then
+        continue
+    fi
+    if ! grep -q 'PRE-EXISTING-METADATA' "$djson" 2>/dev/null; then
+        dup_msg="duplicate session_id truncated the existing metadata ($djson)"
+        break
+    fi
+    if [ -e "$dts_file" ]; then
+        dup_msg="duplicate session_id was accepted (created $dts_file)"
+        break
+    fi
+    dup_ok=1
+    break
+done
+if [ "$dup_ok" = 1 ]; then
+    ok "duplicate session_id refused, existing metadata intact"
+else
+    bad "$dup_msg"
+fi
+
 echo "=== record-sink e2e: $([ $fail -eq 0 ] && echo PASS || echo FAIL) ==="
 exit $fail

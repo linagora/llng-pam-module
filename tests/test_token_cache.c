@@ -10,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <time.h>
 
 #include "token_cache.h"
@@ -446,6 +448,91 @@ static int test_init_with_invalid_key(void)
     return ok;
 }
 
+/* Find a file with the given suffix in dir. Returns 1 on success. */
+static int find_file_with_suffix(const char *dir, const char *suffix,
+                                 char *out, size_t out_size)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int found = 0;
+    struct dirent *e;
+    size_t slen = strlen(suffix);
+    while ((e = readdir(d)) != NULL) {
+        size_t nlen = strlen(e->d_name);
+        if (nlen > slen && strcmp(e->d_name + nlen - slen, suffix) == 0) {
+            snprintf(out, out_size, "%s/%s", dir, e->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * Regression for #197: the atomic-write temp file must be per-process.
+ *
+ * cache_store() used to write through a fixed "<path>.tmp" opened with
+ * O_TRUNC, so two concurrent writers interleaved into a single file and
+ * renamed the mixture into place.
+ *
+ * The obstacle planted at the old fixed name is a DIRECTORY rather than a
+ * sentinel file: cache_store()'s own housekeeping pass sweeps any stray
+ * "*.cache*" file it cannot parse, but it cannot unlink a directory. Opening a
+ * directory for writing is EISDIR, so the pre-fix code failed the store here;
+ * the fixed code writes "<path>.tmp.<pid>" with O_EXCL and never looks at the
+ * shared name.
+ */
+static int test_temp_file_is_private(void)
+{
+    char temp_dir[] = "/tmp/test_token_cache_XXXXXX";
+    if (create_temp_dir(temp_dir) != 0) {
+        return 0;
+    }
+
+    token_cache_t *cache = cache_init(temp_dir, 300);
+    if (!cache) {
+        cleanup_dir(temp_dir);
+        return 0;
+    }
+
+    const char *token = "tmpname_token";
+    const char *user = "tmpuser";
+
+    int ok = (cache_store(cache, token, user, true, 300) == 0);
+
+    char entry_path[512] = {0};
+    ok = ok && find_file_with_suffix(temp_dir, ".cache", entry_path, sizeof(entry_path));
+
+    /* Block the temp name the pre-#197 code would have reused. */
+    char legacy_tmp[600];
+    if (ok) {
+        snprintf(legacy_tmp, sizeof(legacy_tmp), "%s.tmp", entry_path);
+        ok = (mkdir(legacy_tmp, 0700) == 0);
+    }
+
+    /* Refresh the same entry: must not go through the fixed temp name. */
+    ok = ok && (cache_store(cache, token, user, true, 600) == 0);
+
+    /* The obstacle must have been left alone. */
+    if (ok) {
+        struct stat st;
+        ok = (stat(legacy_tmp, &st) == 0 && S_ISDIR(st.st_mode));
+    }
+
+    /* And the entry itself must still be readable. */
+    if (ok) {
+        cache_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+        ok = cache_lookup(cache, token, user, &entry) && entry.authorized;
+    }
+
+    cache_destroy(cache);
+    cleanup_dir(temp_dir);
+    return ok;
+}
+
 int main(void)
 {
     printf("Running token cache tests...\n\n");
@@ -460,6 +547,7 @@ int main(void)
     TEST(cleanup_expired);
     TEST(salt_file_created);
     TEST(salt_persistence);
+    TEST(temp_file_is_private);
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
 

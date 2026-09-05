@@ -612,14 +612,32 @@ int auth_cache_store(auth_cache_t *cache,
     char path[PATH_MAX];
     build_auth_cache_path(cache, user, server_group, host, path, sizeof(path));
 
-    char temp_path[PATH_MAX + 8];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-
-    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
-    if (fd < 0) {
+    /*
+     * Per-process temp name created with O_EXCL (#197): a fixed "<path>.tmp"
+     * opened with O_TRUNC would let two concurrent writers interleave their
+     * writes into the same file and rename the mixture into place.
+     * O_NOFOLLOW|O_EXCL also keeps the symlink-safety of the temp file.
+     */
+    char temp_path[PATH_MAX + 32];
+    int temp_len = snprintf(temp_path, sizeof(temp_path), "%s.tmp.%d", path, (int)getpid());
+    if (temp_len < 0 || temp_len >= (int)sizeof(temp_path)) {
         explicit_bzero(encrypted, encrypted_len);
         free(encrypted);
         return -1;
+    }
+
+    int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        /* Stale temp file left by a previous crash of this pid: drop and retry */
+        if (errno == EEXIST) {
+            unlink(temp_path);
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        }
+        if (fd < 0) {
+            explicit_bzero(encrypted, encrypted_len);
+            free(encrypted);
+            return -1;
+        }
     }
 
     /* Write HMAC-authenticated expiration header for fast cleanup */
