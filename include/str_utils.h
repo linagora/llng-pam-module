@@ -18,9 +18,30 @@
 char *str_trim(char *str);
 
 /*
- * Parse boolean value from string.
+ * Parse boolean value from string, distinguishing "recognised false" from
+ * "unparseable" (issue #183).
+ *
+ * Recognised true:  "true", "yes", "1", "on"
+ * Recognised false: "false", "no", "0", "off"
+ *
+ * On a recognised value, stores the result in *out and returns true.
+ * On NULL, an empty string or any unrecognised value (typos such as "TRUE"
+ * or "tru"), leaves *out untouched and returns false so the caller can treat
+ * it as a hard configuration error instead of silently defaulting to false.
+ *
+ * Security: silently mapping an unrecognised value to false is fail-open for
+ * keys such as verify_ssl. Callers handling security-relevant settings MUST
+ * use this function rather than str_parse_bool().
+ */
+bool str_parse_bool_strict(const char *value, bool *out);
+
+/*
+ * Parse boolean value from string (lenient, legacy behaviour).
  * Returns true for: "true", "yes", "1", "on"
  * Returns false for: "false", "no", "0", "off", NULL, and any other value
+ *
+ * Prefer str_parse_bool_strict() whenever an unrecognised value must not be
+ * silently treated as false.
  */
 bool str_parse_bool(const char *value);
 

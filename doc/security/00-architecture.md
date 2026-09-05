@@ -87,7 +87,17 @@ Lorsque `request_signing_secret` est configuré, les requêtes incluent :
 
 - `X-Timestamp` : Horodatage Unix _(le serveur devrait rejeter les valeurs trop anciennes)_
 - `X-Nonce` : Format unique `timestamp_ms-uuid` _(le serveur devrait rejeter les doublons)_
-- `X-Signature-256` : Signature HMAC-SHA256 de la requête
+- `X-Signature-256` : `sha256=<hex>`, HMAC-SHA256 de la requête
+
+Le message signé est, avec `.` comme séparateur et une chaîne vide pour une requête sans corps :
+
+```
+<timestamp>.<nonce>.<method>.<path>.<body>
+```
+
+Le nonce fait partie du message signé : l'omettre permettrait de rejouer une
+requête capturée avec un `X-Nonce` neuf tout en conservant une signature
+valide, ce qui annulerait la protection anti-rejeu.
 
 Cela fournit une défense en profondeur contre la falsification de requêtes, même si TLS est d'une façon ou d'une autre compromis.
 

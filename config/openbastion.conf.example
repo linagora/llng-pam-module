@@ -1,5 +1,26 @@
 # Open Bastion PAM Configuration File
 # /etc/open-bastion/openbastion.conf
+#
+# Syntax
+# ------
+# key = value, one per line. A '#' or ';' at the start of a line comments out
+# the whole line.
+#
+# Booleans accept exactly true/yes/1/on and false/no/0/off, lowercase only.
+# Anything else (TRUE, tru, enabled, an empty value) is a FATAL error: the PAM
+# module logs the key to syslog and refuses to start rather than guess. An
+# unrecognised value used to mean "false", which turned verify_ssl OFF on a
+# typo.
+#
+# Inline comments: a '#' preceded by whitespace ends the value.
+#     verify_ssl = true            # this comment is ignored
+# A '#' inside a token is kept, so URL fragments and passwords survive:
+#     portal_url = https://sso.example.com/#frag
+# The keys client_secret, notify_secret, webhook_secret,
+# request_signing_secret, crowdsec_bouncer_key, crowdsec_password and cert_pin
+# are never stripped — their value is taken literally, '#' included.
+# For any other key, quote the value if it must contain " #":
+#     server_group = "prod # 2"
 
 # ==============================================================================
 # Required Settings

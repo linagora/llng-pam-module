@@ -28,18 +28,38 @@ char *str_trim(char *str)
     return str;
 }
 
-bool str_parse_bool(const char *value)
+bool str_parse_bool_strict(const char *value, bool *out)
 {
-    if (!value) return false;
+    if (!value || !out) return false;
 
     if (strcmp(value, "true") == 0 ||
         strcmp(value, "yes") == 0 ||
         strcmp(value, "1") == 0 ||
         strcmp(value, "on") == 0) {
+        *out = true;
         return true;
     }
 
+    if (strcmp(value, "false") == 0 ||
+        strcmp(value, "no") == 0 ||
+        strcmp(value, "0") == 0 ||
+        strcmp(value, "off") == 0) {
+        *out = false;
+        return true;
+    }
+
+    /* Unrecognised (empty string, "TRUE", "tru", ...): not a boolean. */
     return false;
+}
+
+bool str_parse_bool(const char *value)
+{
+    bool result = false;
+
+    /* Legacy lenient behaviour: anything unrecognised is false. */
+    (void)str_parse_bool_strict(value, &result);
+
+    return result;
 }
 
 unsigned char *str_base64url_decode(const char *input, size_t input_len, size_t *out_len)
