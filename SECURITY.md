@@ -195,11 +195,16 @@ Required sshd settings (no `AcceptEnv` needed):
 
 ```bash
 # /etc/ssh/sshd_config
-TrustedUserCAKeys /etc/open-bastion/ca.pub
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 ExposeAuthInfo yes
-AuthorizedPrincipalsCommand /usr/lib/open-bastion/ob-ssh-principals %u %f %i
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 ```
+
+`ob-ssh-principals` is **generated at setup time** by `ob-backend-setup` (and by
+`ob-bastion-setup`, in its two-token `%u %f` bastion form) into
+`/usr/local/sbin/`. It is not a file shipped by the package, so it will not be
+found under `/usr/lib/open-bastion/` or `/usr/sbin/`.
 
 Direct user SSO certs that do not carry a `bastion=` key-id field are denied before PAM runs
 when an `allowed_bastions` file is present.
@@ -221,9 +226,21 @@ when an `allowed_bastions` file is present.
 When `cache_encrypted = true` _(default)_, cached tokens are encrypted using:
 
 - **Algorithm**: AES-256-GCM _(authenticated encryption)_
-- **Key Derivation**: PBKDF2-SHA256 with 100,000 iterations
-- **Key Source**: Machine ID (`/etc/machine-id`) + cache username as salt
+- **Key Derivation**: PBKDF2-HMAC-SHA256, 100,000 iterations, 32-byte key
+- **Password input**: the machine ID (`/etc/machine-id`), or a persisted random
+  instance id when `/etc/machine-id` is unreadable
+- **Salt**: 16 random bytes from `RAND_bytes()`, generated on first use and
+  persisted next to the cache (`.cache_salt` for the token cache, `.auth_salt`
+  for the auth cache). The salt is **not** derived from the machine id or the
+  username: a random salt is what stops an attacker precomputing keys for a
+  known machine id.
 - **Authentication**: GCM tag prevents tampering
+
+> **Scope of the key.** The derived key is **per cache directory**, not per
+> user: every entry in one cache directory is encrypted under the same key.
+> Encryption at rest protects a cache file lifted off the host (a backup, a
+> stolen disk); it is not a separation boundary between users on a live host.
+> That separation comes from the file permissions below.
 
 ```
 File format:
@@ -819,10 +836,11 @@ To report security vulnerabilities, please email security@linagora.com with:
 
 | Version | Supported |
 | ------- | --------- |
-| 1.x     | Yes       |
-| < 1.0   | No        |
+| 0.6.x   | Yes       |
+| < 0.6   | No        |
 
-Only the latest minor version receives security updates. We recommend always running the latest release.
+Open Bastion has not reached 1.0 yet. Only the latest minor version receives
+security updates. We recommend always running the latest release.
 
 ## Security Disclosure Policy
 
