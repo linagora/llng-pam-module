@@ -12,8 +12,12 @@ view of what a user did inside their pty: keystrokes, screen output,
 timing. This is invaluable for incident review — but it is **not** an
 independent audit trail:
 
-- Recordings live on disk; the user's session can sometimes reach them
-  (e.g. in `/var/lib/open-bastion/sessions/<user>/`).
+- Recordings only cover what happens **inside the recorded pty**. Since 0.5.0
+  the files themselves are out of the user's reach — `ob-record-sink` runs as
+  root, derives the user from `SO_PEERCRED`, and writes
+  `/var/lib/open-bastion/sessions/<user>/` as `root:ob-sessions` `0750` with
+  `0640` files, so a recorded user cannot list, read, unlink or truncate any
+  recording, including their own (#151). Tampering is not the gap; coverage is.
 - A determined user can attempt to bypass the pty entirely: `setsid`,
   `at`, `cron`, jobs spawned through systemd `--user`, daemons launched
   with `nohup`. Containment ([Session Containment](session-recording.md#session-containment)

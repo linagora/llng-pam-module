@@ -132,7 +132,10 @@ session    required     pam_unix.so
 **SSH: only via certificates signed by the LLNG CA. sudo: only via LLNG temporary token.**
 
 This mode provides the strictest separation between access (long-lived SSH certificate)
-and privilege escalation (fresh SSO re-authentication for each sudo).
+and privilege escalation (SSO re-authentication with a single-use token, and a live
+authorization check, on every sudo — see
+[sudo's timestamp cache](#how-often-you-are-actually-prompted-sudos-timestamp-cache)
+for how often an operator is actually prompted).
 
 ### Prerequisites
 
@@ -153,7 +156,7 @@ TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedKeysFile none                           # No unsigned keys
 RevokedKeys /etc/ssh/revoked_keys                 # KRL mandatory
 ExposeAuthInfo yes                                # For certificate audit
-AuthorizedPrincipalsCommand /bin/echo %u          # Accept cert whose principal matches the Unix username
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f
 AuthorizedPrincipalsCommandUser nobody
 PermitRootLogin no
 ```
@@ -161,10 +164,43 @@ PermitRootLogin no
 `ob-bastion-setup --max-security` writes these settings automatically via an
 `Include` directive in `sshd_config`.
 
+> **Do not replace `ob-ssh-principals` with `/bin/echo %u`.** Earlier revisions
+> of this document showed that shortcut; it silently disables two controls:
+>
+> - `%f` is what feeds the [SSH fingerprint binding](#ssh-fingerprint-binding-on-pamauthorize-and-pamverify)
+>   (the helper drops it in `/run/open-bastion/ssh-fp/<pid>.fp` for
+>   `pam_openbastion` to read). With `/bin/echo` no fingerprint is ever
+>   captured, so the binding degrades to "not sent".
+> - On **backends** the helper is invoked with a third token,
+>   `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i`,
+>   and `%i` (the certificate key-id) is what carries `bastion=<id>`, checked
+>   against `/etc/open-bastion/allowed_bastions` **before PAM runs**. With
+>   `/bin/echo` any CA-signed certificate whose principal matches the login
+>   name is accepted, including a direct user SSO certificate that never went
+>   through a bastion.
+>
+> The helper is written to `/usr/local/sbin/ob-ssh-principals` at setup time by
+> `ob-bastion-setup` / `ob-backend-setup`; it is not shipped as a packaged file.
+
 ### PAM Configuration for sshd
 
+This is what `ob-bastion-setup` writes (from v0.6.3 — see #220). Reproduce it
+exactly if you configure PAM by hand: every line below is load-bearing.
+
+> **Two independent controls keep passwords out.** First,
+> **`PasswordAuthentication no`** in the sshd drop-in, which the setup scripts
+> also write: sshd then never runs this stack for a password at all. Second,
+> the `auth` phase itself now refuses — `pam_deny` returns `PAM_AUTH_ERR`, so
+> even if password or keyboard-interactive authentication were re-enabled, no
+> password is accepted here.
+>
+> The certificate path is unaffected: sshd validates keys and certificates
+> itself and never calls `pam_authenticate()` on that path, so this stack is
+> only ever reached by password or keyboard-interactive authentication — which
+> this mode does not allow. See #180.
+
 ```
-# /etc/pam.d/sshd
+# /etc/pam.d/sshd   (bastion / standalone — written by ob-bastion-setup)
 #
 # AUTHENTICATION: Handled by SSH certificates (not PAM); the PAM auth stack denies
 # - Unix passwords: DISABLED
@@ -175,11 +211,43 @@ PermitRootLogin no
 
 auth       required     pam_deny.so
 
-account    required     pam_openbastion.so
-account    required     pam_unix.so
+account    required     pam_openbastion.so ssh_cert_aware=true
 
+session    optional     pam_mkhomedir.so skel=/etc/skel umask=0077
 session    required     pam_unix.so
+session    optional     pam_openbastion.so
+session    optional     pam_systemd.so
 ```
+
+On a **backend**, `ob-backend-setup` writes the same `auth` and `account` lines
+but a different `session` block, because there the module creates the account
+rather than only managing groups:
+
+```
+# /etc/pam.d/sshd   (backend — written by ob-backend-setup)
+session    required     pam_openbastion.so create_user=true
+session    required     pam_unix.so
+session    optional     pam_systemd.so
+```
+
+Line by line, and why each matters:
+
+| Line                            | Why it is there                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `auth required pam_deny.so`     | The certificate path never calls `pam_authenticate()`, so this stack is only reached by password or keyboard-interactive authentication, which certificate modes do not allow. `pam_deny` refuses it outright (`PAM_AUTH_ERR`). `PasswordAuthentication no` in `sshd_config` remains the first line of defence — this is the second. |
+| `account … ssh_cert_aware=true` | See the note below — the module currently ignores this argument.                                                                                                                                                                                                                                                                     |
+| **no** `account … pam_unix.so`  | In Mode E users exist only in NSS, not in `/etc/passwd`. `pam_unix`'s account check has no shadow entry to look at and can refuse the login. The same reasoning is already spelled out for `/etc/pam.d/sudo` below.                                                                                                                  |
+| `session … pam_mkhomedir.so`    | Without it an SSO user lands in a non-existent home directory on a bastion. (On a backend, `pam_openbastion create_user=true` provisions the home instead.)                                                                                                                                                                          |
+| `session … pam_openbastion.so`  | This is where the module manages `open-bastion-sudo` group membership from the SSO's `sudo_allowed` flag. **Omit it and Mode E sudo breaks**: sudoers grants only `%open-bastion-sudo`, and nothing ever adds the user to it.                                                                                                        |
+| `session … pam_systemd.so`      | Registers the session with `systemd-logind`. Without it, cert-hop sessions are invisible to `who`, `w`, `loginctl` and to the heartbeat's connected-users report (fixed in 0.5.1). Both setups append this line only when `pam_systemd.so` is actually installed, so a non-systemd host does not get a per-login `dlopen` error.     |
+
+> **`ssh_cert_aware=true` is currently a no-op.** Both setup scripts pass it as
+> a module argument, but no code reads it: PAM module arguments of the form
+> `key=value` are handed to `config_parse_args()` → `parse_line()`, whose final
+> branch silently ignores unknown keys (`src/config.c`). Nothing in `src/`
+> mentions `ssh_cert_aware`. Keep it or drop it as you like — it changes no
+> behaviour today. This is tracked as a code cleanup, not a configuration knob;
+> do not document it as one.
 
 ### PAM Configuration for sudo
 
@@ -231,6 +299,55 @@ users without group membership are blocked by sudoers before PAM is invoked.
    - Disable LLNG account              - Remove sudo_allowed
    - Remove from groups                  (immediate effect)
 ```
+
+### How often you are actually prompted: sudo's timestamp cache
+
+Mode E is described above as "fresh SSO re-authentication for each `sudo`".
+That claim holds **at the SSO layer**, and it is worth being precise about what
+an operator sees, because the two are not the same thing.
+
+What the SSO guarantees:
+
+- The LLNG temporary token is **one-time**. `/pam/verify` consumes it
+  server-side on first use, so a token that has been used cannot be replayed —
+  not by the user, not by anyone who captured it.
+- Its lifetime is short (`llng pam_token` mints a token with a TTL measured in
+  minutes).
+- Authorization is re-evaluated **live at every escalation**: `pam_openbastion`
+  calls the portal each time, so revoking `sudo_allowed` or disabling the
+  account takes effect on the next `sudo`, with no cached verdict.
+
+What an operator observes:
+
+- `sudo` keeps its own **timestamp cache**, independent of PAM. While that
+  timestamp is valid, `sudo` skips the PAM `auth` phase entirely and never
+  prompts. On Debian the default is `timestamp_timeout=15` (minutes), and it is
+  **re-armed on each use**, so a continuously working admin can go a long time
+  between token prompts. The `account` phase — and therefore the live
+  authorization check — still runs on every `sudo`.
+
+So the residual gap is one of prompt frequency, not of authorization: a stolen
+_token_ is useless (single use, short TTL), and a revoked _right_ is enforced
+immediately. What survives inside the window is the operator's own already
+authenticated terminal.
+
+If your policy requires a token prompt for **every** `sudo`, set
+`timestamp_timeout=0`. Put it in its own sudoers drop-in — `ob-bastion-setup`
+and `ob-backend-setup` regenerate `/etc/sudoers.d/open-bastion`, so anything
+written there is lost on the next run:
+
+```bash
+cat > /etc/sudoers.d/open-bastion-local << 'EOF'
+# Require a fresh LLNG token for every sudo (no timestamp reuse).
+Defaults:%open-bastion-sudo timestamp_timeout=0
+EOF
+chmod 0440 /etc/sudoers.d/open-bastion-local
+visudo -c
+```
+
+This is deliberately **not** the default: with `timestamp_timeout=0` every
+`sudo` in a shell loop or a long maintenance session needs a new token, which
+in practice pushes operators towards `sudo -i`. Choose per site.
 
 ### Mandatory KRL
 
@@ -415,7 +532,9 @@ TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedKeysFile none                           # No unsigned keys
 RevokedKeys /etc/ssh/revoked_keys                 # KRL mandatory
 ExposeAuthInfo yes
-AuthorizedPrincipalsCommand /bin/echo %u
+# Bastion: two tokens (%u %f). Backend: three (%u %f %i) — %i carries the
+# bastion= key-id checked against /etc/open-bastion/allowed_bastions.
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f
 AuthorizedPrincipalsCommandUser nobody
 PermitRootLogin no
 PermitEmptyPasswords no

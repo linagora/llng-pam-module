@@ -1,0 +1,1676 @@
+#!/usr/bin/env bash
+#
+# ob-builder - Generate Open Bastion deployment artefacts from a single
+# admin questionnaire (or YAML config).
+#
+# Produces a self-extracting shell installer and/or an Ansible role tree
+# pre-loaded with the SSO discovery results (CA, KRL, JWKS) so that
+# target machines need only bash + curl (or ansible) to install.
+#
+# Copyright (C) 2025 Linagora
+# License: AGPL-3.0
+
+set -euo pipefail
+
+VERSION="0.5.1"
+PROG_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" >/dev/null 2>&1 && pwd)
+
+# Library path. When installed, libs live under /usr/share/open-bastion-builder/lib.
+# In dev, they live next to the script.
+OB_BUILDER_LIB_DIR="${OB_BUILDER_LIB_DIR:-}"
+if [ -z "$OB_BUILDER_LIB_DIR" ]; then
+    if [ -d "$SCRIPT_DIR/lib" ]; then
+        OB_BUILDER_LIB_DIR="$SCRIPT_DIR/lib"
+    elif [ -d "/usr/share/open-bastion-builder/lib" ]; then
+        OB_BUILDER_LIB_DIR="/usr/share/open-bastion-builder/lib"
+    else
+        echo "[ERROR] Cannot locate ob-builder lib directory" >&2
+        exit 1
+    fi
+fi
+
+# Templates live alongside the libs in the install prefix.
+OB_BUILDER_SHARE="${OB_BUILDER_SHARE:-}"
+if [ -z "$OB_BUILDER_SHARE" ]; then
+    if [ -d "$SCRIPT_DIR/templates" ]; then
+        OB_BUILDER_SHARE="$SCRIPT_DIR"
+    elif [ -d "/usr/share/open-bastion-builder/templates" ]; then
+        OB_BUILDER_SHARE="/usr/share/open-bastion-builder"
+    else
+        OB_BUILDER_SHARE="$SCRIPT_DIR"
+    fi
+fi
+TEMPLATES_DIR="$OB_BUILDER_SHARE/templates"
+KEYRINGS_DIR="$OB_BUILDER_SHARE/keyrings"
+DEFAULT_REPO_KEYRING="$KEYRINGS_DIR/open-bastion-linagora.gpg"
+
+# shellcheck source=lib/common.sh
+. "$OB_BUILDER_LIB_DIR/common.sh"
+# shellcheck source=lib/validators.sh
+. "$OB_BUILDER_LIB_DIR/validators.sh"
+# shellcheck source=lib/prompts.sh
+. "$OB_BUILDER_LIB_DIR/prompts.sh"
+# shellcheck source=lib/sso-discovery.sh
+. "$OB_BUILDER_LIB_DIR/sso-discovery.sh"
+
+# ── Default APT repo parameters ─────────────────────────────────────────
+DEFAULT_APT_URL="https://linagora.github.io/open-bastion"
+DEFAULT_APT_SUITE="trixie"
+DEFAULT_APT_COMPONENT="main"
+
+# ── CLI-collected variables ─────────────────────────────────────────────
+CONFIG_FILE=""
+OUTPUT_SHELL=""
+OUTPUT_ANSIBLE=""
+REPO_KEYRING=""
+APT_SUITE="$DEFAULT_APT_SUITE"
+APT_COMPONENT="$DEFAULT_APT_COMPONENT"
+APT_URL="$DEFAULT_APT_URL"
+SIGN_WITH=""
+ALLOW_HTTP=0
+# shellcheck disable=SC2034  # set via --insecure for future-summary use; env var is the active one
+INSECURE=0
+DRY_RUN=0
+BUNDLE=0
+
+# ── Questionnaire-collected variables (also overridable via YAML) ───────
+DEPLOYMENT_SLUG=""
+SCENARIO=""
+PORTAL_URL=""
+CLIENT_ID=""
+CLIENT_ID_POLICY=""
+CLIENT_SECRET_MODE=""
+EMBEDDED_CLIENT_SECRET=""
+SERVER_GROUP=""
+SERVER_GROUP_POLICY=""
+TARGET_ROLE=""
+AUTO_ENROLL_SETUP=""
+SELF_DELETE=""
+ALLOWED_BASTIONS=""
+ANSIBLE_AUTO_APPROVE=""
+# Optional opt-in features (yes/no). Hardening and audit-trace are intrusive
+# and OFF by default; session recording is ON by default on bastion/standalone
+# and DISABLE_SESSION_RECORDER=yes opts out of it (never applies to backend).
+ENABLE_HARDENING=""
+ENABLE_AUDIT_TRACE=""
+DISABLE_SESSION_RECORDER=""
+
+# Service accounts (SSH-key-only local accounts: ansible, backup, …). Each entry
+# is one account encoded as a single record whose fields are joined by the ASCII
+# Unit Separator (US, \x1f) in this fixed order:
+#   name, key_fingerprint, sudo_allowed, sudo_nopasswd, shell, home, gecos, uid, gid
+# Populated from the questionnaire or from the YAML `service_accounts:` list, and
+# rendered into /etc/open-bastion/service-accounts.conf on the target.
+SERVICE_ACCOUNTS_RECORDS=()
+_OB_SA_US=$'\x1f'
+# Module defaults from include/config.h (DEFAULT_APPROVED_HOME_PREFIXES /
+# DEFAULT_APPROVED_SHELLS). A service account whose home/shell falls outside
+# these is SILENTLY DROPPED at load by pam_openbastion unless the target's
+# openbastion.conf widens approved_home_prefixes / approved_shells — so we warn
+# about it at build time. Keep in sync with config.h.
+_OB_SA_DEFAULT_HOME_PREFIXES="/home /var/home"
+_OB_SA_DEFAULT_SHELLS="/bin/bash /bin/sh /usr/bin/bash /usr/bin/sh /bin/zsh /usr/bin/zsh /bin/dash /usr/bin/dash /bin/fish /usr/bin/fish"
+# Common Debian/Linux system users. A service account that reuses one of these is
+# still ACCEPTED (NSS `files` resolves it, PAM authorizes it by name), but the
+# existing account is used as-is — its shell/home/uid are NOT overridden by the
+# config (pam_openbastion only applies those when it CREATES the account). Most
+# of these ship with /usr/sbin/nologin, which breaks the login. We warn, not block.
+_OB_SA_SYSTEM_NAMES="root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats nobody ftp sshd messagebus systemd-network systemd-resolve systemd-timesync _apt tss tcpdump"
+
+# Derived values populated after the questionnaire.
+PAM_MODE=""
+BUILD_DATE=""
+WORK_DIR=""  # Temp dir for fetched assets (CA, KRL, JWKS).
+
+usage() {
+    cat << EOF
+$PROG_NAME version $VERSION
+
+Generate Open Bastion deployment artefacts (self-extracting shell installer
+and/or Ansible role tree) from a single admin questionnaire or YAML config.
+
+USAGE:
+  $PROG_NAME [OPTIONS]
+
+INPUT MODES:
+  (no args)                  Fully interactive questionnaire
+  --config FILE              Non-interactive, read all answers from a YAML file
+  --bundle                   Generate paired bastion + backend artefacts in one run
+
+OUTPUTS (at least one of --output-shell or --output-ansible is required):
+  --output-shell PATH        Write self-extracting shell installer here
+  --output-ansible PATH      Write Ansible role tree here (directory)
+
+REPO / SIGNING:
+  --repo-keyring PATH        Path to a local GPG keyring (.gpg) for the APT
+                             repo. Defaults to the Linagora keyring shipped
+                             with the builder ($DEFAULT_REPO_KEYRING).
+                             Override for a different APT repo (your own
+                             mirror, etc.) via this flag or 'repo_keyring'
+                             in the --config YAML.
+  --apt-url URL              APT repo base URL (default: $DEFAULT_APT_URL)
+  --apt-suite SUITE          APT suite/codename       (default: $DEFAULT_APT_SUITE)
+  --apt-component COMP       APT component            (default: $DEFAULT_APT_COMPONENT)
+  --sign-with KEYID          GPG-sign the shell output with this key (.sig sidecar)
+
+OTHER:
+  --allow-http               Allow http:// SSO URL (default: refuse non-TLS)
+  --insecure                 Skip TLS verification when fetching from SSO (debug only)
+  --dry-run                  Print what would be generated, do not write any files
+  -h, --help                 Show this help
+  -V, --version              Print version
+
+QUESTIONNAIRE (asked when no --config is given):
+  1. Deployment slug (filesystem-safe)
+  2. Security scenario: token-only | token+unix | keys+llng | mixed | max-security
+  3. SSO portal URL (OIDC discovery is performed to validate it)
+  4. OIDC client_id + policy (fixed | modifiable)
+  5. OIDC client_secret mode (none | prompt)
+  6. Server group + policy (fixed | modifiable)
+  7. Target role: bastion | standalone | backend
+  8. Service accounts (SSH-key-only local accounts: ansible, backup, …)
+  9. Auto-launch enroll/setup on the target? (yes | no | prompt)
+
+SERVICE ACCOUNTS (--config YAML):
+  Declare SSH-key-only local accounts under a 'service_accounts:' list. They are
+  rendered into /etc/open-bastion/service-accounts.conf (0600) on the target and
+  apply to every role. Example:
+    service_accounts:
+      - name: ci-ansible            # dedicated name (not an existing system user)
+        key_fingerprint: "SHA256:…" # from: ssh-keygen -lf key.pub
+        sudo_allowed: true
+        sudo_nopasswd: true
+        shell: /bin/bash
+        home: /home/ci-ansible      # under an approved prefix (/home, /var/home)
+        gecos: Ansible Automation
+        uid: 6001                   # fixed uid+gid → NSS-resolvable → reachable over SSH
+        gid: 6001
+  Notes: use a dedicated (non-system) name, a home under /home or /var/home, and
+  a fixed uid+gid, or the account is dropped / unreachable. See doc/service-accounts.md.
+
+EXAMPLES:
+  # Fully interactive bastion bootstrap (default Linagora APT keyring)
+  $PROG_NAME --output-shell /tmp/bootstrap-mybastion.sh
+
+  # Replayable build from YAML config (e.g. for CI)
+  $PROG_NAME --config build.yml \\
+             --output-shell /tmp/bootstrap.sh --output-ansible /tmp/role/
+
+  # Bundle (bastion + backend share the same CA / JWKS fetched once)
+  $PROG_NAME --config build.yml --bundle \\
+             --output-shell /tmp/bootstrap.sh
+
+EOF
+}
+
+show_version() {
+    printf '%s version %s\n' "$PROG_NAME" "$VERSION"
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Argument parsing.
+# Matches the case-statement style of ob-bastion-setup: explicit requires-arg
+# check, hard fail on unknown flags.
+# ─────────────────────────────────────────────────────────────────────────
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --config)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                CONFIG_FILE="$2"; shift 2
+                ;;
+            --output-shell)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                OUTPUT_SHELL="$2"; shift 2
+                ;;
+            --output-ansible)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                OUTPUT_ANSIBLE="$2"; shift 2
+                ;;
+            --repo-keyring)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                REPO_KEYRING="$2"; shift 2
+                ;;
+            --apt-url)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                APT_URL="$2"; shift 2
+                ;;
+            --apt-suite)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                APT_SUITE="$2"; shift 2
+                ;;
+            --apt-component)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                APT_COMPONENT="$2"; shift 2
+                ;;
+            --sign-with)
+                [ -n "${2:-}" ] && [[ "${2:-}" != -* ]] || die "Option $1 requires an argument"
+                SIGN_WITH="$2"; shift 2
+                ;;
+            --bundle)        BUNDLE=1; shift ;;
+            --allow-http)    ALLOW_HTTP=1; shift ;;
+            --insecure)
+                INSECURE=1
+                export OB_BUILDER_INSECURE=1
+                shift
+                ;;
+            --dry-run)       DRY_RUN=1; shift ;;
+            -h|--help)       usage; exit 0 ;;
+            -V|--version)    show_version; exit 0 ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information" >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# YAML loading.
+# Prefer `yq` (Go or Python implementations both work for flat top-level
+# keys); fall back to an awk parser for the documented flat subset:
+#
+#   key: value
+#   key: "quoted value"
+#
+# Comments (#…) and blank lines ignored. No nested mappings, no lists, no
+# multi-line strings. This is sufficient for ob-builder's flat schema and
+# avoids a hard dependency on yq.
+# ─────────────────────────────────────────────────────────────────────────
+load_config() {
+    local f="$1"
+    [ -f "$f" ] || die "Config file not found: $f"
+
+    log_step "Loading config from $f"
+
+    if command -v yq >/dev/null 2>&1; then
+        _load_config_yq "$f"
+    else
+        log_info "yq not found, using awk-based parser (flat keys only)"
+        _load_config_awk "$f"
+    fi
+
+    # Service accounts are a nested list, which neither flat parser handles.
+    # Parse them with a dedicated, yq-independent block scanner so behaviour is
+    # identical whether or not yq is installed.
+    _parse_service_accounts_block "$f"
+
+    # When loading config we run non-interactively unless a missing value
+    # forces a prompt. The prompts library checks OB_BUILDER_NON_INTERACTIVE.
+    export OB_BUILDER_NON_INTERACTIVE=1
+}
+
+_load_config_yq() {
+    local f="$1" v
+    # Detect yq flavor ONCE so a transient failure on one query does not
+    # silently fall back to the other parser (which could produce different
+    # semantics for the same key — see PR #116 review).
+    local _yq_flavor=""
+    if yq --version 2>&1 | grep -qi "mikefarah"; then
+        _yq_flavor="go"
+    elif yq --help 2>&1 | grep -qi "yq is a wrapper\|kislyuk"; then
+        _yq_flavor="python"
+    else
+        # Heuristic: Go yq accepts `eval`, Python yq doesn't.
+        if yq eval '.' "$f" >/dev/null 2>&1; then
+            _yq_flavor="go"
+        else
+            _yq_flavor="python"
+        fi
+    fi
+    _yq_get() {
+        local key="$1"
+        local out
+        if [ "$_yq_flavor" = "go" ]; then
+            out=$(yq eval ".${key} // \"\"" "$f" 2>/dev/null) || out=""
+            [ "$out" = "null" ] && out=""
+        else
+            out=$(yq -r ".${key} // empty" "$f" 2>/dev/null) || out=""
+        fi
+        printf '%s' "$out"
+    }
+
+    v=$(_yq_get deployment_slug);     [ -n "$v" ] && DEPLOYMENT_SLUG="$v"
+    v=$(_yq_get scenario);            [ -n "$v" ] && SCENARIO="$v"
+    v=$(_yq_get portal_url);          [ -n "$v" ] && PORTAL_URL="$v"
+    v=$(_yq_get client_id);           [ -n "$v" ] && CLIENT_ID="$v"
+    v=$(_yq_get client_id_policy);    [ -n "$v" ] && CLIENT_ID_POLICY="$v"
+    v=$(_yq_get client_secret_mode);  [ -n "$v" ] && CLIENT_SECRET_MODE="$v"
+    v=$(_yq_get embedded_client_secret); [ -n "$v" ] && EMBEDDED_CLIENT_SECRET="$v"
+    v=$(_yq_get server_group);        [ -n "$v" ] && SERVER_GROUP="$v"
+    v=$(_yq_get server_group_policy); [ -n "$v" ] && SERVER_GROUP_POLICY="$v"
+    v=$(_yq_get target_role);         [ -n "$v" ] && TARGET_ROLE="$v"
+    v=$(_yq_get auto_enroll_setup);   [ -n "$v" ] && AUTO_ENROLL_SETUP="$v"
+    v=$(_yq_get self_delete);         [ -n "$v" ] && SELF_DELETE="$v"
+    v=$(_yq_get allowed_bastions);    [ -n "$v" ] && ALLOWED_BASTIONS="$v"
+    v=$(_yq_get ansible_auto_approve); [ -n "$v" ] && ANSIBLE_AUTO_APPROVE="$v"
+    v=$(_yq_get enable_hardening);    [ -n "$v" ] && ENABLE_HARDENING="$v"
+    v=$(_yq_get enable_audit_trace);  [ -n "$v" ] && ENABLE_AUDIT_TRACE="$v"
+    v=$(_yq_get disable_session_recorder); [ -n "$v" ] && DISABLE_SESSION_RECORDER="$v"
+    v=$(_yq_get repo_keyring);        [ -n "$v" ] && [ -z "$REPO_KEYRING" ] && REPO_KEYRING="$v"
+    v=$(_yq_get apt_url);             [ -n "$v" ] && [ "$APT_URL" = "$DEFAULT_APT_URL" ] && APT_URL="$v"
+    v=$(_yq_get apt_suite);           [ -n "$v" ] && [ "$APT_SUITE" = "$DEFAULT_APT_SUITE" ] && APT_SUITE="$v"
+    v=$(_yq_get apt_component);       [ -n "$v" ] && [ "$APT_COMPONENT" = "$DEFAULT_APT_COMPONENT" ] && APT_COMPONENT="$v"
+    # Trailing `cmd && X` returns non-zero when `cmd` is false. Without an
+    # explicit success status the function exit code propagates and triggers
+    # set -e in the caller. Keep this `return 0` at the end of the function.
+    return 0
+}
+
+# Awk parser: emits "KEY\tVALUE" lines for known keys, strips quotes.
+_load_config_awk() {
+    local f="$1"
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Strip CR (CRLF files) and leading/trailing whitespace.
+        line="${line%$'\r'}"
+        # Skip blanks and comments.
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        # Match key: value
+        if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            # Strip inline comment per YAML rule: '#' preceded by a space.
+            val="${val%% #*}"
+            # Strip surrounding whitespace.
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            # Strip matching quotes.
+            case "$val" in
+                \"*\") val="${val#\"}"; val="${val%\"}" ;;
+                \'*\') val="${val#\'}"; val="${val%\'}" ;;
+            esac
+            case "$key" in
+                deployment_slug)     DEPLOYMENT_SLUG="$val" ;;
+                scenario)            SCENARIO="$val" ;;
+                portal_url)          PORTAL_URL="$val" ;;
+                client_id)           CLIENT_ID="$val" ;;
+                client_id_policy)    CLIENT_ID_POLICY="$val" ;;
+                client_secret_mode)  CLIENT_SECRET_MODE="$val" ;;
+                embedded_client_secret) EMBEDDED_CLIENT_SECRET="$val" ;;
+                server_group)        SERVER_GROUP="$val" ;;
+                server_group_policy) SERVER_GROUP_POLICY="$val" ;;
+                target_role)         TARGET_ROLE="$val" ;;
+                auto_enroll_setup)   AUTO_ENROLL_SETUP="$val" ;;
+                self_delete)         SELF_DELETE="$val" ;;
+                allowed_bastions)    ALLOWED_BASTIONS="$val" ;;
+                ansible_auto_approve) ANSIBLE_AUTO_APPROVE="$val" ;;
+                enable_hardening)    ENABLE_HARDENING="$val" ;;
+                enable_audit_trace)  ENABLE_AUDIT_TRACE="$val" ;;
+                disable_session_recorder) DISABLE_SESSION_RECORDER="$val" ;;
+                repo_keyring)        [ -z "$REPO_KEYRING" ] && REPO_KEYRING="$val" ;;
+                apt_url)             [ "$APT_URL"       = "$DEFAULT_APT_URL"       ] && APT_URL="$val" ;;
+                apt_suite)           [ "$APT_SUITE"     = "$DEFAULT_APT_SUITE"     ] && APT_SUITE="$val" ;;
+                apt_component)       [ "$APT_COMPONENT" = "$DEFAULT_APT_COMPONENT" ] && APT_COMPONENT="$val" ;;
+                # Service-account list keys: consumed by _parse_service_accounts_block,
+                # ignored here (they only appear nested under `service_accounts:`).
+                service_accounts|name|key_fingerprint|fingerprint|sudo_allowed|sudo_nopasswd|shell|home|gecos|uid|gid) : ;;
+                *) log_warn "Unknown config key '$key' (ignored)" ;;
+            esac
+        fi
+    done < "$f"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Service-account helpers.
+# A record packs the 9 fields (in the fixed order documented next to
+# SERVICE_ACCOUNTS_RECORDS) joined by the Unit Separator. _sa_pack builds one;
+# _sa_field N extracts the Nth field (1-based) from a record.
+# ─────────────────────────────────────────────────────────────────────────
+_sa_pack() {
+    local IFS="$_OB_SA_US"
+    printf '%s' "$*"
+}
+_sa_field() {
+    local n="$1" rec="$2"
+    local -a _parts
+    IFS="$_OB_SA_US" read -r -a _parts <<< "$rec"
+    printf '%s' "${_parts[$((n - 1))]:-}"
+}
+
+# Validate one packed record. Mirrors the authoritative checks in
+# src/service_account.c so a bad value is caught at build time rather than
+# failing the PAM module load on the target.
+validate_service_account_record() {
+    local rec="$1"
+    local name fp sudo_allowed sudo_nopasswd shell home uid gid
+    name=$(_sa_field 1 "$rec");          fp=$(_sa_field 2 "$rec")
+    sudo_allowed=$(_sa_field 3 "$rec");   sudo_nopasswd=$(_sa_field 4 "$rec")
+    shell=$(_sa_field 5 "$rec");          home=$(_sa_field 6 "$rec")
+    uid=$(_sa_field 8 "$rec");            gid=$(_sa_field 9 "$rec")
+
+    is_valid_service_username "$name" || { log_error "Invalid service-account name: '$name'"; return 1; }
+    is_valid_fingerprint "$fp"        || { log_error "Invalid key_fingerprint for '$name' (must be SHA256:… or MD5:…): '$fp'"; return 1; }
+    case "$sudo_allowed"  in true|false) ;; *) log_error "service account '$name': sudo_allowed must be true/false"; return 1 ;; esac
+    case "$sudo_nopasswd" in true|false) ;; *) log_error "service account '$name': sudo_nopasswd must be true/false"; return 1 ;; esac
+    is_valid_abs_path "$shell" || { log_error "service account '$name': shell must be an absolute path: '$shell'"; return 1; }
+    is_valid_abs_path "$home"  || { log_error "service account '$name': home must be an absolute path: '$home'"; return 1; }
+    if [ -n "$uid" ] && ! [[ "$uid" =~ ^[0-9]+$ ]]; then log_error "service account '$name': uid must be numeric: '$uid'"; return 1; fi
+    if [ -n "$gid" ] && ! [[ "$gid" =~ ^[0-9]+$ ]]; then log_error "service account '$name': gid must be numeric: '$gid'"; return 1; fi
+    return 0
+}
+
+# Warn (non-fatal) when a service account's home/shell falls outside the module
+# defaults: pam_openbastion silently DROPS such an account at load unless the
+# target widens approved_home_prefixes / approved_shells in openbastion.conf.
+warn_service_account_unapproved() {
+    local rec="$1"
+    local name home shell uid gid pfx ok
+    name=$(_sa_field 1 "$rec"); shell=$(_sa_field 5 "$rec"); home=$(_sa_field 6 "$rec")
+    uid=$(_sa_field 8 "$rec"); gid=$(_sa_field 9 "$rec")
+    # Reserved system name: still accepted, but the existing account is used as-is
+    # (the config's shell/home/uid apply only to accounts ob-bastion creates).
+    for pfx in $_OB_SA_SYSTEM_NAMES; do
+        if [ "$name" = "$pfx" ]; then
+            log_warn "service account '$name' is a well-known system account. It is still accepted"
+            log_warn "  (matched by key fingerprint), but the EXISTING local account is used as-is —"
+            log_warn "  its shell/home/uid are NOT overridden by this config. Many system accounts use"
+            log_warn "  /usr/sbin/nologin, which breaks the login. Prefer a dedicated name (e.g. ob$name),"
+            log_warn "  or ensure '$name' already has a usable login shell on the target."
+            break
+        fi
+    done
+    # NSS (libnss_openbastion) only synthesizes a service account when it has a
+    # FIXED uid AND gid; sshd's pre-auth getpwnam then succeeds. Without them the
+    # account is unreachable over SSH unless it already exists as a local user.
+    if [ -z "$uid" ] || [ "$uid" = 0 ] || [ -z "$gid" ] || [ "$gid" = 0 ]; then
+        log_warn "service account '$name': no fixed uid/gid. NSS cannot resolve it pre-auth, so"
+        log_warn "  it is reachable over SSH only if the account already exists locally on the target."
+        log_warn "  Set both 'uid' and 'gid' for a self-contained, fleet-consistent service account."
+    fi
+    if [ -n "$home" ]; then
+        ok=0
+        for pfx in $_OB_SA_DEFAULT_HOME_PREFIXES; do
+            case "$home" in "$pfx"/*) ok=1; break ;; esac
+        done
+        if [ "$ok" -ne 1 ]; then
+            log_warn "service account '$name': home '$home' is outside the default approved prefixes ($_OB_SA_DEFAULT_HOME_PREFIXES)."
+            log_warn "  pam_openbastion will DROP this account unless the target's openbastion.conf sets e.g.:"
+            log_warn "    approved_home_prefixes = /home:/var/home:${home%/*}"
+        fi
+    fi
+    if [ -n "$shell" ]; then
+        ok=0
+        for pfx in $_OB_SA_DEFAULT_SHELLS; do
+            [ "$shell" = "$pfx" ] && { ok=1; break; }
+        done
+        if [ "$ok" -ne 1 ]; then
+            log_warn "service account '$name': shell '$shell' is not in the default approved shells."
+            log_warn "  Set 'approved_shells' in the target's openbastion.conf or the account will be dropped."
+        fi
+    fi
+}
+
+# Parse the `service_accounts:` block of a YAML config file into
+# SERVICE_ACCOUNTS_RECORDS. Independent of yq (the flat parsers can't read a
+# list). Recognises the documented block-list form:
+#
+#   service_accounts:
+#     - name: ansible
+#       key_fingerprint: "SHA256:…"
+#       sudo_allowed: true
+#       shell: /bin/bash
+#       home: /var/lib/ansible
+#       gecos: Ansible Automation
+#
+# A `- name:` line opens a new account; subsequent more-indented `key: value`
+# lines add fields; a line at the block's indent or shallower (or another
+# top-level key) ends the block.
+_parse_service_accounts_block() {
+    local f="$1"
+    local in_block=0 line key val
+    local name fp sudo_allowed sudo_nopasswd shell home gecos uid gid
+    _sa_reset_fields() { name=""; fp=""; sudo_allowed="false"; sudo_nopasswd="false"; shell=""; home=""; gecos=""; uid=""; gid=""; }
+    local have_acct=0
+    _sa_flush() {
+        [ "$have_acct" = 1 ] || return 0
+        SERVICE_ACCOUNTS_RECORDS+=("$(_sa_pack "$name" "$fp" "$sudo_allowed" "$sudo_nopasswd" "$shell" "$home" "$gecos" "$uid" "$gid")")
+        have_acct=0
+    }
+    _sa_reset_fields
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        if [ "$in_block" = 0 ]; then
+            [[ "$line" =~ ^service_accounts[[:space:]]*:[[:space:]]*$ ]] && in_block=1
+            continue
+        fi
+        # In block. A non-indented line ends it.
+        if [[ "$line" =~ ^[^[:space:]] ]]; then
+            _sa_flush
+            in_block=0
+            continue
+        fi
+        # New list item: "- name: value"
+        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*name[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            _sa_flush
+            _sa_reset_fields
+            have_acct=1
+            val="${BASH_REMATCH[1]}"
+            val=$(_sa_unquote "$val")
+            name="$val"
+            continue
+        fi
+        # Field line: "  key: value"
+        if [[ "$line" =~ ^[[:space:]]+([a-zA-Z_]+)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val=$(_sa_unquote "${BASH_REMATCH[2]}")
+            case "$key" in
+                name)            name="$val" ;;
+                key_fingerprint|fingerprint) fp="$val" ;;
+                sudo_allowed)    sudo_allowed=$(_sa_normbool "$val") ;;
+                sudo_nopasswd)   sudo_nopasswd=$(_sa_normbool "$val") ;;
+                shell)           shell="$val" ;;
+                home)            home="$val" ;;
+                gecos)           gecos="$val" ;;
+                uid)             uid="$val" ;;
+                gid)             gid="$val" ;;
+            esac
+        fi
+    done < "$f"
+    _sa_flush
+    return 0
+}
+
+# Strip a YAML inline comment (" #…"), surrounding whitespace and matching quotes.
+_sa_unquote() {
+    local v="$1"
+    v="${v%% #*}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    case "$v" in
+        \"*\") v="${v#\"}"; v="${v%\"}" ;;
+        \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
+    printf '%s' "$v"
+}
+
+# Normalise a YAML boolean-ish value to true/false.
+_sa_normbool() {
+    case "$1" in
+        true|True|TRUE|yes|Yes|YES|1)  printf 'true' ;;
+        *)                              printf 'false' ;;
+    esac
+}
+
+# Render SERVICE_ACCOUNTS_RECORDS into service-accounts.conf INI text on stdout.
+# key_fingerprint, sudo_allowed and sudo_nopasswd are always emitted; gecos /
+# shell / home / uid / gid only when set (uid/gid only when non-zero).
+_render_service_accounts_conf() {
+    local rec name fp sudo_allowed sudo_nopasswd shell home gecos uid gid
+    printf '# Open Bastion service accounts\n'
+    printf '# Generated by ob-builder %s on %s\n' "$VERSION" "$BUILD_DATE"
+    printf '# SSH-key-only local accounts (no OIDC). See ob-builder(1) and doc/service-accounts.md.\n'
+    for rec in "${SERVICE_ACCOUNTS_RECORDS[@]}"; do
+        name=$(_sa_field 1 "$rec");          fp=$(_sa_field 2 "$rec")
+        sudo_allowed=$(_sa_field 3 "$rec");   sudo_nopasswd=$(_sa_field 4 "$rec")
+        shell=$(_sa_field 5 "$rec");          home=$(_sa_field 6 "$rec")
+        gecos=$(_sa_field 7 "$rec")
+        uid=$(_sa_field 8 "$rec");            gid=$(_sa_field 9 "$rec")
+        printf '\n[%s]\n' "$name"
+        printf 'key_fingerprint = %s\n' "$fp"
+        printf 'sudo_allowed = %s\n' "$sudo_allowed"
+        printf 'sudo_nopasswd = %s\n' "$sudo_nopasswd"
+        [ -n "$gecos" ] && printf 'gecos = %s\n' "$gecos"
+        [ -n "$shell" ] && printf 'shell = %s\n' "$shell"
+        [ -n "$home" ]  && printf 'home = %s\n' "$home"
+        [ -n "$uid" ] && [ "$uid" != 0 ] && printf 'uid = %s\n' "$uid"
+        [ -n "$gid" ] && [ "$gid" != 0 ] && printf 'gid = %s\n' "$gid"
+    done
+    # Explicit success: the loop's last command is a `&&` chain that is false
+    # whenever the final account has no gid (the common case), which would make
+    # this function return non-zero and trip `set -e` in the caller.
+    return 0
+}
+
+# Interactively collect service accounts into SERVICE_ACCOUNTS_RECORDS. Loops
+# until the admin declines to add another. Each field is validated on entry.
+collect_service_accounts_interactive() {
+    explain "Service accounts are SSH-key-only local accounts (no SSO), e.g. 'ansible' or 'backup'. They are matched by the SSH key fingerprint and created automatically on the target. Leave this off if you don't need any."
+    ask_yesno "Define service accounts on this target?" "n" || return 0
+
+    while :; do
+        local name fp sudo_allowed="false" sudo_nopasswd="false" shell home gecos uid gid rec
+        while :; do
+            name=$(ask "  Account name (lowercase; empty to finish)" "")
+            [ -z "$name" ] && return 0
+            is_valid_service_username "$name" && break
+            log_warn "Invalid name. Start with a lowercase letter or '_', then [a-z0-9_-]."
+        done
+        while :; do
+            explain "Get it with: ssh-keygen -lf key.pub  → use the 'SHA256:…' field."
+            fp=$(ask "  SSH key fingerprint (SHA256:… or MD5:…)" "")
+            is_valid_fingerprint "$fp" && break
+            log_warn "Invalid fingerprint. Must start with SHA256: or MD5: and be base64-ish."
+        done
+        ask_yesno "  Allow sudo for '$name'?" "n" && sudo_allowed="true"
+        if [ "$sudo_allowed" = "true" ]; then
+            ask_yesno "  Sudo without password (NOPASSWD)?" "n" && sudo_nopasswd="true"
+        fi
+        gecos=$(ask "  Description / GECOS (optional)" "")
+        while :; do
+            shell=$(ask "  Login shell (optional, absolute path)" "")
+            is_valid_abs_path "$shell" && break
+            log_warn "Shell must be an absolute path (e.g. /bin/bash) or empty."
+        done
+        while :; do
+            home=$(ask "  Home directory (optional, absolute path)" "")
+            is_valid_abs_path "$home" && break
+            log_warn "Home must be an absolute path (e.g. /var/lib/$name) or empty."
+        done
+        explain "Set a fixed uid+gid for an SSH-reachable account: NSS resolves it only when both are set (sshd checks the user before auth). Leave empty only if the account already exists locally on the target."
+        uid=$(ask "  Fixed UID (recommended; empty = auto)" "")
+        gid=$(ask "  Fixed GID (recommended; empty = auto)" "")
+
+        rec=$(_sa_pack "$name" "$fp" "$sudo_allowed" "$sudo_nopasswd" "$shell" "$home" "$gecos" "$uid" "$gid")
+        if validate_service_account_record "$rec"; then
+            SERVICE_ACCOUNTS_RECORDS+=("$rec")
+            log_info "Added service account '$name' (${#SERVICE_ACCOUNTS_RECORDS[@]} total)."
+        else
+            log_warn "Service account '$name' rejected; not added."
+        fi
+        ask_yesno "Add another service account?" "n" || break
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Interactive questionnaire. Each answer is also validated.
+# ─────────────────────────────────────────────────────────────────────────
+run_questionnaire() {
+    log_step "Open Bastion deployment questionnaire"
+
+    cat <<'EOF'
+
+This wizard generates a self-contained deployment artefact (shell script and/or
+Ansible role) that an administrator can later push to one or more target servers
+to install and configure Open Bastion against a LemonLDAP::NG SSO.
+
+Each question is preceded by a short explanation. You can press Enter to accept
+the default shown in square brackets. Nothing is written until every answer is
+collected and validated.
+
+EOF
+
+    # q1. Slug
+    while :; do
+        if [ -z "$DEPLOYMENT_SLUG" ]; then
+            explain "Short label used only to name generated files (e.g. bootstrap-<slug>.sh)."
+            DEPLOYMENT_SLUG=$(ask "Deployment slug (lowercase, [a-z0-9-])" "")
+        fi
+        if is_valid_slug "$DEPLOYMENT_SLUG"; then
+            break
+        fi
+        log_warn "Invalid slug. Use only lowercase letters, digits and dashes."
+        DEPLOYMENT_SLUG=""
+    done
+
+    # q2. Scenario
+    while :; do
+        if [ -z "$SCENARIO" ]; then
+            explain "Choose the strictness of SSH authentication on the target. Maximum security is recommended for production: it accepts only LLNG-signed SSH certificates, requires a fresh LLNG token to use sudo, and enforces a key revocation list."
+            SCENARIO=$(ask_choice "Security scenario" \
+                "token-only|token+unix|keys+llng|mixed|max-security" \
+                "max-security")
+        fi
+        if is_valid_scenario "$SCENARIO"; then
+            break
+        fi
+        log_warn "Invalid scenario: $SCENARIO"
+        SCENARIO=""
+    done
+    PAM_MODE=$(scenario_to_pam_mode "$SCENARIO")
+
+    # q3. SSO URL
+    while :; do
+        if [ -z "$PORTAL_URL" ]; then
+            explain "LemonLDAP::NG portal root. Validated now via OIDC discovery; SSH CA fetched from it."
+            PORTAL_URL=$(ask "LLNG portal (SSO) URL" "")
+        fi
+        # Strip trailing slash.
+        PORTAL_URL="${PORTAL_URL%/}"
+
+        if ! is_valid_url "$PORTAL_URL"; then
+            log_warn "Invalid URL: $PORTAL_URL"
+            PORTAL_URL=""
+            continue
+        fi
+        if [[ "$PORTAL_URL" != https://* ]] && [ "$ALLOW_HTTP" -ne 1 ]; then
+            log_error "Non-HTTPS portal URL is refused; use --allow-http to override (debug only)"
+            PORTAL_URL=""
+            continue
+        fi
+        break
+    done
+
+    # q4. client_id + policy
+    if [ -z "$CLIENT_ID_POLICY" ]; then
+        explain "Choose whether the client_id you provide is locked into the artefact, or whether the local admin on the target can override it at install time with --client-id."
+        CLIENT_ID_POLICY=$(ask_choice "client_id policy" "fixed|modifiable" "modifiable")
+    fi
+    if [ -z "$CLIENT_ID" ]; then
+        explain "OIDC client_id registered in LLNG (matches the 'pam-access' RP by default)."
+        CLIENT_ID=$(ask "OIDC client_id (empty = no default)" "pam-access")
+    fi
+    if ! is_valid_client_id "$CLIENT_ID"; then
+        die "Invalid client_id: $CLIENT_ID"
+    fi
+
+    # q5. client_secret mode
+    if [ -z "$CLIENT_SECRET_MODE" ]; then
+        explain "How the OIDC client_secret reaches the target. With 'none' the relying party is public (no secret). With 'prompt' the admin types the secret on each target server (recommended). With 'embedded' the secret is baked into the artefact in clear text — convenient but anyone who can read the artefact can read the secret, so distribute it only through a channel at least as confidential as the secret itself."
+        CLIENT_SECRET_MODE=$(ask_choice "client_secret mode" \
+            "none|prompt|embedded" "prompt")
+    fi
+    case "$CLIENT_SECRET_MODE" in
+        none|prompt) ;;
+        embedded)
+            if [ -z "$EMBEDDED_CLIENT_SECRET" ]; then
+                log_warn "Embedding the client_secret in the artefact in clear text."
+                log_warn "Anyone with read access to the artefact can read this secret."
+                EMBEDDED_CLIENT_SECRET=$(ask_secret "OIDC client_secret to embed")
+                [ -n "$EMBEDDED_CLIENT_SECRET" ] || die "Embedded client_secret cannot be empty"
+            fi
+            ;;
+        *) die "Invalid client_secret_mode: $CLIENT_SECRET_MODE" ;;
+    esac
+
+    # q6. server_group + policy
+    if [ -z "$SERVER_GROUP_POLICY" ]; then
+        explain "Choose whether the default server_group you provide is locked into the artefact, or whether the local admin on the target can override it at install time with --server-group."
+        SERVER_GROUP_POLICY=$(ask_choice "server_group policy" "fixed|modifiable" "modifiable")
+    fi
+    if [ -z "${SERVER_GROUP-}" ]; then
+        explain "Group name configured in LLNG (pamAccessServerGroups). Leave empty for per-host override."
+        SERVER_GROUP=$(ask "Default server_group (empty = no default, must be provided on target)" "")
+    fi
+    if ! is_valid_server_group "$SERVER_GROUP"; then
+        die "Invalid server_group: $SERVER_GROUP"
+    fi
+    # A fixed-policy with empty value is non-sensical: the artefact would
+    # carry no group AND refuse override.
+    if [ "$SERVER_GROUP_POLICY" = "fixed" ] && [ -z "$SERVER_GROUP" ]; then
+        die "server_group_policy=fixed requires a non-empty server_group"
+    fi
+
+    # q7. Target role
+    while :; do
+        if [ -z "$TARGET_ROLE" ]; then
+            explain "Pick what this artefact configures: a bastion (jump host accepting SSH from users), a backend (server reached only through a bastion), or a standalone host (isolated server with no bastion in front)."
+            TARGET_ROLE=$(ask_choice "Target role" "bastion|standalone|backend" "bastion")
+        fi
+        if is_valid_target_role "$TARGET_ROLE"; then
+            break
+        fi
+        log_warn "Invalid target role: $TARGET_ROLE"
+        TARGET_ROLE=""
+    done
+
+    # q7b. (backend only) Allowed bastions whitelist
+    # The bastion JWT is signed by the LLNG SSO itself, so the SSO identity is
+    # already covered by bastion_jwt_issuer. What the backend can additionally
+    # enforce is which specific bastion(s) (sub claim / bastion_id) are
+    # permitted to forward sessions to it. Empty = accept any LLNG-enrolled
+    # bastion in the same group.
+    if [ "$TARGET_ROLE" = "backend" ] && [ -z "${ALLOWED_BASTIONS-}" ]; then
+        explain "Optional whitelist of bastion identifiers (the 'bastion_id' claim LLNG embeds in each bastion's JWT) that are allowed to reach this backend. Comma-separated, e.g. 'bastion-01,bastion-02'. Leave empty to accept any bastion enrolled in the same LLNG server group as this backend. You don't pick this value — LLNG assigns it at enrollment. To discover it: deploy the bastion first, then run 'sudo ob-bastion-id' on it (or check the LLNG Manager). You can also leave this empty now and tighten it later by editing /etc/open-bastion/openbastion.conf on the backend."
+        ALLOWED_BASTIONS=$(ask "Allowed bastion ids (empty = any)" "")
+    fi
+
+    # q7c. Optional opt-in features: system hardening, audit trace, and
+    # (bastion/standalone only) whether to OPT OUT of session recording.
+    # Hardening and audit-trace are intrusive/system-wide, so they default to
+    # OFF and must be opted into (see SECURITY.md). Session recording is a core
+    # bastion guarantee: it stays ON unless explicitly disabled here. Backends
+    # never record sessions, so the recorder question is skipped for them.
+    if [ -z "$ENABLE_HARDENING" ]; then
+        explain "System containment hardening applies logind KillUserProcesses, an nproc cap, at/cron allow-lists and masks atd on the target. It changes system-wide behaviour, so it is OFF by default — enable it only on hosts dedicated to this role."
+        ENABLE_HARDENING=$(ask_choice "Enable system containment hardening (--enable-hardening)?" "yes|no" "no")
+    fi
+    if [ -z "$ENABLE_AUDIT_TRACE" ]; then
+        explain "Audit trace installs auditd rules and a daily rotation cron on the target (requires the auditd package). OFF by default."
+        ENABLE_AUDIT_TRACE=$(ask_choice "Enable primary audit trace via auditd (--enable-audit-trace)?" "yes|no" "no")
+    fi
+    if [ "$TARGET_ROLE" != "backend" ] && [ -z "$DISABLE_SESSION_RECORDER" ]; then
+        explain "A bastion records every session by default (sshd ForceCommand -> ob-session-recorder). Disable this only when session capture is handled by another mechanism — turning it off weakens the audit guarantee. Backends never record sessions, so this does not apply to them."
+        DISABLE_SESSION_RECORDER=$(ask_choice "Disable session recording on this bastion/standalone (--disable-session-recorder)?" "yes|no" "no")
+    fi
+
+    # q7d. Service accounts (SSH-key-only local accounts). Applies to every role.
+    # Only prompt when none were supplied (e.g. via a partial config); a config
+    # that already defined service_accounts skips the interactive loop.
+    if [ "${#SERVICE_ACCOUNTS_RECORDS[@]}" -eq 0 ]; then
+        collect_service_accounts_interactive
+    fi
+
+    # q8. Auto-launch enroll/setup
+    if [ -z "$AUTO_ENROLL_SETUP" ]; then
+        explain "Once the configs are deposited and the open-bastion package is installed, the target still needs to run ob-enroll then ob-*-setup. Choose whether the installer runs them automatically, skips them entirely, or asks the admin before each step."
+        AUTO_ENROLL_SETUP=$(ask_choice "Auto-launch enroll/setup on target?" "yes|no|prompt" "prompt")
+    fi
+    case "$AUTO_ENROLL_SETUP" in
+        yes|no|prompt) ;;
+        *) die "Invalid auto_enroll_setup: $AUTO_ENROLL_SETUP" ;;
+    esac
+
+    # q9. Self-delete after deployment (shell only — irrelevant for Ansible)
+    if [ -z "$SELF_DELETE" ]; then
+        local _default="no"
+        [ "$CLIENT_SECRET_MODE" = "embedded" ] && _default="yes"
+        explain "Once the installer finishes successfully on the target, should it remove itself from disk? Useful when the client_secret is embedded so the artefact does not linger after deployment. Does not apply to the Ansible role."
+        SELF_DELETE=$(ask_choice "Self-delete the shell installer after success?" "yes|no" "$_default")
+    fi
+    case "$SELF_DELETE" in
+        yes|no) ;;
+        *) die "Invalid self_delete: $SELF_DELETE" ;;
+    esac
+
+    # q10. (Ansible only) Offer auto-approval of the device code via an LLNG cookie
+    # Only asked when the user requested an Ansible output — the shell installer
+    # is designed for one machine at a time, where a manual browser approval is
+    # acceptable. Ansible deploys to fleets, where it's the value-add.
+    if [ -n "$OUTPUT_ANSIBLE" ] && [ -z "$ANSIBLE_AUTO_APPROVE" ]; then
+        explain "When enabled, the generated Ansible role can approve the device code automatically by POSTing to LLNG with a session cookie. The cookie is asked for at every play run (vars_prompt) and never stored. Disable if you prefer manual browser approval, or if your operators don't have permission to run the LLNG verification endpoint."
+        ANSIBLE_AUTO_APPROVE=$(ask_choice "Enable Ansible auto-approval via LLNG cookie?" "yes|no" "no")
+    fi
+}
+
+# Validate / normalise after either YAML or questionnaire so behaviour is
+# identical for both paths.
+validate_inputs() {
+    [ -n "$DEPLOYMENT_SLUG" ]    || die "deployment_slug is required"
+    is_valid_slug "$DEPLOYMENT_SLUG" || die "Invalid deployment_slug: $DEPLOYMENT_SLUG"
+
+    [ -n "$SCENARIO" ]           || die "scenario is required"
+    is_valid_scenario "$SCENARIO" || die "Invalid scenario: $SCENARIO"
+    PAM_MODE=$(scenario_to_pam_mode "$SCENARIO")
+
+    [ -n "$PORTAL_URL" ]         || die "portal_url is required"
+    PORTAL_URL="${PORTAL_URL%/}"
+    is_valid_url "$PORTAL_URL"   || die "Invalid portal_url: $PORTAL_URL"
+    if [[ "$PORTAL_URL" != https://* ]] && [ "$ALLOW_HTTP" -ne 1 ]; then
+        die "Refusing non-HTTPS portal URL (use --allow-http to override)"
+    fi
+
+    : "${CLIENT_ID_POLICY:=modifiable}"
+    case "$CLIENT_ID_POLICY" in fixed|modifiable) ;; *) die "Invalid client_id_policy: $CLIENT_ID_POLICY" ;; esac
+    is_valid_client_id "$CLIENT_ID" || die "Invalid client_id: $CLIENT_ID"
+    if [ "$CLIENT_ID_POLICY" = "fixed" ] && [ -z "$CLIENT_ID" ]; then
+        die "client_id_policy=fixed requires a non-empty client_id"
+    fi
+
+    : "${CLIENT_SECRET_MODE:=prompt}"
+    case "$CLIENT_SECRET_MODE" in
+        none|prompt) ;;
+        embedded)
+            [ -n "$EMBEDDED_CLIENT_SECRET" ] || die "client_secret_mode=embedded requires embedded_client_secret to be set"
+            ;;
+        *) die "Invalid client_secret_mode: $CLIENT_SECRET_MODE" ;;
+    esac
+
+    : "${SERVER_GROUP_POLICY:=modifiable}"
+    case "$SERVER_GROUP_POLICY" in fixed|modifiable) ;; *) die "Invalid server_group_policy: $SERVER_GROUP_POLICY" ;; esac
+    is_valid_server_group "$SERVER_GROUP" || die "Invalid server_group: $SERVER_GROUP"
+    if [ "$SERVER_GROUP_POLICY" = "fixed" ] && [ -z "$SERVER_GROUP" ]; then
+        die "server_group_policy=fixed requires a non-empty server_group"
+    fi
+
+    [ -n "$TARGET_ROLE" ]        || die "target_role is required"
+    is_valid_target_role "$TARGET_ROLE" || die "Invalid target_role: $TARGET_ROLE"
+
+    # allowed_bastions is embedded verbatim into the generated artefacts (the
+    # self-extracting shell installer and the Ansible vars). Restrict it to safe
+    # identifier characters so a malicious or typo'd value cannot inject shell
+    # metacharacters ($(), backticks, quotes, newlines) into the installer that
+    # runs as root. bastion_ids are [A-Za-z0-9._-], separated by comma/space.
+    if [ -n "${ALLOWED_BASTIONS:-}" ] && ! [[ "$ALLOWED_BASTIONS" =~ ^[A-Za-z0-9._,\ -]+$ ]]; then
+        die "Invalid allowed_bastions (only letters, digits, '.', '_', '-', ',' and spaces allowed): $ALLOWED_BASTIONS"
+    fi
+
+    : "${AUTO_ENROLL_SETUP:=prompt}"
+    case "$AUTO_ENROLL_SETUP" in yes|no|prompt) ;; *) die "Invalid auto_enroll_setup: $AUTO_ENROLL_SETUP" ;; esac
+
+    if [ -z "$SELF_DELETE" ]; then
+        # Default: yes when secret is embedded (don't leave it on disk),
+        # otherwise no (safer default — explicit opt-in for destruction).
+        [ "$CLIENT_SECRET_MODE" = "embedded" ] && SELF_DELETE="yes" || SELF_DELETE="no"
+    fi
+    case "$SELF_DELETE" in yes|no) ;; *) die "Invalid self_delete: $SELF_DELETE" ;; esac
+
+    : "${ENABLE_HARDENING:=no}"
+    case "$ENABLE_HARDENING" in yes|no) ;; *) die "Invalid enable_hardening: $ENABLE_HARDENING" ;; esac
+    : "${ENABLE_AUDIT_TRACE:=no}"
+    case "$ENABLE_AUDIT_TRACE" in yes|no) ;; *) die "Invalid enable_audit_trace: $ENABLE_AUDIT_TRACE" ;; esac
+    : "${DISABLE_SESSION_RECORDER:=no}"
+    case "$DISABLE_SESSION_RECORDER" in yes|no) ;; *) die "Invalid disable_session_recorder: $DISABLE_SESSION_RECORDER" ;; esac
+    # Session recording does not exist on a backend; never emit the opt-out for it.
+    [ "$TARGET_ROLE" = "backend" ] && DISABLE_SESSION_RECORDER="no"
+
+    : "${ANSIBLE_AUTO_APPROVE:=no}"
+    case "$ANSIBLE_AUTO_APPROVE" in yes|no) ;; *) die "Invalid ansible_auto_approve: $ANSIBLE_AUTO_APPROVE" ;; esac
+
+    # Validate every service-account record (covers the YAML config path; the
+    # interactive loop validates as it goes). Reject duplicate account names.
+    if [ "${#SERVICE_ACCOUNTS_RECORDS[@]}" -gt 0 ]; then
+        local _rec _name
+        local -A _seen_sa=()
+        for _rec in "${SERVICE_ACCOUNTS_RECORDS[@]}"; do
+            validate_service_account_record "$_rec" || die "Invalid service account in config"
+            warn_service_account_unapproved "$_rec"
+            _name=$(_sa_field 1 "$_rec")
+            [ -n "${_seen_sa[$_name]:-}" ] && die "Duplicate service account name: $_name"
+            _seen_sa[$_name]=1
+        done
+    fi
+
+    if [ -z "$REPO_KEYRING" ]; then
+        if [ -f "$DEFAULT_REPO_KEYRING" ]; then
+            REPO_KEYRING="$DEFAULT_REPO_KEYRING"
+            log_info "Using default APT repo keyring: $REPO_KEYRING"
+        else
+            die "Missing --repo-keyring and default not found at $DEFAULT_REPO_KEYRING"
+        fi
+    fi
+    [ -f "$REPO_KEYRING" ] || die "Repo keyring not found: $REPO_KEYRING"
+    # (output-target presence is checked fail-fast in main(), before this.)
+}
+
+# Print a recap before doing any work — last chance for the admin to bail.
+print_recap() {
+    log_step "Build summary"
+    cat << EOF
+  Deployment slug:     $DEPLOYMENT_SLUG
+  Scenario:            $SCENARIO  (PAM mode $PAM_MODE)
+  Target role:         $TARGET_ROLE
+  Portal URL:          $PORTAL_URL
+  client_id:           ${CLIENT_ID:-<empty>}  (policy: $CLIENT_ID_POLICY)
+  client_secret_mode:  $CLIENT_SECRET_MODE
+  server_group:        ${SERVER_GROUP:-<empty>}  (policy: $SERVER_GROUP_POLICY)
+  Auto enroll/setup:   $AUTO_ENROLL_SETUP
+  Self-delete (shell): $SELF_DELETE
+  Hardening:           $ENABLE_HARDENING
+  Audit trace:         $ENABLE_AUDIT_TRACE
+  Session recording:   $([ "$TARGET_ROLE" = "backend" ] && echo "n/a (backend role)" || { [ "$DISABLE_SESSION_RECORDER" = "yes" ] && echo "disabled (opt-out)" || echo "enabled"; })
+  Allowed bastions:    ${ALLOWED_BASTIONS:-<any in same group>}
+  Service accounts:    $([ "${#SERVICE_ACCOUNTS_RECORDS[@]}" -gt 0 ] && { _names=""; for _r in "${SERVICE_ACCOUNTS_RECORDS[@]}"; do _names="${_names:+$_names, }$(_sa_field 1 "$_r")"; done; echo "$_names"; } || echo "<none>")
+  Ansible auto-approve: $ANSIBLE_AUTO_APPROVE
+  APT repo:            $APT_URL  (suite=$APT_SUITE component=$APT_COMPONENT)
+  Repo keyring:        $REPO_KEYRING
+  Output shell:        ${OUTPUT_SHELL:-<none>}
+  Output ansible:      ${OUTPUT_ANSIBLE:-<none>}
+  Sign with:           ${SIGN_WITH:-<none>}
+  Bundle:              $([ "$BUNDLE" = 1 ] && echo yes || echo no)
+  Dry-run:             $([ "$DRY_RUN" = 1 ] && echo yes || echo no)
+  TLS verification:    $([ "$INSECURE" = 1 ] && echo "DISABLED (--insecure)" || echo enabled)
+  Allow http://:       $([ "$ALLOW_HTTP" = 1 ] && echo yes || echo no)
+EOF
+    if [ "$CLIENT_SECRET_MODE" = "embedded" ]; then
+        log_warn "Embedded client_secret will be written in clear text into every generated artefact."
+        log_warn "Treat the resulting files as confidential — anyone who reads them reads the secret."
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# SSO discovery + asset fetch into a shared WORK_DIR.
+# Files produced:
+#   $WORK_DIR/ca.pub
+#   $WORK_DIR/krl       (empty if not fetched)
+#   $WORK_DIR/jwks.json (only for backend mode)
+# ─────────────────────────────────────────────────────────────────────────
+fetch_sso_assets() {
+    WORK_DIR=$(mktemp_dir)
+    log_info "Working directory: $WORK_DIR"
+
+    if ! sso_validate_url "$PORTAL_URL"; then
+        die "SSO validation failed; aborting."
+    fi
+
+    if ! sso_fetch_ca "$PORTAL_URL" "$WORK_DIR/ca.pub"; then
+        die "Failed to fetch SSH CA from portal."
+    fi
+
+    if [ "$SCENARIO" = "max-security" ] || [ "$PAM_MODE" = "E" ]; then
+        sso_fetch_krl "$PORTAL_URL" "$WORK_DIR/krl" || log_warn "KRL fetch failed (non-fatal)"
+    else
+        : > "$WORK_DIR/krl"
+    fi
+
+    if [ "$TARGET_ROLE" = "backend" ] || [ "$BUNDLE" = "1" ]; then
+        if ! sso_fetch_jwks "$PORTAL_URL" "$WORK_DIR/jwks.json"; then
+            die "JWKS fetch failed; backend artefacts require it."
+        fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Template expansion.
+#
+# Placeholder syntax: @@VAR_NAME@@. To remain safe against arbitrary
+# characters in values (slashes, ampersands, newlines, NULs would all
+# break naïve sed), we use a pure-bash expansion: read the template into
+# a single variable, then for each placeholder do ${var//@@K@@/$value}.
+# This is O(N*M) but template files are small and the variable count is
+# bounded, so it's negligible.
+# ─────────────────────────────────────────────────────────────────────────
+
+# render_template <template_path> <output_path> <mode>
+# Uses the placeholder map populated by build_placeholder_map() and stored
+# in the _PH_KEYS / _PH_VALS parallel arrays.
+_PH_KEYS=()
+_PH_VALS=()
+ph_set() {
+    _PH_KEYS+=("$1")
+    _PH_VALS+=("$2")
+}
+ph_reset() {
+    _PH_KEYS=()
+    _PH_VALS=()
+}
+
+render_template() {
+    local template="$1"
+    local outfile="$2"
+    local mode="$3"
+
+    [ -f "$template" ] || die "Template not found: $template"
+
+    # Read the entire template. The trailing-newline preservation trick
+    # ($'\n'$content … then strip) is overkill for our use case; mapfile
+    # would also work but loses trailing newlines.
+    local content
+    content=$(cat -- "$template")
+
+    local i k v
+    for ((i=0; i<${#_PH_KEYS[@]}; i++)); do
+        k="${_PH_KEYS[$i]}"
+        v="${_PH_VALS[$i]}"
+        # shellcheck disable=SC2295  # @@${k}@@ is a literal pattern, not a glob
+        content="${content//@@${k}@@/$v}"
+    done
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[DRY-RUN] Would render $template -> $outfile ($mode)"
+        return 0
+    fi
+
+    atomic_write "$outfile" "$mode" "$content"
+}
+
+# Mode-specific settings emitted into openbastion.conf as plain key=val lines.
+# Mirrors the working examples in local/etc/open-bastion/openbastion.conf and
+# the per-mode rules documented in doc/pam-modes.md.
+_mode_settings_conf() {
+    local mode="$1"
+    case "$mode" in
+        A)
+            cat << 'MODE'
+# Mode A — LLNG token only
+verify_ssl = true
+cache_enabled = true
+cache_ttl = 300
+MODE
+            ;;
+        B)
+            cat << 'MODE'
+# Mode B — LLNG token with Unix password fallback
+verify_ssl = true
+cache_enabled = true
+cache_ttl = 300
+MODE
+            ;;
+        C)
+            cat << 'MODE'
+# Mode C — SSH key with LLNG authorization
+verify_ssl = true
+cache_enabled = true
+cache_ttl = 300
+ssh_key_policy_enabled = true
+ssh_key_allowed_types = ed25519,rsa
+MODE
+            ;;
+        D)
+            cat << 'MODE'
+# Mode D — all methods accepted, LLNG authorization
+verify_ssl = true
+cache_enabled = true
+cache_ttl = 300
+MODE
+            ;;
+        E)
+            cat << 'MODE'
+# Mode E — maximum security (SSO certs only, sudo via LLNG token, KRL)
+verify_ssl = true
+min_tls_version = 13
+cache_enabled = true
+cache_ttl = 60
+ssh_key_policy_enabled = true
+ssh_key_allowed_types = ed25519,rsa
+cache_rate_limit_enabled = true
+cache_rate_limit_max_attempts = 3
+MODE
+            ;;
+    esac
+}
+
+# Emit each mode-specific setting as a top-level ob_* Ansible variable so
+# operators can override individual values via host_vars / extra-vars, and so
+# the templates/openbastion.conf.j2 `is defined` checks actually see them
+# (previously they were nested under ob_mode_settings: which made them
+# invisible to top-level Jinja2 lookups).
+_mode_settings_yaml() {
+    local mode="$1"
+    case "$mode" in
+        A|B)
+            cat << 'YML'
+ob_cache_enabled: true
+ob_cache_ttl: 300
+YML
+            ;;
+        C)
+            cat << 'YML'
+ob_cache_enabled: true
+ob_cache_ttl: 300
+ob_ssh_key_policy_enabled: true
+ob_ssh_key_allowed_types: "ed25519,rsa"
+YML
+            ;;
+        D)
+            cat << 'YML'
+ob_cache_enabled: true
+ob_cache_ttl: 300
+YML
+            ;;
+        E)
+            cat << 'YML'
+ob_min_tls_version: 13
+ob_cache_enabled: true
+ob_cache_ttl: 60
+ob_ssh_key_policy_enabled: true
+ob_ssh_key_allowed_types: "ed25519,rsa"
+ob_cache_rate_limit_enabled: true
+ob_cache_rate_limit_max_attempts: 3
+YML
+            ;;
+    esac
+}
+
+# Build the placeholder map for the current run. Called once per artefact
+# (so the bastion + backend cycle in --bundle gets fresh role-specific
+# values).
+build_placeholder_map() {
+    local role="$1"
+    local pam_mode bastion_backend_block bastion_allowlist_yaml ca_b64 krl_b64 gpg_b64 apt_sources
+    local mode_settings mode_settings_yaml max_security_bool
+    local auto_enroll_bool auto_setup_bool
+
+    pam_mode=$(scenario_to_pam_mode "$SCENARIO")
+
+    # Backend "accept only this bastion": enforcement is NOT in openbastion.conf
+    # anymore (the old bastion_jwt / LLNG_BASTION_JWT transport was broken —
+    # pam_getenv can't read a SendEnv var). It is replaced by certificate
+    # vouching: ob-backend-setup writes /etc/open-bastion/allowed_bastions and
+    # wires an AuthorizedPrincipalsCommand keyed on the cert key-id + the cert's
+    # source-address. So the conf block is empty; we only pass the allowlist to
+    # the Ansible role (which forwards it as ob-backend-setup --allowed-bastions).
+    bastion_backend_block=""
+    # Role-scoped: the allowlist is meaningful only for a backend. Keep it empty
+    # for bastion/standalone artefacts (matters in --bundle, where one config
+    # produces both roles — the bastion installer must NOT embed the allowlist).
+    local allowlist_for_role=""
+    if [ "$role" = "backend" ] && [ -n "${ALLOWED_BASTIONS:-}" ]; then
+        allowlist_for_role="$ALLOWED_BASTIONS"
+        bastion_allowlist_yaml="ob_bastion_allowed_bastions: \"${ALLOWED_BASTIONS}\""
+    else
+        bastion_allowlist_yaml=""
+    fi
+
+    mode_settings=$(_mode_settings_conf "$pam_mode")
+    mode_settings_yaml=$(_mode_settings_yaml "$pam_mode")
+    if [ "$pam_mode" = "E" ]; then
+        max_security_bool="true"
+    else
+        max_security_bool="false"
+    fi
+
+    case "$AUTO_ENROLL_SETUP" in
+        yes)    auto_enroll_bool="true";  auto_setup_bool="true" ;;
+        no)     auto_enroll_bool="false"; auto_setup_bool="false" ;;
+        prompt|*) auto_enroll_bool="false"; auto_setup_bool="false" ;;
+    esac
+
+    # Base64-encode the binary blobs that will be embedded in artefacts.
+    ca_b64=$(base64_file "$WORK_DIR/ca.pub")
+    if [ -s "$WORK_DIR/krl" ]; then
+        krl_b64=$(base64_file "$WORK_DIR/krl")
+    else
+        krl_b64=""
+    fi
+    gpg_b64=$(base64_file "$REPO_KEYRING")
+
+    apt_sources="deb [signed-by=/etc/apt/keyrings/open-bastion.gpg] ${APT_URL} ${APT_SUITE} ${APT_COMPONENT}"
+
+    ph_reset
+    ph_set OB_BUILDER_VERSION   "$VERSION"
+    ph_set BUILD_DATE           "$BUILD_DATE"
+    ph_set DEPLOYMENT_SLUG      "$DEPLOYMENT_SLUG"
+    ph_set SCENARIO             "$SCENARIO"
+    ph_set PAM_MODE             "$pam_mode"
+    ph_set TARGET_ROLE          "$role"
+    ph_set PORTAL_URL           "$PORTAL_URL"
+    ph_set CLIENT_ID            "$CLIENT_ID"
+    ph_set CLIENT_ID_POLICY     "$CLIENT_ID_POLICY"
+    ph_set CLIENT_SECRET_MODE     "$CLIENT_SECRET_MODE"
+    # Shell installer: embed the secret base64-encoded so shell metacharacters
+    # cannot break out of the bash literal.
+    local _emb_b64=""
+    [ -n "$EMBEDDED_CLIENT_SECRET" ] && _emb_b64=$(base64_string "$EMBEDDED_CLIENT_SECRET")
+    ph_set EMBEDDED_CLIENT_SECRET_B64 "$_emb_b64"
+    # Ansible defaults: the secret lands as a plain YAML string. No shell
+    # parsing happens, so clear-text is safe; the encoding concern only applies
+    # to the bash literal in the shell installer.
+    ph_set EMBEDDED_CLIENT_SECRET "$EMBEDDED_CLIENT_SECRET"
+    ph_set SERVER_GROUP         "$SERVER_GROUP"
+    ph_set SERVER_GROUP_POLICY  "$SERVER_GROUP_POLICY"
+    ph_set ALLOWED_BASTIONS     "$allowlist_for_role"
+    ph_set AUTO_ENROLL_SETUP    "$AUTO_ENROLL_SETUP"
+    ph_set SELF_DELETE          "$SELF_DELETE"
+    ph_set CA_SSH_PUB_B64       "$ca_b64"
+    ph_set CA_SSH_FINGERPRINT   "$SSO_CA_FINGERPRINT"
+    ph_set KRL_B64              "$krl_b64"
+    ph_set GPG_KEY_B64          "$gpg_b64"
+    ph_set APT_SOURCES_LIST     "$apt_sources"
+    ph_set BASTION_BACKEND_BLOCK     "$bastion_backend_block"
+    ph_set BASTION_ALLOWLIST_VARS_YAML "$bastion_allowlist_yaml"
+    ph_set MODE_SETTINGS         "$mode_settings"
+    ph_set MODE_SETTINGS_YAML    "$mode_settings_yaml"
+    ph_set MAX_SECURITY_BOOL     "$max_security_bool"
+    ph_set AUTO_ENROLL_BOOL      "$auto_enroll_bool"
+    ph_set AUTO_SETUP_BOOL       "$auto_setup_bool"
+
+    # Optional opt-in features. Shell installer consumes the yes/no strings;
+    # the Ansible role consumes the true/false boolean variants.
+    local _harden_bool="false" _audit_bool="false" _norec_bool="false"
+    [ "$ENABLE_HARDENING" = "yes" ]         && _harden_bool="true"
+    [ "$ENABLE_AUDIT_TRACE" = "yes" ]       && _audit_bool="true"
+    [ "$DISABLE_SESSION_RECORDER" = "yes" ] && _norec_bool="true"
+    ph_set ENABLE_HARDENING              "$ENABLE_HARDENING"
+    ph_set ENABLE_AUDIT_TRACE            "$ENABLE_AUDIT_TRACE"
+    ph_set DISABLE_SESSION_RECORDER      "$DISABLE_SESSION_RECORDER"
+    ph_set ENABLE_HARDENING_BOOL         "$_harden_bool"
+    ph_set ENABLE_AUDIT_TRACE_BOOL       "$_audit_bool"
+    ph_set DISABLE_SESSION_RECORDER_BOOL "$_norec_bool"
+
+    # Service accounts. Applies to every role. The shell installer embeds the
+    # rendered service-accounts.conf base64-encoded and writes it at 0600; the
+    # Ansible role carries it as a YAML block scalar in defaults. The
+    # openbastion.conf gets an explicit service_accounts_file directive (the C
+    # default is already that path, so the line is documentation/clarity).
+    local _sa_enabled_bool="false" _sa_conf="" _sa_conf_b64="" _sa_file_line="" _sa_defaults_yaml
+    if [ "${#SERVICE_ACCOUNTS_RECORDS[@]}" -gt 0 ]; then
+        _sa_enabled_bool="true"
+        _sa_conf=$(_render_service_accounts_conf)
+        _sa_conf_b64=$(base64_string "$_sa_conf")
+        _sa_file_line=$'# Service accounts (SSH-key-only local accounts)\nservice_accounts_file = /etc/open-bastion/service-accounts.conf'
+        # YAML block scalar: indent every conf line by two spaces under `|`.
+        local _indented
+        _indented=$(printf '%s\n' "$_sa_conf" | sed 's/^/  /')
+        _sa_defaults_yaml=$'ob_service_accounts_enabled: true\nob_service_accounts_content: |\n'"$_indented"
+    else
+        _sa_defaults_yaml='ob_service_accounts_enabled: false'$'\n''ob_service_accounts_content: ""'
+    fi
+    ph_set SERVICE_ACCOUNTS_ENABLED_BOOL  "$_sa_enabled_bool"
+    ph_set SERVICE_ACCOUNTS_CONF_B64      "$_sa_conf_b64"
+    ph_set SERVICE_ACCOUNTS_FILE_LINE     "$_sa_file_line"
+    ph_set SERVICE_ACCOUNTS_DEFAULTS_YAML "$_sa_defaults_yaml"
+
+    # Ansible-only: device-code auto-approval via LLNG session cookie.
+    local _auto_approve_bool="false" _vars_prompt_block=""
+    if [ "$ANSIBLE_AUTO_APPROVE" = "yes" ]; then
+        _auto_approve_bool="true"
+        _vars_prompt_block=$(cat << 'VARSPROMPT'
+  vars_prompt:
+    - name: ob_llng_cookie
+      prompt: |
+        LLNG session cookie used to auto-approve device codes.
+        Obtain with: llng --llng-server <portal> llng_cookie
+        Leave empty to skip auto-approval and fall back to manual browser approval.
+      private: true
+      unsafe: true
+      default: ""
+VARSPROMPT
+)
+    fi
+    ph_set ANSIBLE_AUTO_APPROVE_BOOL "$_auto_approve_bool"
+    ph_set ANSIBLE_VARS_PROMPT_BLOCK "$_vars_prompt_block"
+
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Shell installer rendering.
+# The template installer.sh.in references @@OPENBASTION_CONF_TEMPLATE@@,
+# which must contain the (already-expanded) contents of the conf template
+# so it can be emitted via a heredoc inside the generated script.
+# ─────────────────────────────────────────────────────────────────────────
+render_shell_installer() {
+    local outpath="$1" role="$2"
+    local installer_tpl="$TEMPLATES_DIR/shell/installer.sh.in"
+    local conf_tpl="$TEMPLATES_DIR/shell/openbastion.conf.in"
+
+    log_step "Rendering shell installer for role=$role"
+
+    if [ ! -f "$installer_tpl" ]; then
+        log_warn "Shell installer template not found: $installer_tpl"
+        log_warn "Templates are produced by a sibling task; producing a stub recap instead."
+        _render_stub_shell "$outpath" "$role"
+        return 0
+    fi
+
+    build_placeholder_map "$role"
+
+    # First, expand the conf template with the SAME placeholder map and
+    # stash the result into @@OPENBASTION_CONF_TEMPLATE@@ so the installer
+    # template can embed it via a heredoc.
+    local conf_content=""
+    if [ -f "$conf_tpl" ]; then
+        conf_content=$(cat -- "$conf_tpl")
+        local i k v
+        for ((i=0; i<${#_PH_KEYS[@]}; i++)); do
+            k="${_PH_KEYS[$i]}"
+            v="${_PH_VALS[$i]}"
+            # shellcheck disable=SC2295
+            conf_content="${conf_content//@@${k}@@/$v}"
+        done
+    fi
+    ph_set OPENBASTION_CONF_TEMPLATE "$conf_content"
+
+    render_template "$installer_tpl" "$outpath" "0755"
+
+    if [ "$DRY_RUN" != "1" ] && [ -n "$SIGN_WITH" ]; then
+        log_step "Signing $outpath with key $SIGN_WITH"
+        if ! gpg --detach-sign --armor -u "$SIGN_WITH" --output "${outpath}.sig" "$outpath"; then
+            die "GPG signing failed"
+        fi
+        log_info "Signature written to ${outpath}.sig"
+    fi
+}
+
+# Fallback emitted when the installer template hasn't been produced yet
+# by the sibling task. Writes a short, executable shell script that
+# explains how to use the captured config — enough to keep ob-builder
+# functional end-to-end before the template lands.
+_render_stub_shell() {
+    local outpath="$1" role="$2"
+    local pam_mode
+    pam_mode=$(scenario_to_pam_mode "$SCENARIO")
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[DRY-RUN] Would write stub installer to $outpath"
+        return 0
+    fi
+
+    local content
+    content=$(cat << EOF
+#!/bin/bash
+# Open Bastion bootstrap (stub) — generated by ob-builder $VERSION on $BUILD_DATE
+# Deployment: $DEPLOYMENT_SLUG  Scenario: $SCENARIO  Role: $role  PAM mode: $pam_mode
+#
+# This is a stub artefact: the installer.sh.in template was not present at
+# build time. The captured configuration is shown below; run ob-builder
+# again once admin-builder/templates/shell/installer.sh.in has been
+# provided to produce a real self-extracting installer.
+
+set -euo pipefail
+
+cat <<INFO
+Deployment slug:      $DEPLOYMENT_SLUG
+Scenario:             $SCENARIO  (PAM mode $pam_mode)
+Target role:          $role
+Portal URL:           $PORTAL_URL
+client_id:            ${CLIENT_ID:-<empty>} (policy: $CLIENT_ID_POLICY)
+client_secret_mode:   $CLIENT_SECRET_MODE
+server_group:         ${SERVER_GROUP:-<empty>} (policy: $SERVER_GROUP_POLICY)
+auto_enroll_setup:    $AUTO_ENROLL_SETUP
+CA fingerprint:       $SSO_CA_FINGERPRINT
+APT repo:             $APT_URL ($APT_SUITE $APT_COMPONENT)
+INFO
+EOF
+)
+    atomic_write "$outpath" "0755" "$content"
+    log_info "Stub installer written to $outpath"
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Ansible role rendering.
+# Mirrors the layout described in the design plan:
+#   <out>/playbook.yml
+#   <out>/roles/open-bastion/defaults/main.yml
+#   <out>/roles/open-bastion/files/open-bastion-ca.pub
+#   <out>/roles/open-bastion/files/open-bastion-krl       (if max-security)
+#   <out>/roles/open-bastion/files/open-bastion.gpg
+#   <out>/roles/open-bastion/files/jwks.json              (if backend/bundle)
+#   <out>/roles/open-bastion/templates/openbastion.conf.j2
+#   <out>/roles/open-bastion/tasks/main.yml
+#   <out>/roles/open-bastion/tasks/{bastion,backend,standalone}.yml
+#   <out>/roles/open-bastion/handlers/main.yml
+# Each template at $TEMPLATES_DIR/ansible/... ending in .in is expanded;
+# other files are copied as-is.
+# ─────────────────────────────────────────────────────────────────────────
+render_ansible_role() {
+    local outpath="$1" role="$2"
+    local src="$TEMPLATES_DIR/ansible"
+
+    log_step "Rendering Ansible role for role=$role"
+
+    if [ ! -d "$src" ]; then
+        log_warn "Ansible template tree not found: $src"
+        log_warn "Templates are produced by a sibling task; producing a minimal role stub."
+        _render_stub_ansible "$outpath" "$role"
+        return 0
+    fi
+
+    build_placeholder_map "$role"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[DRY-RUN] Would render Ansible role into $outpath"
+        return 0
+    fi
+
+    mkdir -p "$outpath"
+
+    # Walk the template tree.
+    # The source layout uses a short "role/" prefix; the rendered output
+    # follows the standard Ansible "roles/open-bastion/" layout. The
+    # remap below performs that translation transparently so the source
+    # tree stays compact while the artefact remains drop-in compatible
+    # with `ansible-playbook -i inventory playbook.yml`.
+    local rel f dest
+    while IFS= read -r -d '' f; do
+        rel="${f#"$src"/}"
+        # Drop the trailing ".in" suffix on templated files.
+        rel="${rel%.in}"
+        # Remap "role/<x>" to "roles/open-bastion/<x>".
+        case "$rel" in
+            role/*) rel="roles/open-bastion/${rel#role/}" ;;
+        esac
+        dest="$outpath/$rel"
+        if [[ "$f" == *.in ]]; then
+            render_template "$f" "$dest" "0644"
+        else
+            mkdir -p -- "$(dirname -- "$dest")"
+            atomic_write_from "$dest" "0644" "$f"
+        fi
+    done < <(find "$src" -type f -print0)
+
+    # Drop in the binary assets that templates can't carry.
+    local files_dir="$outpath/roles/open-bastion/files"
+    mkdir -p "$files_dir"
+    atomic_write_from "$files_dir/open-bastion-ca.pub" "0644" "$WORK_DIR/ca.pub"
+    if [ "$SCENARIO" = "max-security" ]; then
+        # Mode E always ships a KRL file: the role's mandatory "Deploy KRL" task
+        # references it unconditionally. An empty/unavailable upstream KRL is
+        # valid for a fresh portal with no revocations yet — ship an empty file
+        # (the refresh cron fills it in later), matching ob-bastion-setup's
+        # download_krl. Without this, Mode E deploys fail with "Could not find
+        # open-bastion-krl" whenever the portal KRL is still empty.
+        [ -f "$WORK_DIR/krl" ] || : > "$WORK_DIR/krl"
+        atomic_write_from "$files_dir/open-bastion-krl" "0644" "$WORK_DIR/krl"
+    fi
+    atomic_write_from "$files_dir/open-bastion.gpg" "0644" "$REPO_KEYRING"
+    if [ -f "$WORK_DIR/jwks.json" ]; then
+        atomic_write_from "$files_dir/jwks.json" "0644" "$WORK_DIR/jwks.json"
+    fi
+
+    log_info "Ansible role written to $outpath"
+}
+
+# Minimal Ansible stub when templates are missing — writes defaults/main.yml
+# only, so the consumer can wire it up to their own playbook once templates
+# land in the sibling task.
+_render_stub_ansible() {
+    local outpath="$1" role="$2"
+    local pam_mode
+    pam_mode=$(scenario_to_pam_mode "$SCENARIO")
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[DRY-RUN] Would write stub Ansible role to $outpath"
+        return 0
+    fi
+
+    local defaults_dir="$outpath/roles/open-bastion/defaults"
+    local files_dir="$outpath/roles/open-bastion/files"
+    mkdir -p "$defaults_dir" "$files_dir"
+
+    local defaults
+    defaults=$(cat << EOF
+---
+# Open Bastion role defaults — generated by ob-builder $VERSION on $BUILD_DATE
+# This is a stub: real tasks/templates are emitted once the Ansible template
+# tree at $TEMPLATES_DIR/ansible/ exists (sibling task).
+ob_deployment_slug: $DEPLOYMENT_SLUG
+ob_scenario: $SCENARIO
+ob_pam_mode: $pam_mode
+ob_role: $role
+ob_portal_url: $PORTAL_URL
+ob_client_id: ${CLIENT_ID:-}
+ob_client_id_policy: $CLIENT_ID_POLICY
+ob_client_secret_mode: $CLIENT_SECRET_MODE
+ob_server_group: ${SERVER_GROUP:-}
+ob_server_group_policy: $SERVER_GROUP_POLICY
+ob_auto_enroll_setup: $AUTO_ENROLL_SETUP
+ob_ca_fingerprint: ${SSO_CA_FINGERPRINT:-}
+ob_apt_url: $APT_URL
+ob_apt_suite: $APT_SUITE
+ob_apt_component: $APT_COMPONENT
+EOF
+)
+    atomic_write "$defaults_dir/main.yml" "0644" "$defaults"
+
+    atomic_write_from "$files_dir/open-bastion-ca.pub" "0644" "$WORK_DIR/ca.pub"
+    if [ "$SCENARIO" = "max-security" ]; then
+        # Mode E always ships a KRL file (empty is valid for a fresh portal).
+        [ -f "$WORK_DIR/krl" ] || : > "$WORK_DIR/krl"
+        atomic_write_from "$files_dir/open-bastion-krl" "0644" "$WORK_DIR/krl"
+    fi
+    atomic_write_from "$files_dir/open-bastion.gpg" "0644" "$REPO_KEYRING"
+    if [ -f "$WORK_DIR/jwks.json" ]; then
+        atomic_write_from "$files_dir/jwks.json" "0644" "$WORK_DIR/jwks.json"
+    fi
+    log_info "Stub Ansible role written to $outpath"
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Bundle handling.
+# When --bundle is set, the user-specified target_role drives ONE artefact
+# (call it primary) and we additionally render a backend artefact with
+# --output-shell/--output-ansible paths derived by appending -backend.
+# If the primary role is already 'backend', we instead render a paired
+# bastion artefact under -bastion. SSO assets (CA/JWKS) are fetched once.
+# ─────────────────────────────────────────────────────────────────────────
+_pair_path() {
+    local base="$1" suffix="$2"
+    case "$base" in
+        *.sh) printf '%s-%s.sh\n' "${base%.sh}" "$suffix" ;;
+        *)    printf '%s-%s\n' "$base" "$suffix" ;;
+    esac
+}
+
+run_outputs_for_role() {
+    local role="$1"
+    local shell_out="$2"
+    local ansible_out="$3"
+
+    [ -n "$shell_out" ]   && render_shell_installer "$shell_out" "$role"
+    [ -n "$ansible_out" ] && render_ansible_role    "$ansible_out" "$role"
+    # When one of the outputs is empty the corresponding `cmd && X` is
+    # false; the function would otherwise return non-zero and trip set -e
+    # in main(). Explicit success keeps execution flowing.
+    return 0
+}
+
+main() {
+    BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+    # Install the temp-dir cleanup trap from the parent shell BEFORE any
+    # mktemp_dir call. Doing it inside mktemp_dir would not work when
+    # mktemp_dir is invoked from a command substitution (subshell scope).
+    ob_init_tmpdir_trap
+
+    parse_args "$@"
+
+    # Fail fast: ob-builder produces nothing without an output target. Check
+    # this BEFORE the interactive questionnaire / config load so the admin is
+    # not made to answer every question only to be rejected at the end.
+    if [ -z "$OUTPUT_SHELL" ] && [ -z "$OUTPUT_ANSIBLE" ]; then
+        die "At least one of --output-shell or --output-ansible is required (nothing to produce otherwise). See --help."
+    fi
+
+    if [ -n "$CONFIG_FILE" ]; then
+        load_config "$CONFIG_FILE"
+    else
+        run_questionnaire
+    fi
+
+    validate_inputs
+
+    # If --bundle is set, we will fetch JWKS regardless of primary role.
+    print_recap
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_warn "DRY-RUN: no files will be written"
+    fi
+
+    fetch_sso_assets
+
+    # Primary artefact: the role the admin selected.
+    run_outputs_for_role "$TARGET_ROLE" "$OUTPUT_SHELL" "$OUTPUT_ANSIBLE"
+
+    # Bundle: also produce the companion role.
+    if [ "$BUNDLE" = "1" ]; then
+        local pair_role
+        if [ "$TARGET_ROLE" = "backend" ]; then
+            pair_role="bastion"
+        else
+            pair_role="backend"
+        fi
+        log_step "Bundle: also generating $pair_role artefact"
+        local pair_shell="" pair_ansible=""
+        [ -n "$OUTPUT_SHELL" ]   && pair_shell=$(_pair_path "$OUTPUT_SHELL" "$pair_role")
+        [ -n "$OUTPUT_ANSIBLE" ] && pair_ansible="${OUTPUT_ANSIBLE%/}-${pair_role}"
+        run_outputs_for_role "$pair_role" "$pair_shell" "$pair_ansible"
+    fi
+
+    log_step "Done"
+    [ -n "$OUTPUT_SHELL" ]   && log_info "Shell installer:  $OUTPUT_SHELL"
+    [ -n "$OUTPUT_ANSIBLE" ] && log_info "Ansible role:     $OUTPUT_ANSIBLE"
+    return 0
+}
+
+main "$@"

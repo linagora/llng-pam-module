@@ -1,0 +1,20 @@
+test_config 2 0.000486606
+test_rate_limiter 2 0.00123614
+test_audit_log 2 0.0268562
+test_client_context 2 0.00390168
+test_secret_store 2 0.169224
+test_nss_openbastion 2 0.000820854
+test_nss_cache 2 0.00141234
+test_path_validator 2 0.000352789
+test_username_validator 2 0.000367167
+test_ob_cert_proto 2 0.000357938
+test_ob_client 2 0.00193977
+test_auth_cache 2 1.14586
+test_token_manager 2 0.00384403
+test_crowdsec 2 0.00205761
+test_service_account 2 0.000433022
+test_token_cache 2 1.08884
+test_token_manager_io 2 0.00196918
+test_notify 2 2.0045
+test_ssh_key_policy 2 0.0020475
+---
