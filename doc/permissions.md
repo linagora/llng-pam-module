@@ -79,8 +79,9 @@ Written into `/etc/open-bastion/` by `ob-bastion-setup` / `ob-backend-setup` /
 - **Group-sync whitelist** — `allowed_managed_groups` limits which LLNG-managed
   groups may be created/modified locally (defense-in-depth); groups outside the
   pool are never touched. See [Configuration](configuration.md).
-- **Offline resilience** — `cache_enabled`, `cache_ttl`, and a shorter high-risk
-  TTL bound how long cached authorizations survive an SSO outage. See
+- **Offline resilience** — `auth_cache_enabled` turns the authorization cache on
+  or off, and `auth_cache_force_online` forces every check online; how long a
+  cached authorization survives an SSO outage is decided by the server. See
   [Offline mode](offline-mode.md) and [cache administration](offline-cache-admin.md).
 - **Containment hardening** — opt-in `--enable-hardening` adds logind
   `KillUserProcesses`, an `nproc` cap and `at`/`cron` allow-lists. See

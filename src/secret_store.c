@@ -211,7 +211,6 @@ secret_store_t *secret_store_init(const secret_store_config_t *config)
 
     /* Copy configuration */
     store->config.enabled = config->enabled;
-    store->config.use_keyring = config->use_keyring;
 
     if (config->store_dir) {
         store->config.store_dir = strdup(config->store_dir);
@@ -221,12 +220,6 @@ secret_store_t *secret_store_init(const secret_store_config_t *config)
 
     if (config->salt) {
         store->config.salt = strdup(config->salt);
-    }
-
-    if (config->keyring_name) {
-        store->config.keyring_name = strdup(config->keyring_name);
-    } else {
-        store->config.keyring_name = strdup("pam_llng");
     }
 
     /* Create store directory if needed */
@@ -262,7 +255,6 @@ void secret_store_destroy(secret_store_t *store)
 
     free(store->config.store_dir);
     free(store->config.salt);
-    free(store->config.keyring_name);
 
     /* Securely clear derived key */
     explicit_bzero(store->derived_key, sizeof(store->derived_key));

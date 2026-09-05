@@ -107,9 +107,7 @@ static int test_init(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -135,9 +133,7 @@ static int test_put_get(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -177,9 +173,7 @@ static int test_exists(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -210,9 +204,7 @@ static int test_delete(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -246,9 +238,7 @@ static int test_not_found(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -277,9 +267,7 @@ static int test_different_keys(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -318,9 +306,7 @@ static int test_overwrite(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -350,9 +336,7 @@ static int test_disabled(void)
     secret_store_config_t config = {
         .enabled = false,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -376,9 +360,7 @@ static int test_binary_data(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -418,9 +400,7 @@ static int test_error_message(void)
     secret_store_config_t config = {
         .enabled = false,
         .store_dir = (char *)test_store_dir,
-        .salt = NULL,
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = NULL
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -446,9 +426,7 @@ static int test_rotate_key_not_implemented(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);

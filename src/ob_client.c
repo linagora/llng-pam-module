@@ -884,9 +884,30 @@ int ob_introspect_token(ob_client_t *client,
 
     /* Build POST data with JWT client assertion (RFC 7523) */
     char *escaped_token = curl_easy_escape(client->curl, token, 0);
+    if (!escaped_token) {
+        snprintf(client->error, sizeof(client->error),
+                 "Failed to URL-encode token for introspection");
+        return -1;
+    }
+
     char postdata[8192];
     int len = snprintf(postdata, sizeof(postdata), "token=%s", escaped_token);
     curl_free(escaped_token);
+
+    /*
+     * snprintf() returns the length the result WOULD have had, not the number
+     * of bytes written. A token whose URL-encoded form does not fit therefore
+     * yields len >= sizeof(postdata): using it as an offset would point past
+     * the end of the buffer and make "sizeof(postdata) - len" wrap around to a
+     * huge size_t, so the append below would write outside the stack frame.
+     * Reject the request before that can happen.
+     */
+    if (len < 0 || (size_t)len >= sizeof(postdata)) {
+        explicit_bzero(postdata, sizeof(postdata));
+        snprintf(client->error, sizeof(client->error),
+                 "POST data too long for introspection");
+        return -1;
+    }
 
     /* Add JWT client assertion for authentication */
     struct curl_slist *headers = NULL;
@@ -895,6 +916,7 @@ int ob_introspect_token(ob_client_t *client,
                                                 client->client_secret,
                                                 url);
         if (!client_jwt) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
                      "Failed to generate JWT for introspection");
             return -1;
@@ -906,11 +928,13 @@ int ob_introspect_token(ob_client_t *client,
         free(client_jwt);
 
         if (!encoded_jwt) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
                      "Failed to URL-encode JWT for introspection");
             return -1;
         }
 
+        /* len is bounded by the check above, so this offset stays in range */
         int written = snprintf(postdata + len, sizeof(postdata) - len,
             "&client_id=%s"
             "&client_assertion_type=urn%%3Aietf%%3Aparams%%3Aoauth%%3A"
@@ -918,10 +942,11 @@ int ob_introspect_token(ob_client_t *client,
             "&client_assertion=%s", client->client_id, encoded_jwt);
         curl_free(encoded_jwt);
 
-        /* Check for buffer overflow */
+        /* Check for truncation (snprintf() itself stayed inside the buffer) */
         if (written < 0 || (size_t)written >= sizeof(postdata) - len) {
+            explicit_bzero(postdata, sizeof(postdata));
             snprintf(client->error, sizeof(client->error),
-                     "POST data buffer overflow in introspection");
+                     "POST data too long for introspection");
             return -1;
         }
         len += written;

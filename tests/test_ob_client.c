@@ -358,6 +358,69 @@ static void test_introspect_token_no_server(void)
 
     ob_client_destroy(client);
 }
+
+/*
+ * Regression test for the introspection POST-data stack overflow.
+ *
+ * ob_introspect_token() builds "token=<url-encoded token>" into an 8 KiB stack
+ * buffer with snprintf(), which returns the length the result WOULD have had.
+ * That return value was used unchecked as an offset for the client_assertion
+ * append: an over-long token made the offset point past the buffer and made
+ * the remaining-size argument (sizeof(postdata) - len) wrap around to a huge
+ * size_t, so the append wrote outside the stack frame. The upstream PAM cap of
+ * 8192 raw characters does not prevent this because curl_easy_escape() expands
+ * reserved characters 3x ("#" -> "%23").
+ *
+ * A token of 4096 '#' characters encodes to 12288 bytes, which cannot fit. The
+ * call must fail cleanly with a "too long" error, before any HTTP request.
+ */
+static void test_introspect_token_oversized_token(void)
+{
+    TEST("introspect_token rejects an oversized token");
+
+    ob_client_config_t config = {0};
+    config.portal_url = "https://localhost:1"; /* Invalid port, would fail fast */
+    config.client_id = "test-client";
+    config.client_secret = "test-secret";
+    config.timeout = 1;
+    config.verify_ssl = false;
+
+    ob_client_t *client = ob_client_init(&config);
+    if (!client) {
+        FAIL("Failed to init client");
+        return;
+    }
+
+    /* 4096 reserved chars -> 12288 bytes once URL-encoded (> 8192) */
+    const size_t token_len = 4096;
+    char *token = malloc(token_len + 1);
+    if (!token) {
+        FAIL("Out of memory");
+        ob_client_destroy(client);
+        return;
+    }
+    memset(token, '#', token_len);
+    token[token_len] = '\0';
+
+    ob_response_t response = {0};
+    int ret = ob_introspect_token(client, token, &response);
+    free(token);
+
+    const char *error = ob_client_error(client);
+
+    if (ret != -1) {
+        FAIL("Oversized token must be rejected");
+    } else if (!error || strstr(error, "too long") == NULL) {
+        /* A curl error here would mean the request was sent anyway, i.e. the
+         * body was built from a truncated/overflowed buffer. */
+        FAIL("Should fail with a 'POST data too long' error");
+    } else {
+        PASS();
+    }
+
+    ob_response_free(&response);
+    ob_client_destroy(client);
+}
 #endif /* ENABLE_DESKTOP_SSO */
 
 /*
@@ -484,6 +547,7 @@ int main(void)
     /* Introspection tests (JWT client assertion) */
     test_introspect_token_null_params();
     test_introspect_token_no_server();
+    test_introspect_token_oversized_token();
 #endif /* ENABLE_DESKTOP_SSO */
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
