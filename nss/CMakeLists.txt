@@ -1,7 +1,12 @@
 # CMakeLists.txt for libnss_openbastion
 
 # NSS library
-add_library(nss_openbastion SHARED libnss_openbastion.c)
+# str_utils.c is shared with the PAM module: the NSS config loader reuses
+# str_parse_bool_strict() so both parsers agree on what a boolean is (#183).
+add_library(nss_openbastion SHARED
+    libnss_openbastion.c
+    ../src/str_utils.c
+)
 
 target_include_directories(nss_openbastion PRIVATE
     ${CURL_INCLUDE_DIRS}

@@ -51,7 +51,7 @@ add_test(NAME test_nss_openbastion COMMAND test_nss_openbastion)
 # Regression test for the NSS in-memory LRU cache (expire-then-evict double free).
 # Includes libnss_openbastion.c directly to drive the static cache helpers, so it
 # needs the same libs as the module itself (curl/json-c/pthread).
-add_executable(test_nss_cache test_nss_cache.c)
+add_executable(test_nss_cache test_nss_cache.c ../src/str_utils.c)
 target_include_directories(test_nss_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
@@ -63,6 +63,22 @@ target_link_libraries(test_nss_cache
     pthread
 )
 add_test(NAME test_nss_cache COMMAND test_nss_cache)
+
+# Fail-closed boolean parsing in the NSS config loader (#183). Same pattern as
+# test_nss_cache: includes libnss_openbastion.c directly to reach the static
+# helper, so it needs the module's own libs.
+add_executable(test_nss_config test_nss_config.c ../src/str_utils.c)
+target_include_directories(test_nss_config PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CURL_INCLUDE_DIRS}
+    ${JSON_C_INCLUDE_DIRS}
+)
+target_link_libraries(test_nss_config
+    ${CURL_LIBRARIES}
+    ${JSON_C_LIBRARIES}
+    pthread
+)
+add_test(NAME test_nss_config COMMAND test_nss_config)
 
 # Test path validation
 add_executable(test_path_validator test_path_validator.c ../src/config.c ../src/str_utils.c)
