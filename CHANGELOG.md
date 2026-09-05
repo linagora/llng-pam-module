@@ -17,8 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accept only `true`/`yes`/`1`/`on` and `false`/`no`/`0`/`off`; anything else
   keeps the safe default, logs the offending key and value to syslog, and makes
   `config_validate()` refuse the configuration (new return code `-6`), which
-  aborts the PAM module instead of running with a guessed value. This matches
-  what `ob-cert-daemon` already did for the same key.
+  aborts the PAM module instead of running with a guessed value. Inline
+  comments (`verify_ssl = true # prod`) are stripped before that strict parse,
+  so an existing config file cannot become fatal on upgrade; a `#` inside a
+  token and the values of secret-bearing keys are never touched (see
+  `doc/configuration.md`). `ob-cert-daemon` was already safe on this key for a
+  different reason: it treats anything that is not an explicit `false`/`no` as
+  `true`, so a typo leaves verification ON rather than turning it off.
+- **The NSS module no longer disables TLS verification on a typo (#183).**
+  `nss_openbastion.conf` had its own parser with the same fail-open expression
+  (`strcmp(value, "true") == 0 || strcmp(value, "1") == 0`), so `verify_ssl =
+  TRUE` or `= yes` silently turned certificate verification OFF for every NSS
+  call to the portal. It now reuses `str_parse_bool_strict()`. Unlike the PAM
+  module it does not refuse to start — it is loaded into every process that
+  resolves a name, and failing there would make all SSO users unresolvable and
+  lock the host out — so it fails closed on the security property instead: an
+  unrecognised value is reported to syslog and the safe value (verification ON)
+  is used.
 - **The request-signing nonce is now covered by the HMAC (#188).** With
   `request_signing_secret` configured, the client sent `X-Nonce` alongside
   `X-Signature-256`, but the signed message was only

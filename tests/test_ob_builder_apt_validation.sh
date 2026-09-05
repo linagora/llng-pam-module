@@ -154,6 +154,16 @@ test_validate_inputs_rejects_hostile() {
     local ok=true
     local desc
 
+    # NOTE ON SCOPE: these payloads are never executed by this test, and are
+    # not meant to be. The injection point of #190 is the *generated installer
+    # running as root at install time*, which this suite does not run. What is
+    # asserted here is the only thing that can be asserted without a root
+    # sandbox: validate_inputs() refuses every one of these values, so nothing
+    # hostile ever reaches the template. An earlier revision also checked for a
+    # /tmp/ob-pwned canary; it could not fire (the payloads are inside single
+    # quotes and are passed to the validator as literal text), so it was
+    # removed rather than left looking like a stronger guarantee than it is.
+
     # apt_url: command substitution, backticks, quote break-out, newline, non-URL
     run_validate 'APT_URL=https://x/$(touch /tmp/ob-pwned)' && { ok=false; desc="apt_url \$(...)"; }
     run_validate 'APT_URL=https://x/`id`'                   && { ok=false; desc="apt_url backticks"; }
@@ -176,9 +186,6 @@ test_validate_inputs_rejects_hostile() {
         && { ok=false; desc="apt_component newline"; }
     run_validate 'APT_COMPONENT=main; id'                   && { ok=false; desc="apt_component semicolon"; }
     run_validate 'APT_COMPONENT='                           && { ok=false; desc="apt_component empty"; }
-
-    # None of the payloads above may have run.
-    [ -e /tmp/ob-pwned ] && { ok=false; desc="a payload executed (/tmp/ob-pwned exists)"; rm -f /tmp/ob-pwned; }
 
     $ok && test_pass "validate_inputs: rejects hostile apt_url / apt_suite / apt_component" \
          || test_fail "validate_inputs accepted a hostile value" "${desc:-}"
@@ -207,7 +214,85 @@ YML
     else
         test_fail "YAML config path did not refuse hostile apt_url (rc=$rc)" "$out"
     fi
-    rm -f /tmp/ob-pwned-yaml
+}
+
+# Test 7: what the validation is actually protecting.
+#
+# The three values land in @@APT_SOURCES_LIST@@, which the installer template
+# expands inside a double-quoted bash string passed to atomic_write:
+#
+#     atomic_write /etc/apt/sources.list.d/open-bastion.list \
+#         "@@APT_SOURCES_LIST@@
+#     " 0644
+#
+# render_template() is a literal substitution, so whatever survives validation
+# becomes bash source in a script that later runs as root. Executing that
+# script is not an option for a test (it installs packages and rewrites
+# /etc/apt), so we render the real template both ways and inspect the artefact
+# instead:
+#
+#   - validated values interpolate cleanly, leaving valid bash and exactly one
+#     sources.list entry;
+#   - the payload validate_inputs() rejects would land as a live command
+#     substitution, which is what makes that validation load-bearing.
+test_render_shows_what_validation_prevents() {
+    local tpl="$REPO_ROOT/admin-builder/templates/shell/installer.sh.in"
+    local ok=true desc=""
+
+    if [ ! -f "$tpl" ]; then
+        test_fail "installer template not found" "$tpl"
+        return
+    fi
+
+    # --- validated values survive interpolation unchanged -------------------
+    local good_out="$TEST_TMPDIR/installer-good.sh"
+    (
+        DRY_RUN=0
+        ph_reset
+        ph_set APT_SOURCES_LIST \
+            "deb [signed-by=/etc/apt/keyrings/open-bastion.gpg] https://packages.example.com/open-bastion trixie main"
+        render_template "$tpl" "$good_out" "0755"
+    ) >/dev/null 2>&1 || { ok=false; desc="render_template failed on valid values"; }
+
+    if [ -s "$good_out" ]; then
+        bash -n "$good_out" 2>/dev/null || { ok=false; desc="rendered installer is not valid bash"; }
+        grep -q 'https://packages.example.com/open-bastion trixie main' "$good_out" \
+            || { ok=false; desc="apt values not interpolated verbatim"; }
+        local deb_lines
+        deb_lines=$(grep -cF 'deb [signed-by=/etc/apt/keyrings/open-bastion.gpg]' "$good_out" || true)
+        [ "$deb_lines" -eq 1 ] || { ok=false; desc="expected 1 deb line, found $deb_lines"; }
+    else
+        ok=false; desc="${desc:-no installer rendered}"
+    fi
+
+    # --- the rejected payload would have reached root ----------------------
+    # Rendered, never executed: we only show that it lands as live shell
+    # syntax, i.e. the exposure the validator removes.
+    local bad_out="$TEST_TMPDIR/installer-bad.sh"
+    (
+        DRY_RUN=0
+        ph_reset
+        ph_set APT_SOURCES_LIST \
+            'deb [signed-by=/etc/apt/keyrings/open-bastion.gpg] https://x/$(id > /tmp/ob-would-run) trixie main'
+        render_template "$tpl" "$bad_out" "0755"
+    ) >/dev/null 2>&1
+
+    if [ -s "$bad_out" ]; then
+        grep -qF '$(id > /tmp/ob-would-run)' "$bad_out" \
+            || { ok=false; desc="payload did not reach the artefact; test premise is wrong"; }
+    else
+        ok=false; desc="${desc:-second render produced nothing}"
+    fi
+
+    # ... and the same payload must be refused long before that.
+    run_validate 'APT_URL=https://x/$(id > /tmp/ob-would-run)' \
+        && { ok=false; desc="validate_inputs accepted the payload"; }
+
+    # Nothing above executes anything, but be explicit about it.
+    [ -e /tmp/ob-would-run ] && { ok=false; desc="a payload ran (/tmp/ob-would-run exists)"; rm -f /tmp/ob-would-run; }
+
+    $ok && test_pass "render: validated values interpolate cleanly; the rejected payload would have been live shell" \
+         || test_fail "render/validation relationship not as expected" "${desc:-}"
 }
 
 echo "=========================================="
@@ -221,6 +306,7 @@ test_component_validator
 test_validate_inputs_accepts_defaults
 test_validate_inputs_rejects_hostile
 test_yaml_path_rejected
+test_render_shows_what_validation_prevents
 
 echo ""
 echo "=========================================="
