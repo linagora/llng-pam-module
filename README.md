@@ -115,7 +115,9 @@ See [Bastion Architecture](doc/bastion-architecture.md) and the
   - `ob-ssh` / `ob-scp` / `ob-sftp` scripts for seamless bastion connections and file transfers
 - **[Session recording](doc/session-recording.md)** _(optional)_:
   - Record all terminal I/O for audit compliance
-  - Multiple formats: script, asciinema, ttyrec
+  - Written by a root sink the recorded user cannot reach (`.typescript` +
+    `.json`; asciinema and ttyrec are planned, and currently fall back to
+    `script`)
   - Session metadata with unique IDs
 - **[Security hardening](doc/security.md)**:
   - Structured JSON audit logging with correlation IDs

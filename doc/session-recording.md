@@ -163,8 +163,8 @@ Each recording has an accompanying JSON metadata file (`.json`):
   "end_time": "2025-12-16T11:45:23Z",
   "status": "completed",
   "original_command": "",
-  "format": "asciinema",
-  "recording_file": "20251216-103000_550e8400-e29b-41d4-a716-446655440000.cast",
+  "format": "script",
+  "recording_file": "20251216-103000_550e8400-e29b-41d4-a716-446655440000.typescript",
   "hostname": "bastion.example.com",
   "version": "0.1.0"
 }
@@ -192,9 +192,9 @@ Each recording has an accompanying JSON metadata file (`.json`):
 ```
 /var/lib/open-bastion/sessions/
 ├── dwho/
-│   ├── 20251216-103000_550e8400-...-440000.cast
+│   ├── 20251216-103000_550e8400-...-440000.typescript
 │   ├── 20251216-103000_550e8400-...-440000.json
-│   ├── 20251216-143052_661f9511-...-551111.cast
+│   ├── 20251216-143052_661f9511-...-551111.typescript
 │   └── 20251216-143052_661f9511-...-551111.json
 ├── rtyler/
 │   └── ...
@@ -212,30 +212,29 @@ Each recording has an accompanying JSON metadata file (`.json`):
 
 ## Replaying Sessions
 
-### Asciinema format
+v1 writes `.typescript` payloads and a `.json` metadata file, and nothing else:
+`ob-record-sink` names every recording `<ts>_<session-id>.typescript` /
+`.json`. There are no `.cast` or `.ttyrec` files to replay, whatever `format`
+is set to.
 
-```bash
-# Terminal replay
-asciinema play /var/lib/open-bastion/sessions/dwho/20251216-103000_*.cast
-
-# Or use the web player (future LLNG integration)
-```
-
-### ttyrec format
-
-```bash
-ttyplay /var/lib/open-bastion/sessions/dwho/20251216-103000_*.ttyrec
-```
-
-### Script format
+### Script format (the only format in v1)
 
 ```bash
 # View the raw typescript
 cat /var/lib/open-bastion/sessions/dwho/20251216-103000_*.typescript
 
-# Replay with timing (if timing file exists)
-scriptreplay timing.txt recording.typescript
+# Recordings older than recording_compress_after_days are gzipped
+zcat /var/lib/open-bastion/sessions/dwho/20251216-103000_*.typescript.gz
 ```
+
+`scriptreplay` needs a timing file, which the sink does not produce; the
+typescript is a plain byte stream of the session.
+
+### Asciinema / ttyrec (planned)
+
+Once the sink protocol carries them, `asciinema play <file>.cast` and
+`ttyplay <file>.ttyrec` will apply. Until then `format = asciinema` and
+`format = ttyrec` fall back to `script` with a warning in the log.
 
 ## Security Considerations
 
@@ -402,12 +401,15 @@ cat /etc/open-bastion/session-recorder.conf
 
 ## Environment Variables
 
-| Variable               | Description                   |
-| ---------------------- | ----------------------------- |
-| `LLNG_RECORDER_CONFIG` | Config file path              |
-| `LLNG_SESSIONS_DIR`    | Override sessions directory   |
-| `LLNG_RECORDER_FORMAT` | Override recording format     |
-| `LLNG_MAX_SESSION`     | Override max session duration |
+The recorder reads `OB_*` variables. The `LLNG_*` names documented before 0.5.0
+are **not** read by anything: setting one is a silent no-op.
+
+| Variable             | Description                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------ |
+| `OB_RECORDER_CONFIG` | Config file path                                                                                 |
+| `OB_RECORDER_FORMAT` | Recording format (v1: `script` only — anything else falls back to it)                            |
+| `OB_MAX_SESSION`     | Max session duration in seconds                                                                  |
+| `OB_SESSIONS_DIR`    | **Ignored.** The storage path belongs to `ob-record-sink`; see the note on `sessions_dir` above. |
 
 ## Integration with LLNG
 

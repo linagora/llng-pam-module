@@ -285,8 +285,8 @@ All sessions through bastions are recorded:
 ```
 /var/lib/open-bastion/sessions/
 ├── dwho/
-│   ├── 20251216-103000_<uuid>.cast      # Recording
-│   └── 20251216-103000_<uuid>.json      # Metadata
+│   ├── 20251216-103000_<uuid>.typescript   # Recording
+│   └── 20251216-103000_<uuid>.json         # Metadata
 └── rtyler/
     └── ...
 ```
