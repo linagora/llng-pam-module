@@ -439,6 +439,69 @@ EOF
 chmod 644 /etc/open-bastion/nss_openbastion.conf
 ```
 
+#### NSS cache and LLNG outages
+
+`cache_ttl` is not only a load knob: since Open Bastion does not use `nscd`, it
+is the *only* thing standing between an LLNG outage and a host that can no
+longer resolve its users.
+
+The NSS module deliberately **never serves stale data**:
+
+- a file-cache entry older than `cache_ttl` is deleted the moment it is read,
+  rather than returned;
+- a transient LLNG failure (network error, 5xx, persistent 401) returns
+  `NSS_STATUS_UNAVAIL` and is *not* answered from the expired entry — this is
+  what stops a blip from being cached as an authoritative "no such user".
+
+The practical consequence is a cliff rather than a slope. Roughly `cache_ttl`
+after the last successful lookup, `getent passwd <user>` returns nothing and
+`sshd` can no longer map the account, so new logins for LLNG-backed users fail
+until the portal is reachable again. With the default of 300 s that is about
+five minutes of buffer. (This is a real change from the days when `nscd` was a
+dependency: its persistent cache and `reload-count` re-served known users for
+tens of minutes or longer.)
+
+Choose `cache_ttl` accordingly:
+
+| `cache_ttl` | Outage buffer | Deprovisioning lag |
+| ----------- | ------------- | ------------------ |
+| `300` (default) | ~5 min | a removed user stops resolving within ~5 min |
+| `3600` | ~1 h | up to ~1 h |
+| `86400` (maximum) | ~24 h | up to ~24 h |
+
+```bash
+# Raise the buffer to one hour on hosts where a short LLNG outage must not
+# lock out new logins. Accepted range: 0-86400 seconds.
+sed -i 's/^cache_ttl = .*/cache_ttl = 3600/' /etc/open-bastion/nss_openbastion.conf
+```
+
+Raising it is safe with respect to *revocation*, which does not depend on this
+cache: PAM re-checks authorization at each login (against its own, separate
+cache), and the SSH CA KRL revokes certificates independently. A stale passwd
+entry lets a name resolve; it does not grant access.
+
+What a longer TTL delays is how quickly a user **deprovisioned in LLNG** stops
+appearing in `getent passwd`. Note the distinction:
+
+- changes this host performs itself — user creation, `open-bastion-sudo` and
+  managed-group membership changes — invalidate the user's cache entry
+  immediately, so the TTL never applies to them;
+- a deletion made upstream in LLNG is not observed locally, so there the TTL
+  is genuinely the upper bound on how long the name keeps resolving.
+
+Two things that do **not** substitute for this buffer, and should not be
+confused with it:
+
+- `offline_cache_ttl` (in `openbastion.conf`) covers PAM *authorization*
+  during an outage. It does nothing if NSS can no longer resolve the user in
+  the first place; the two need to be sized together. Note that the `cache_ttl`
+  discussed here is the one in `nss_openbastion.conf`; `openbastion.conf` has
+  its own unrelated `cache_ttl` for the PAM authorization cache.
+- Service accounts declared in `/etc/open-bastion/service-accounts.conf` are
+  resolved locally without contacting LLNG, so they keep working regardless of
+  `cache_ttl`. Keeping one break-glass service account is the recommended
+  backstop for a prolonged outage.
+
 ### Step 4: Configure NSS
 
 ```bash
@@ -450,11 +513,13 @@ chmod 644 /etc/open-bastion/nss_openbastion.conf
 
 sed -i 's/^passwd:.*/passwd: files openbastion/' /etc/nsswitch.conf
 
-# No name-service cache daemon is required. The NSS module maintains its own
-# in-memory and on-disk cache, so the new resolver takes effect immediately.
-# (nscd is intentionally NOT used: it loaded this multithreaded NSS module
-# and crashed in the NSS path; PAM invalidates the module's file cache
-# directly when users or group memberships change.)
+# No name-service cache daemon is required or wanted. The NSS module keeps its
+# own in-memory and on-disk cache (/var/cache/nss_llng), so nscd would only
+# add a redundant second cache in front of it -- and nscd is deprecated
+# upstream and absent from modern distributions. PAM invalidates the module's
+# file cache directly when users or group memberships change, so the new
+# resolver takes effect immediately.
+# See "NSS cache and LLNG outages" below for the cache_ttl trade-off.
 ```
 
 ### Step 5: Enroll Server

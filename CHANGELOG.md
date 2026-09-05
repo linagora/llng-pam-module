@@ -22,6 +22,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reporting run as intended. The verify-response parser was extracted
   (`ob_parse_verify_response`) and is now covered by unit tests.
 
+### Removed
+
+- **`nscd` is no longer a dependency.** The NSS module keeps its own in-memory
+  and cross-process on-disk cache (`/var/cache/nss_llng`), so a separate
+  name-service cache daemon adds nothing: it only interposes a second cache in
+  front of one that already exists. `nscd` is also deprecated upstream and
+  absent from modern distributions (Fedora builds glibc with `--disable-nscd`
+  and dropped the package; other distributions have followed, superseding it
+  with `systemd-resolved` and SSSD), so requiring it made the package harder to
+  install rather than safer. The `Depends:` (Debian) and `Requires:` (RPM) are
+  dropped, the demo/quick-start Docker environments no longer install or start
+  it, and the documentation no longer instructs restarting it. Existing hosts
+  are left alone: with the dependency gone, `apt autoremove` reclaims `nscd` if
+  nothing else wants it, and an administrator who runs it deliberately for
+  `hosts`/`services` keeps it. (Historically `nscd` also crashed with `SIGABRT`
+  in this module's NSS path; that was a double-free in the module itself and
+  was fixed in 0.6.1 — it is no longer a reason to avoid `nscd`, only the
+  reason the redundancy was noticed.)
+- **The PAM module no longer forks `nscd --invalidate`.** It invalidates the NSS
+  module's own file-cache entries directly (by name, and by uid for newly
+  created users), so user and group-membership changes stay visible
+  immediately. Entries are removed with `unlinkat()` relative to directory
+  file descriptors opened `O_NOFOLLOW` and verified root-owned, so no path
+  component can be swapped for a symlink.
+
+### Changed
+
+- **Resilience to an LLNG outage no longer depends on `nscd`, and the buffer is
+  shorter.** `nscd`'s persistent cache, combined with its `reload-count`,
+  effectively re-served known users for the length of an outage. The NSS
+  module's own cache expires at `cache_ttl` (default **300 s**) and never
+  serves stale data: an expired file-cache entry is deleted on read, and a
+  transient LLNG failure returns `NSS_STATUS_UNAVAIL` rather than falling back
+  to the expired entry. On a host where LLNG becomes unreachable, `getent
+  passwd <user>` therefore stops resolving roughly `cache_ttl` after the last
+  successful lookup, and `sshd` can no longer map the user. Sites that want a
+  longer buffer should raise `cache_ttl` in
+  `/etc/open-bastion/nss_openbastion.conf` (accepted range 0–86400 s); see
+  "NSS cache and LLNG outages" in the admin guide for the trade-off against
+  how quickly a deprovisioned user disappears.
+
 ## [0.6.2] - 2026-06-25
 
 Hotfix for 0.6.1: the Debian package failed to install/upgrade.
@@ -64,22 +105,6 @@ keeps already-configured bastions working across plain package upgrades.
   enables `ob-record.socket` when session recording is on. Backends and
   unconfigured hosts are untouched. Re-running `ob-bastion-setup` remains the
   documented recovery and is no longer required merely to survive an upgrade.
-
-### Removed
-
-- **`nscd` is no longer used.** It loaded the multithreaded `libnss_openbastion`
-  NSS module (which does `curl`/TLS/JSON) and crashed with `SIGABRT` every few
-  hours in the NSS path, raising Wazuh `ANOM_ABEND` alerts; it is also an
-  upstream-deprecated anti-pattern for network-backed NSS modules. The module
-  keeps its own in-memory and on-disk cache (`/var/cache/nss_llng`), so `nscd`
-  was redundant. The package dependency is dropped, the demo/quick-start
-  Docker environments no longer install or start it, and the documentation no
-  longer instructs restarting it. On `apt upgrade` the `postinst` now
-  `systemctl disable --now nscd` on hosts where it exists (stop + disable, not
-  mask — reversible) and explains why. The PAM module no longer forks
-  `nscd --invalidate`; instead it invalidates the NSS module's own file-cache
-  entries directly (by name, and by uid for newly created users) so user and
-  group-membership changes remain visible immediately.
 
 ## [0.6.0] - 2026-06-22
 
