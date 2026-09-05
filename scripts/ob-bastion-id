@@ -3,9 +3,11 @@
 # ob-bastion-id - Print this bastion's identifier (as seen by backends)
 #
 # After a bastion has been enrolled (ob-enroll + ob-bastion-setup) it can ask
-# LLNG to issue a bastion JWT (POST /pam/bastion-token). The 'bastion_id'
-# claim in that JWT is the value backends consult when their
-# bastion_jwt_allowed_bastions whitelist is set.
+# LLNG for its own identity (POST /pam/bastion-token with probe:true). The
+# returned 'bastion_id' is a synthetic per-device identity assigned by the
+# portal at enrolment -- NOT the OIDC client_id, which identifies a project.
+# It is the value backends list in /etc/open-bastion/allowed_bastions, and
+# that ob-ssh-principals checks against the certificate key-id before PAM runs.
 #
 # This utility issues a probe request, decodes the returned JWT, and prints
 # the bastion_id (or the full claims with --verbose). Useful when configuring
@@ -42,11 +44,17 @@ usage() {
     cat <<EOF
 $PROG_NAME $VERSION
 
-Print this bastion's identifier (the 'bastion_id' claim it gets in JWTs from
-LLNG). Run on a bastion that has been enrolled and configured.
+Print this bastion's identifier (the 'bastion_id' LLNG assigned it at
+enrolment). Run on a bastion that has been enrolled and configured.
 
-Backends consult this value when their /etc/open-bastion/openbastion.conf
-sets 'bastion_jwt_allowed_bastions = id1,id2,...'.
+The bastion_id is a synthetic per-device identity, NOT the OIDC client_id:
+two bastions enrolled with the same client_id have different bastion_ids,
+and re-enrolling a bastion gives it a new one.
+
+Backends list these values, one per line (commas and semicolons also work),
+in /etc/open-bastion/allowed_bastions -- managed by
+'ob-backend-setup --allowed-bastions <ids>'. An empty file accepts any
+vouched bastion; an absent file is legacy non-enforcing mode.
 
 USAGE:
   $PROG_NAME [OPTIONS]

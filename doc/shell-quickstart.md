@@ -46,9 +46,13 @@ ob-builder --output-shell bootstrap-bastion.sh
 ```
 
 The questionnaire asks for: a deployment slug, the security scenario, the SSO
-portal URL, the OIDC `client_id` (use `ob-bastion` — a bastion's id _is_ its
-client_id), the client_secret mode, the server group, and the **target role**
-(answer `bastion`).
+portal URL, the OIDC `client_id` (use `ob-bastion`), the client_secret mode, the
+server group, and the **target role** (answer `bastion`).
+
+> The `client_id` is **not** the bastion's id. A bastion's `bastion_id` is a
+> synthetic per-device identity the portal assigns at enrolment, so it only
+> exists once the bastion has been deployed — read it with `ob-bastion-id` on
+> the host (see [step 2](#step-2--deploy-the-bastion)).
 
 Then generate the **backend** installer the same way:
 
@@ -58,10 +62,12 @@ ob-builder --output-shell bootstrap-backend.sh
 
 Answer `backend` to the target-role question. Backends then get one extra
 prompt — **"Allowed bastion ids"** — listing the bastions allowed to reach this
-backend. Enter `ob-bastion` (the bastion you built above). Leave it empty to
-accept any bastion in the same server group, or fill it in later by editing the
-backend's config. `ob-builder` even reminds you: deploy the bastion first and
-run `sudo ob-bastion-id` on it to read the exact value.
+backend. These are `bastion_id` values, not client ids, and they only exist
+after the bastion is enrolled: the usual order is to leave the prompt empty (any
+vouched bastion in the same server group is then accepted) or to fill it in
+later by editing `/etc/open-bastion/allowed_bastions` on the backend. `ob-builder`
+says so too: deploy the bastion first and run `sudo ob-bastion-id` on it to read
+the exact value.
 
 Each `bootstrap-*.sh` is self-contained: it embeds the SSO CA key, the scenario,
 the client_id and the APT repo config. Inspect what is baked in without making
@@ -92,12 +98,16 @@ The installer configures the APT/YUM repo, installs `open-bastion`, writes
 Grant — it prints a URL + code to approve in your browser), then runs
 `ob-bastion-setup`, which locks SSH down to SSO-issued certificates.
 
-Confirm the bastion's id (this is the value the backends must allow — it equals
-the bastion's `client_id`):
+Read the bastion's id — the value the backends must allow. It is assigned by the
+portal at enrolment (a synthetic per-device identity), **not** the `client_id`
+you answered earlier, so the only way to obtain it is to ask:
 
 ```bash
-ssh bastion-1 ob-bastion-id   # -> ob-bastion
+ssh bastion-1 sudo ob-bastion-id   # -> e.g. 8f3c1a9e-...   (server-assigned)
 ```
+
+Re-enrolling this bastion changes the value; update every backend's
+`/etc/open-bastion/allowed_bastions` when you do.
 
 > **Run setup last, while port 22 still answers.** `ob-bastion-setup` /
 > `ob-backend-setup` lock port 22 down to SSO certificates, so the local admin
