@@ -67,9 +67,8 @@ RUN mkdir -p build && cd build && \
 # Configure PAM for SSH (Mode E: certificate only)
 RUN echo '# PAM configuration for SSH Backend with Open Bastion (Mode E)\n\
 # Authentication via SSH certificates only (not PAM)\n\
-# Fail closed: success=1 jumps over the pam_deny backstop on the intended\n\
-# (certificate) path; anything else falls through to pam_deny.\n\
-auth       [success=1 default=ignore] pam_permit.so\n\
+# Authentication is refused: sshd never calls pam_authenticate() on the\n\
+# certificate path, so only password/keyboard-interactive auth reaches here.\n\
 auth       required     pam_deny.so\n\
 \n\
 # Authorization - check with Open Bastion\n\

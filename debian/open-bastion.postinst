@@ -46,11 +46,10 @@ EOF
             ;;
         mode-c)
             cat << 'EOF'
-# AUTHENTICATION: SSH keys only (handled by sshd, not PAM)
-# Fail closed: pam_permit succeeds and jumps over pam_deny (success=1 skips
-# exactly the next module); anything else falls through to pam_deny, so this
-# stack can never be an unconditional "yes" if pam_permit is missing or errors.
-auth       [success=1 default=ignore] pam_permit.so
+# AUTHENTICATION: refused. SSH keys/certificates are validated by sshd, which
+# never calls pam_authenticate() on that path, so this stack is only reached by
+# password or keyboard-interactive authentication -- which this mode does not
+# allow. pam_deny returns PAM_AUTH_ERR (a plain authentication failure).
 auth       required     pam_deny.so
 EOF
             ;;
@@ -95,11 +94,17 @@ EOF
             ;;
         mode-c)
             cat << 'EOF'
-# AUTHENTICATION: Permit (for SSH key scenarios)
-# Fail closed: success=1 jumps over the pam_deny backstop on the intended
-# path; any other pam_permit result falls through to pam_deny.
+# AUTHENTICATION: Permit -- this mode grants sudo without a password (the login
+# control is the SSH key/certificate). Canonical fail-closed permit: pam_permit
+# returns PAM_SUCCESS and success=1 skips exactly one module (the pam_deny
+# below), landing on the trailing pam_permit which records the success. If
+# pam_permit is missing or errors, default=ignore falls through to pam_deny and
+# the stack refuses. The trailing pam_permit is mandatory: a jump that lands
+# past the end of the stack records no positive result and PAM returns
+# PAM_PERM_DENIED, so the jump/deny pair alone would deny every sudo.
 auth       [success=1 default=ignore] pam_permit.so
 auth       required     pam_deny.so
+auth       required     pam_permit.so
 EOF
             ;;
     esac

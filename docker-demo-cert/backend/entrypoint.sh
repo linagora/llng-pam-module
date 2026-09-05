@@ -263,9 +263,8 @@ fi
 # Configure PAM to create home directories on first login
 cat > /etc/pam.d/sshd << EOF
 # PAM configuration for SSH with Open Bastion
-# Fail closed: success=1 jumps over the pam_deny backstop on the intended
-# (certificate) path; anything else falls through to pam_deny.
-auth       [success=1 default=ignore] pam_permit.so
+# Authentication is refused: sshd never calls pam_authenticate() on the
+# certificate path, so only password/keyboard-interactive auth reaches here.
 auth       required     pam_deny.so
 account    required     pam_openbastion.so
 session    required     pam_unix.so

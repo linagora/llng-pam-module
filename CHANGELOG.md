@@ -9,22 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Generated certificate-mode PAM stacks are now fail-closed (#180).** The
-  `auth` path of the stacks written for the certificate/SSH-key modes consisted
-  of a single `auth required pam_permit.so`, so `pam_authenticate()` returned
-  success unconditionally and logged nothing. The certificate path never calls
-  `pam_authenticate()`, but sshd does for password and keyboard-interactive
-  authentication: on a host where those are still enabled — which is what
-  `apt install open-bastion` leaves behind, since the postinst writes the PAM
-  stack but never touches `sshd_config` — any password authenticated any
-  account the `account` phase approved. Every generated stack (Debian postinst,
-  `ob-bastion-setup`, `ob-backend-setup`, the demo images) and every documented
-  stack now uses `auth [success=1 default=ignore] pam_permit.so` followed
-  immediately by `auth required pam_deny.so`, so anything that falls through is
-  denied. `PasswordAuthentication no` / `KbdInteractiveAuthentication no` in
+- **Certificate-mode sshd PAM stacks now refuse password authentication
+  (#180).** The `auth` path of the stacks written for the certificate/SSH-key
+  modes consisted of a single `auth required pam_permit.so`, so
+  `pam_authenticate()` returned success unconditionally. The certificate path
+  never calls `pam_authenticate()` (sshd only runs `pam_acct_mgmt()` for a
+  pubkey/certificate login), but sshd *does* call it for password and
+  keyboard-interactive authentication: on a host where those are still enabled
+  — which is what `apt install open-bastion` leaves behind, since the postinst
+  writes the PAM stack but never touches `sshd_config` — any password
+  authenticated any account the `account` phase approved.
+
+  Every generated `/etc/pam.d/sshd` for those modes (Debian postinst `mode-c`,
+  `ob-bastion-setup`, `ob-backend-setup`, the `docker-demo-cert` and
+  `docker-demo-maxsec` images) and every stack documented for copy-paste now
+  has a single `auth required pam_deny.so`: an explicit, unconditional refusal
+  that returns `PAM_AUTH_ERR`. Certificate logins are unaffected. Setting
+  `PasswordAuthentication no` / `KbdInteractiveAuthentication no` in
   `sshd_config` — written by both setup scripts, but *not* by the package
-  postinst — remains what keeps passwords out of these modes; the doc now says
-  so explicitly.
+  postinst — is still recommended so sshd never prompts at all.
+
+  The `mode-c` `/etc/pam.d/sudo` stack keeps permitting, because `mode-c` is
+  the "SSH keys, sudo without a password" scenario. It now uses the canonical
+  fail-closed permit — `auth [success=1 default=ignore] pam_permit.so`, then
+  `auth required pam_deny.so`, then `auth required pam_permit.so` — which
+  succeeds on the intended path but refuses if `pam_permit` is missing or
+  errors. The trailing `pam_permit` is required: without it the jump lands past
+  the end of the stack with no positive result recorded and PAM returns
+  `PAM_PERM_DENIED`, which would have broken sudo outright.
+
+  `tests/test_ob_pam_runtime.sh` (new) now calls `pam_authenticate()` on each
+  generated stack and asserts the verdict, instead of only checking the text.
+
+  **Upgrading:** the postinst only rewrites `/etc/pam.d/sshd` and
+  `/etc/pam.d/sudo` when the `open-bastion/pam-mode` debconf answer is not
+  `none`. The recommended install path (`apt install` then `ob-bastion-setup` /
+  `ob-backend-setup`) leaves it at `none`, so `apt upgrade` will *not* replace
+  the stack those scripts wrote. On such a host, re-run `ob-bastion-setup` or
+  `ob-backend-setup` (they back the old files up first), or edit
+  `/etc/pam.d/sshd` by hand and replace `auth required pam_permit.so` with
+  `auth required pam_deny.so`. Check with
+  `grep '^auth' /etc/pam.d/sshd`.
 
 ### Fixed
 
