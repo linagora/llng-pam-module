@@ -171,10 +171,18 @@ static int test_file_cache_save_privileges(void)
     struct stat st;
     if (geteuid() != 0) {
         /* Unprivileged: nothing at all must have been created. */
-        if (stat(CACHE_DIR, &st) == 0) {
+        int created = (stat(CACHE_DIR, &st) == 0);
+        /*
+         * Clean up unconditionally rather than only on the failure path: an
+         * unlink()/rmdir() of a path that was never created simply fails and
+         * is ignored, so the removal is not gated on the stat() above. That
+         * keeps this a plain best-effort cleanup instead of a check-then-act
+         * on a path an attacker could swap in between (cpp/toctou-race-condition).
+         */
+        unlink(entry);
+        rmdir(CACHE_DIR);
+        if (created) {
             fprintf(stderr, "unprivileged file_cache_save created %s\n", CACHE_DIR);
-            unlink(entry);
-            rmdir(CACHE_DIR);
             return 0;
         }
         return 1;
