@@ -19,11 +19,19 @@
 
 #include "audit_log.h"
 
+/*
+ * Soft cap on the JSON audit log. Crossing it does not drop events; it emits a
+ * single syslog warning per process so an operator without the shipped
+ * logrotate snippet notices before the filesystem fills up.
+ */
+#define AUDIT_LOG_SIZE_WARN_BYTES  (100LL * 1024 * 1024)
+
 /* Audit context structure */
 struct audit_context {
     audit_config_t config;
     pthread_mutex_t lock;
     char hostname[256];
+    bool size_warning_logged;   /* One-shot guard for the size warning */
 };
 
 /* Event type strings */
@@ -108,7 +116,7 @@ audit_context_t *audit_init(const audit_config_t *config)
 
     /* Open syslog if needed */
     if (ctx->config.log_to_syslog) {
-        openlog("pam_llng", LOG_PID, LOG_AUTH);
+        openlog("pam_openbastion", LOG_PID, LOG_AUTH);
     }
 
     return ctx;
@@ -242,7 +250,7 @@ int audit_log_event(audit_context_t *ctx, const audit_event_t *event)
                            json_object_new_string(audit_event_type_str(event->event_type)));
     json_object_object_add(jobj, "correlation_id",
                            json_object_new_string(event->correlation_id));
-    json_object_object_add(jobj, "module", json_object_new_string("pam_llng"));
+    json_object_object_add(jobj, "module", json_object_new_string("pam_openbastion"));
     json_object_object_add(jobj, "host", json_object_new_string(ctx->hostname));
     json_object_object_add(jobj, "user",
                            json_object_new_string(event->user ? event->user : ""));
@@ -280,9 +288,22 @@ int audit_log_event(audit_context_t *ctx, const audit_event_t *event)
         /*
          * Security: open file first with O_NOFOLLOW to prevent symlink attacks,
          * then use fstat on the opened fd to avoid TOCTOU race conditions.
+         *
+         * We try O_EXCL first so we can tell "we created it" from "it already
+         * existed". Only on creation do we force the mode, so that an
+         * administrator who deliberately tightened the log to 0600 keeps it:
+         * the previous unconditional fchmod(0640) re-opened it to the group on
+         * every single event.
          */
+        bool created = false;
         int fd = open(ctx->config.log_file,
-                      O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0640);
+                      O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW, 0640);
+        if (fd >= 0) {
+            created = true;
+        } else {
+            fd = open(ctx->config.log_file,
+                      O_WRONLY | O_APPEND | O_NOFOLLOW, 0640);
+        }
         if (fd >= 0) {
             struct stat st;
             bool permissions_ok = true;
@@ -302,7 +323,32 @@ int audit_log_event(audit_context_t *ctx, const audit_event_t *event)
             }
 
             if (permissions_ok) {
-                fchmod(fd, 0640);
+                /* Apply the intended mode only when we just created the file,
+                 * so umask cannot leave it wider than 0640, and an existing
+                 * stricter mode is preserved. */
+                if (created) {
+                    (void)fchmod(fd, 0640);
+                }
+
+                /*
+                 * Size guard: rotation itself belongs to logrotate (see the
+                 * shipped open-bastion.logrotate snippet), because rotating
+                 * from inside a PAM module would race between the concurrent
+                 * sshd/sudo processes that share this file. What we can do
+                 * cheaply is warn — once per process — when the file has grown
+                 * past the cap, so an operator without logrotate finds out
+                 * before the partition does. We never drop an audit event.
+                 */
+                if (!created && st.st_size > AUDIT_LOG_SIZE_WARN_BYTES
+                    && !ctx->size_warning_logged) {
+                    ctx->size_warning_logged = true;
+                    syslog(LOG_WARNING,
+                           "open-bastion: audit log %s is %lld bytes "
+                           "(over %lld); install logrotate for it",
+                           ctx->config.log_file, (long long)st.st_size,
+                           (long long)AUDIT_LOG_SIZE_WARN_BYTES);
+                }
+
                 ssize_t ret = write(fd, json_line, strlen(json_line));
                 (void)ret;  /* Intentionally ignore write errors for audit */
             }

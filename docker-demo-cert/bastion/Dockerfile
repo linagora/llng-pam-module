@@ -65,7 +65,9 @@ RUN mkdir -p build && cd build && \
 # Configure PAM for SSH (bastion mode)
 RUN echo '# PAM configuration for SSH Bastion with Open Bastion\n\
 # Authentication via SSH certificates (not PAM)\n\
-auth       required     pam_permit.so\n\
+# Authentication is refused: sshd never calls pam_authenticate() on the\n\
+# certificate path, so only password/keyboard-interactive auth reaches here.\n\
+auth       required     pam_deny.so\n\
 \n\
 # Authorization - check with Open Bastion\n\
 account    required     pam_openbastion.so\n\

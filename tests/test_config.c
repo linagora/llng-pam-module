@@ -35,8 +35,6 @@ static int test_init_defaults(void)
     int ok = 1;
     ok = ok && (config.timeout == 10);
     ok = ok && (config.verify_ssl == true);
-    ok = ok && (config.cache_enabled == true);
-    ok = ok && (config.cache_ttl == 300);
     ok = ok && (config.server_group != NULL && strcmp(config.server_group, "default") == 0);
 
     config_free(&config);
@@ -53,8 +51,7 @@ static int test_parse_args(void)
         "portal_url=https://test.example.com",
         "client_id=test-client",
         "timeout=30",
-        "debug",
-        "no_cache"
+        "debug"
     };
     int argc = sizeof(argv) / sizeof(argv[0]);
 
@@ -66,7 +63,6 @@ static int test_parse_args(void)
     ok = ok && (config.client_id != NULL && strcmp(config.client_id, "test-client") == 0);
     ok = ok && (config.timeout == 30);
     ok = ok && (config.log_level == 3);  /* debug */
-    ok = ok && (config.cache_enabled == false);
 
     config_free(&config);
     return ok;
@@ -332,6 +328,94 @@ static int test_validate_verify_ssl_true_rejects_http(void)
     return (ret == -4);
 }
 
+/*
+ * Issue #183: a boolean value that is neither a recognised true nor a
+ * recognised false used to be silently treated as false. For verify_ssl that
+ * meant "verify_ssl = TRUE" quietly turned TLS verification OFF. It must now
+ * leave the (safe) default alone and make config_validate() fail with -6.
+ */
+static int test_bad_bool_is_fatal(void)
+{
+    static const char *bad_values[] = {
+        "verify_ssl=TRUE", "verify_ssl=tru", "verify_ssl=True",
+        "verify_ssl=", "verify_ssl=enabled", "verify_ssl=2",
+    };
+    int ok = 1;
+
+    for (size_t i = 0; i < sizeof(bad_values) / sizeof(bad_values[0]); i++) {
+        pam_openbastion_config_t config;
+        config_init(&config);
+
+        config.portal_url = strdup("https://test.example.com");
+        config.client_id = strdup("test-client");
+        config.client_secret = strdup("test-secret");
+
+        const char *argv[] = { bad_values[i] };
+        config_parse_args(1, argv, &config);
+
+        /* Fail-closed: the safe default must survive, and validation must fail */
+        ok = ok && (config.verify_ssl == true);
+        ok = ok && (config.invalid_bool_value == true);
+        ok = ok && (config_validate(&config) == -6);
+
+        config_free(&config);
+    }
+
+    return ok;
+}
+
+/* Both spellings of false must still be accepted (and stay non-fatal) */
+static int test_good_bool_values_accepted(void)
+{
+    static const struct { const char *arg; bool expected; } cases[] = {
+        { "verify_ssl=true",  true  }, { "verify_ssl=yes", true  },
+        { "verify_ssl=1",     true  }, { "verify_ssl=on",  true  },
+        { "verify_ssl=false", false }, { "verify_ssl=no",  false },
+        { "verify_ssl=0",     false }, { "verify_ssl=off", false },
+    };
+    int ok = 1;
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        pam_openbastion_config_t config;
+        config_init(&config);
+
+        config.portal_url = strdup("https://test.example.com");
+        config.client_id = strdup("test-client");
+        config.client_secret = strdup("test-secret");
+
+        const char *argv[] = { cases[i].arg };
+        config_parse_args(1, argv, &config);
+
+        ok = ok && (config.verify_ssl == cases[i].expected);
+        ok = ok && (config.invalid_bool_value == false);
+        ok = ok && (config_validate(&config) == 0);
+
+        config_free(&config);
+    }
+
+    return ok;
+}
+
+/* A typo on any other boolean key must be fatal too, not just verify_ssl */
+static int test_bad_bool_other_key_is_fatal(void)
+{
+    pam_openbastion_config_t config;
+    config_init(&config);
+
+    config.portal_url = strdup("https://test.example.com");
+    config.client_id = strdup("test-client");
+    config.client_secret = strdup("test-secret");
+
+    const char *argv[] = { "audit_enabled=Yes" };
+    config_parse_args(1, argv, &config);
+
+    int ok = (config.audit_enabled == true);          /* default preserved */
+    ok = ok && (config_validate(&config) == -6);
+
+    config_free(&config);
+    return ok;
+}
+
 /* Test insecure PAM flag disables SSL verification */
 static int test_parse_insecure_flag(void)
 {
@@ -530,6 +614,9 @@ int main(void)
     TEST(validate_http_allowed_insecure);
     TEST(validate_verify_ssl_false_allows_http);
     TEST(validate_verify_ssl_true_rejects_http);
+    TEST(bad_bool_is_fatal);
+    TEST(good_bool_values_accepted);
+    TEST(bad_bool_other_key_is_fatal);
     TEST(parse_insecure_flag);
     TEST(create_user_defaults);
     TEST(parse_create_user_args);

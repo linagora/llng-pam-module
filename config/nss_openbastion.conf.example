@@ -31,3 +31,22 @@ max_uid = 60000
 
 # Default GID (usually 'users' group = 100)
 default_gid = 100
+
+# Policy range for a *server-supplied* primary GID (the `gid` key of
+# pamAccessExportedVars, usually an LDAP gidNumber). This is a group policy of
+# its own, NOT the min_uid/max_uid range above: an ordinary gidNumber has no
+# reason to live in the synthetic UID range.
+#
+# The default floor is 1000, the Debian/RHEL boundary between system groups
+# (login.defs SYS_GID_MIN=100 .. SYS_GID_MAX=999) and user groups
+# (login.defs GID_MIN=1000). It refuses gid 0 and every system group, including
+# the dynamically allocated ones such as `docker` or `libvirt` that land in
+# 100-999 on Debian and are root-equivalent.
+#
+# A gid outside this range is NOT fatal: it is replaced by default_gid and a
+# warning is logged to syslog. Lower min_gid if you legitimately export a low
+# gidNumber (100 = users, for instance).
+#
+# gid 0 is always refused, whatever min_gid says.
+min_gid = 1000
+max_gid = 65533

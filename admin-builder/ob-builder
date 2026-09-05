@@ -925,6 +925,29 @@ validate_inputs() {
     [ -n "$TARGET_ROLE" ]        || die "target_role is required"
     is_valid_target_role "$TARGET_ROLE" || die "Invalid target_role: $TARGET_ROLE"
 
+    # apt_url / apt_suite / apt_component are concatenated into the
+    # "deb [signed-by=...] URL SUITE COMPONENT" line and interpolated verbatim
+    # into the generated installer.sh, where it is written to
+    # /etc/apt/sources.list.d as root. render_template() is a literal
+    # substitution that preserves every character, so an unvalidated value
+    # containing $(...), backticks, quotes or a newline would execute as root
+    # or inject extra sources.list entries at install time. Restrict all three
+    # to shell-safe charsets (same invariant as portal_url / allowed_bastions).
+    [ -n "$APT_URL" ]            || die "apt_url is required"
+    APT_URL="${APT_URL%/}"
+    is_valid_url "$APT_URL"      || die "Invalid apt_url: $APT_URL"
+    if [[ "$APT_URL" != https://* ]]; then
+        log_warn "APT repo URL is not HTTPS: $APT_URL (packages remain GPG-verified via signed-by)"
+    fi
+
+    [ -n "$APT_SUITE" ]          || die "apt_suite is required"
+    is_valid_apt_suite "$APT_SUITE" \
+        || die "Invalid apt_suite (letters, digits, '.', '_', '-' and '/' only): $APT_SUITE"
+
+    [ -n "$APT_COMPONENT" ]      || die "apt_component is required"
+    is_valid_apt_component "$APT_COMPONENT" \
+        || die "Invalid apt_component (space-separated names of letters, digits, '.', '_', '-'): $APT_COMPONENT"
+
     # allowed_bastions is embedded verbatim into the generated artefacts (the
     # self-extracting shell installer and the Ansible vars). Restrict it to safe
     # identifier characters so a malicious or typo'd value cannot inject shell

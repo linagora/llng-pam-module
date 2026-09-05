@@ -248,6 +248,12 @@ cache_ttl = 300
 min_uid = 10000
 max_uid = 60000
 default_gid = 100
+# Policy range for a server-supplied gid (LDAP gidNumber via
+# pamAccessExportedVars). Defaults to the Debian/RHEL system-vs-user group
+# boundary; gid 0 is always refused. An out-of-range gid falls back to
+# default_gid with a syslog warning.
+min_gid = 1000
+max_gid = 65533
 ```
 
 ## Automatic Account Creation
@@ -285,8 +291,8 @@ All sessions through bastions are recorded:
 ```
 /var/lib/open-bastion/sessions/
 ├── dwho/
-│   ├── 20251216-103000_<uuid>.cast      # Recording
-│   └── 20251216-103000_<uuid>.json      # Metadata
+│   ├── 20251216-103000_<uuid>.typescript   # Recording
+│   └── 20251216-103000_<uuid>.json         # Metadata
 └── rtyler/
     └── ...
 ```
@@ -583,7 +589,7 @@ directory so the helper, running as nobody, can read it) and wires
 
 ```ini
 # /etc/ssh/sshd_config.d/00-open-bastion-backend.conf  (managed by ob-backend-setup)
-TrustedUserCAKeys /etc/open-bastion/llng_ca.pub
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 # AcceptEnv LLNG_BASTION_JWT   ← REMOVED
@@ -603,13 +609,24 @@ SSO cert (no `bastion=` key-id prefix) is rejected before PAM runs.
 | `pamAccessBastionVoucherTtl` | `43200`   | Max voucher age in seconds (12 h); effective exp also capped by SSO cert expiry                                                                                           |
 | `pamAccessBastionCertTtl`    | `120`     | Ephemeral user-cert validity in seconds                                                                                                                                   |
 
-The `ssh-ca` plugin must be active (`sshCaActivation=1`). `bastion_id` equals the
-enrolling OIDC `client_id`, which identifies a **project** (it enrolls all the
-project's machines); PAM server groups provide finer-grained policy _within_ a
-project. The cert-minting security rests on the voucher, not on the group — see
-[security/00-architecture.md](security/00-architecture.md). For stronger
-blast-radius isolation you may give each security zone its own OIDC client, each
-becoming a distinct `allowed_bastions` unit.
+The `ssh-ca` plugin must be active (`sshCaActivation=1`).
+
+`bastion_id` is **not** the OIDC `client_id`. It is a synthetic **per-device**
+identity assigned by the portal at enrolment (an `oidc-device-organization`
+session id), and it is what `allowed_bastions` is keyed on. The `client_id`
+identifies a **project** — one client enrols all of that project's machines —
+so two bastions sharing a `client_id` still have two distinct `bastion_id`s and
+can be allowlisted independently.
+
+Because it is server-assigned, the only way to learn it is to ask the portal:
+run `ob-bastion-id` on the enrolled bastion (it POSTs a probe to
+`/pam/bastion-token` and prints the `bastion_id` the server returns). Do not
+guess it from the `client_id`, and note that **re-enrolling a bastion gives it a
+new `bastion_id`**, which every backend allowlist must then be updated with.
+
+PAM server groups provide finer-grained policy _within_ a project. The
+cert-minting security rests on the voucher, not on the group — see
+[security/00-architecture.md](security/00-architecture.md).
 
 ### Ephemeral Certificate Fields
 

@@ -179,9 +179,8 @@ portal_url = https://auth.example.com
 oauth2_token_auth = true
 oauth2_token_min_ttl = 60
 
-# Cache settings
-cache_enabled = true
-cache_ttl = 300
+# Authorization cache (offline mode)
+auth_cache_enabled = true
 
 # Logging
 log_level = warn
@@ -478,6 +477,6 @@ authentication with the entered password. This:
 ## See Also
 
 - [Open Bastion Admin Guide](admin-guide.md)
-- [PAM Module Configuration](../README.md#configuration)
+- [PAM Module Configuration](configuration.md)
 - [Offline Mode](offline-mode.md)
 - [LemonLDAP::NG Documentation](https://lemonldap-ng.org/documentation)

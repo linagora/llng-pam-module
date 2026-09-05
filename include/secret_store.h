@@ -20,8 +20,6 @@ typedef struct {
     bool enabled;               /* Enable encryption (default: true) */
     char *store_dir;            /* Directory for encrypted secrets */
     char *salt;                 /* Additional salt for key derivation */
-    bool use_keyring;           /* Also store in kernel keyring */
-    char *keyring_name;         /* Keyring name (default: "pam_llng") */
 } secret_store_config_t;
 
 /* Secret store handle */

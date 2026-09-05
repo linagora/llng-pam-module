@@ -49,6 +49,7 @@ local/
 # machine-local scratch, never part of the source archive.
 local-test/vm/
 
-# Verification build trees (doc/CONTRIBUTING build-and-test recipes)
+# Verification build trees (ad-hoc build-and-test recipes, sanitizers)
 build-verify/
 build-asan/
+bv/

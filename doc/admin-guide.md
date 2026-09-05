@@ -44,10 +44,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion
+apt-get install open-bastion
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion
+dnf install open-bastion
 ```
 
 ### Step 2: Create Configuration
@@ -155,10 +155,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion uuid-runtime jq
+apt-get install open-bastion uuid-runtime jq
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion util-linux jq
+dnf install open-bastion util-linux jq
 ```
 
 ### Step 2: Create Configuration
@@ -233,6 +233,16 @@ ob-enroll -g bastion
 ```
 
 ### Step 5: Configure PAM
+
+> **This section describes a token-authenticated bastion (PAM
+> [Mode A](pam-modes.md#mode-a-llng-token-only-strictest)), not Mode E.**
+> Steps 5 and 6 deliberately enable `PasswordAuthentication` /
+> `KbdInteractiveAuthentication` so that sshd prompts for the LLNG token as a
+> "password". A **Mode E** bastion authenticates with SSO certificates instead
+> and must have both of those set to `no`; do not copy this PAM stack or this
+> `sshd_config` drop-in onto a Mode E host. For Mode E, skip to
+> [Mode E: Maximum Security Deployment](#mode-e-maximum-security-deployment),
+> which runs `ob-bastion-setup --max-security` and writes both files for you.
 
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
@@ -366,10 +376,10 @@ flowchart LR
 
 ```bash
 # Debian/Ubuntu
-apt-get install open-bastion libnss-openbastion
+apt-get install open-bastion
 
 # RHEL/Rocky
-dnf install open-bastion nss-openbastion
+dnf install open-bastion
 ```
 
 ### Step 2: Create PAM Configuration
@@ -400,10 +410,14 @@ create_user_shell = /bin/bash
 create_user_skel = /etc/skel
 
 # Allowed bastions (cert vouching — REQUIRED for backends)
-# Comma or space-separated list of OIDC client_id values for authorized bastions.
+# Comma, semicolon or whitespace-separated list of bastion_id values (the
+# per-device ids the portal assigns at enrolment — read one with ob-bastion-id;
+# NOT the OIDC client_id).
 # Leave empty to allow any vouched bastion; remove the file entirely for legacy mode.
 # Managed by ob-backend-setup --allowed-bastions <ids>  (Ansible: ob_bastion_allowed_bastions)
-# The file /etc/open-bastion/allowed_bastions is checked at runtime by pam_openbastion.
+# The file /etc/open-bastion/allowed_bastions is NOT read by pam_openbastion. It
+# is enforced by the ob-ssh-principals helper that sshd runs as
+# AuthorizedPrincipalsCommand — i.e. BEFORE PAM is invoked at all. See Step 7.
 
 # Logging
 log_level = warn
@@ -434,6 +448,12 @@ cache_ttl = 300
 min_uid = 10000
 max_uid = 60000
 default_gid = 100
+# Policy range for a server-supplied gid (LDAP gidNumber via
+# pamAccessExportedVars). Defaults to the Debian/RHEL system-vs-user group
+# boundary; gid 0 is always refused. An out-of-range gid falls back to
+# default_gid with a syslog warning.
+min_gid = 1000
+max_gid = 65533
 EOF
 
 chmod 644 /etc/open-bastion/nss_openbastion.conf
@@ -667,8 +687,10 @@ ob-enroll -g production
 
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
-# Authentication: Accept from bastion (SSH keys)
-auth       required     pam_permit.so
+# Authentication: denied. SSH keys/certs are checked by sshd, which does not
+# call pam_authenticate() on that path; only password/keyboard-interactive
+# authentication reaches this stack, and it is refused.
+auth       required     pam_deny.so
 
 # Authorization: LLNG required
 account    required     pam_openbastion.so
@@ -751,24 +773,35 @@ Mode E uses LLNG-signed SSH certificates for access and LLNG temporary tokens fo
 sudo. All users exist only in NSS (not in `/etc/passwd`). This section describes
 the tested deployment flow.
 
-### Step 1: Install Bootstrap Package
+### Step 1 (optional, site-specific): Bootstrap package
 
-The `open-bastion-linagora` bootstrap package prepares the system before the main
-package is installed. It provides:
+> **Not part of Open Bastion.** `open-bastion-linagora` is an internal
+> site-preparation package built from a private tree (`local/`, which is
+> gitignored). It is **not in this repository and not in the public
+> repositories** — `apt install open-bastion-linagora` will fail for anyone
+> outside Linagora. Mode E does not depend on it: skip straight to Step 2.
+
+Where it is available, it prepares the system before the main package is
+installed and provides:
 
 - `/etc/securetty` with `ttyS0` for OVH serial console root access (pre-hardening)
 - A pre-hardening sshd snippet (`40-pre-hardening.conf`) that sets conservative
   defaults so sshd is not locked out during setup
 - A dedicated service account used for initial enrollment
 
+Everything it does is a site convention you can reproduce by hand. What actually
+matters for Mode E is the warning repeated below: keep a working management
+session (serial console, or an already open SSH session) while
+`ob-bastion-setup` locks port 22 down to SSO certificates.
+
 ```bash
-apt install open-bastion-linagora
+apt install open-bastion-linagora   # Linagora-internal repositories only
 ```
 
 ### Step 2: Install Open Bastion
 
 ```bash
-apt install open-bastion libnss-openbastion uuid-runtime jq
+apt install open-bastion uuid-runtime jq
 ```
 
 ### Step 3: Run ob-bastion-setup
@@ -786,8 +819,13 @@ It performs all of the following automatically:
   - `AuthorizedKeysFile none`
   - `TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub`
   - `RevokedKeys /etc/ssh/revoked_keys`
-  - `AuthorizedPrincipalsCommand /bin/echo %u`
+  - `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f`
+    (`ob-backend-setup` adds a third token, `%i`, so the helper can check the
+    certificate key-id against `/etc/open-bastion/allowed_bastions`)
   - `AuthorizedPrincipalsCommandUser nobody`
+  - Writes the `ob-ssh-principals` helper itself to `/usr/local/sbin/` (it is
+    generated at setup time, not shipped in the package) together with its
+    `/run/open-bastion/ssh-fp` spool directory and a `/etc/tmpfiles.d` drop-in
   - `PermitRootLogin no`
   - `ExposeAuthInfo yes`
 - Writes `/etc/pam.d/sshd` and `/etc/pam.d/sudo` for Mode E
@@ -872,7 +910,7 @@ This setting protects against:
 **Important**: Ensure the PAM heartbeat timer is enabled to keep tokens active:
 
 ```bash
-systemctl enable --now open-bastion-heartbeat.timer
+systemctl enable --now ob-heartbeat.timer
 ```
 
 ### Other Recommended Security Settings
@@ -887,6 +925,61 @@ oidcRPMetaDataOptionsClientAuthenticationMethod: client_secret_jwt
 # Enable refresh token rotation
 oidcRPMetaDataOptionsRefreshTokenRotation: 1
 ```
+
+## Upgrading the package
+
+### What the Debian `postinst` re-asserts on a bastion
+
+Two socket units are deliberately **not** enabled by the package: `ob-cert.socket`
+(hop-certificate minting for `ob-ssh` / `ob-scp` / `ob-sftp`) and
+`ob-record.socket` (the session-recording sink). The package cannot know a
+host's role, so it ships them `--no-enable` / `--no-start` and lets
+`ob-bastion-setup` turn them on.
+
+That left a trap before 0.6.1: a plain `apt upgrade` on an already-configured
+bastion could leave both inactive, and since recording is **fail-closed**, every
+login was then refused with `Session recording is required but unavailable;
+access refused.`
+
+Since 0.6.1 the `postinst` re-enables them on `configure`, idempotently — but
+only when it can tell the host is a bastion, and only for what is actually in
+use:
+
+- The **role marker** is the presence of a file matching
+  `/etc/ssh/sshd_config.d/*-open-bastion-bastion.conf`, the drop-in
+  `ob-bastion-setup` writes (as `00-open-bastion-bastion.conf`). Backends and
+  unconfigured hosts are never touched.
+- `ob-record.socket` is enabled only if that drop-in still contains a
+  `ForceCommand … ob-session-recorder` line — i.e. not on a bastion set up with
+  `--disable-session-recorder`.
+- Failures are non-fatal: the upgrade succeeds and you can always re-run
+  `ob-bastion-setup`.
+
+> **If you renamed or replaced that drop-in, you lose this safety net.** A site
+> that manages its own `sshd_config.d` file under a different name (or folds the
+> settings into `sshd_config` itself) will not match the marker, and an upgrade
+> will leave the sockets as it found them. Check after upgrading:
+>
+> ```bash
+> systemctl is-enabled ob-cert.socket ob-record.socket
+> systemctl is-active  ob-cert.socket ob-record.socket
+> ```
+>
+> and re-run `ob-bastion-setup` (or `systemctl enable --now`) if they are not
+> active.
+
+### Re-running the setup after an upgrade
+
+Re-running `ob-bastion-setup` / `ob-backend-setup` is the supported way to pick
+up changes to the generated files, and it is what the CHANGELOG's upgrade notes
+point to when a release changes the PAM stack, the sshd drop-in or the sudoers
+rule. It **regenerates** `/etc/pam.d/sshd`, `/etc/pam.d/sudo`, the sshd drop-in
+and `/etc/sudoers.d/open-bastion`, so keep site additions in separate files
+(a higher-numbered `sshd_config.d` drop-in, a second `sudoers.d` file) — see
+[Access & permissions](permissions.md).
+
+Re-running a setup does **not** re-enrol the host and does not change its
+`bastion_id`. Only `ob-enroll` does that.
 
 ## Troubleshooting
 
@@ -985,12 +1078,35 @@ The following aliases are recognized:
 
 ### SSH Server Requirement
 
-For SSH key policy to work, the SSH server must expose authentication information:
+The module identifies the presented key through the `ob-ssh-principals` helper
+installed by `ob-bastion-setup` / `ob-backend-setup`, which sshd calls with the
+key type and key blob:
 
 ```bash
-# /etc/ssh/sshd_config
-ExposeAuthInfo yes
+# /etc/ssh/sshd_config — written by the setup scripts
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k
+AuthorizedPrincipalsCommandUser nobody
+
+ExposeAuthInfo yes   # fallback for sshd variants that propagate SSH_USER_AUTH
 ```
+
+> **Enforcement is fail-closed.** With `ssh_key_policy_enabled = true`, a key
+> whose type or size cannot be determined is **denied**. sshd does not export
+> `SSH_USER_AUTH` to PAM during `pam_acct_mgmt` on OpenSSH >= 9.8, so the helper
+> above is the channel that makes the policy work at all. Before enabling the
+> policy — and after any package upgrade — make sure the installed helper writes
+> the key metadata:
+>
+> ```bash
+> grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+> ```
+>
+> If it does not, re-run `ob-bastion-setup` / `ob-backend-setup` for this host's
+> role. A package upgrade replaces the PAM module but not the helper, which
+> lives in `/usr/local/sbin` and is written by the setup script.
+
+`ssh_key_min_rsa_bits` is enforced from the RSA modulus decoded out of the key
+blob, so it is a real check and not only documentation.
 
 ### Example Configurations
 
@@ -1027,13 +1143,19 @@ If users are rejected due to key policy:
 journalctl -u sshd | grep "SSH key policy"
 
 # Common errors:
-# - "Key type not allowed: ssh-dss" → DSA keys are disabled
-# - "RSA key too small: 1024 bits" → User needs a larger key
+# - "RSA keys are not allowed by policy" → the type is excluded
+# - "RSA key size below minimum required" → user needs a larger key
+# - "DSA keys are not allowed by policy (deprecated)" → DSA is disabled
+# - "cannot identify the key presented by user ..." → the host still has the
+#   pre-v1 ob-ssh-principals helper: re-run ob-bastion-setup / ob-backend-setup
 ```
 
 ---
 
 ## Quick Reference
+
+The full, authoritative list of paths, systemd unit names and package names is
+in [Canonical names and paths](reference-paths.md).
 
 ### File Locations
 
@@ -1045,7 +1167,7 @@ journalctl -u sshd | grep "SSH key policy"
 | `/etc/open-bastion/session-recorder.conf` | Session recorder configuration                                     |
 | `/etc/open-bastion/ssh-proxy.conf`        | SSH proxy configuration (bastion)                                  |
 | `/var/lib/open-bastion/sessions/`         | Session recordings                                                 |
-| `/etc/open-bastion/allowed_bastions`      | Allowed bastion client_ids (backend)                               |
+| `/etc/open-bastion/allowed_bastions`      | Allowed `bastion_id` values (backend); read by `ob-ssh-principals` |
 | `/var/log/open-bastion/audit.json`        | Audit log                                                          |
 
 ### Commands
