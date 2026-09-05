@@ -40,6 +40,18 @@
 #define CACHE_TTL 300           /* 5 minutes */
 #define CACHE_MAX_ENTRIES 1000
 #define CACHE_FILE "/var/cache/nss_llng/users.cache"
+
+/*
+ * Longest serialized cache record we are willing to write, newline included.
+ *
+ * The readers pull a record with fgets() into a 1024-byte buffer, so a longer
+ * line comes back TRUNCATED: its field count is wrong and it can never be
+ * parsed again. Refusing to write past this bound is what keeps the on-disk
+ * format and the read buffer in agreement; the margin below 1024 leaves room
+ * for the terminating NUL and for a reader with a slightly smaller buffer.
+ */
+#define CACHE_LINE_MAX 900
+
 /* Overridable so tests/test_nss_cache.c (which includes this file) can point
  * the file cache at a temporary directory instead of the real system path. */
 #ifndef CACHE_DIR
@@ -949,6 +961,124 @@ static FILE *open_cache_file_verified(int dirfd, const char *leaf)
     return f;
 }
 
+/* True if `s` contains a byte that would break the one-record-per-line,
+ * colon-separated on-disk format. */
+static int field_breaks_format(const char *s)
+{
+    for (const char *c = s; *c; c++) {
+        if (*c == ':' || *c == '\n' || *c == '\r') return 1;
+    }
+    return 0;
+}
+
+/*
+ * Copy at most `budget` bytes of `src` into `dst`, NUL-terminating it, with
+ * ':' and CR/LF folded to a space, and stopping on a UTF-8 character boundary
+ * so a trimmed value never ends mid-sequence (gecos routinely holds accented
+ * display names). Returns the number of bytes written.
+ *
+ * `dst` must have room for budget + 1 bytes.
+ */
+static size_t copy_sanitized_gecos(char *dst, const char *src, size_t budget)
+{
+    size_t i = 0;
+    while (src[i] != '\0') {
+        unsigned char c = (unsigned char)src[i];
+        size_t clen = 1;
+        if ((c & 0xE0) == 0xC0)      clen = 2;
+        else if ((c & 0xF0) == 0xE0) clen = 3;
+        else if ((c & 0xF8) == 0xF0) clen = 4;
+
+        if (i + clen > budget) break;          /* would split the character */
+
+        /* Malformed input: stop rather than copy half a sequence. */
+        for (size_t k = 1; k < clen; k++) {
+            if (((unsigned char)src[i + k] & 0xC0) != 0x80) { clen = 0; break; }
+        }
+        if (clen == 0) break;
+
+        for (size_t k = 0; k < clen; k++) {
+            char ch = src[i + k];
+            dst[i + k] = (ch == ':' || ch == '\n' || ch == '\r') ? ' ' : ch;
+        }
+        i += clen;
+    }
+    dst[i] = '\0';
+    return i;
+}
+
+/*
+ * Serialize a passwd record into the cache's
+ * "name:uid:gid:gecos:home:shell:timestamp" line format, refusing anything a
+ * reader could not parse back.
+ *
+ * Two shapes of record are unreadable, and both used to be written blindly by
+ * the fprintf() this replaces:
+ *
+ *   - a field containing ':' produces 8 fields, which split_cache_line()
+ *     rejects outright;
+ *   - a record longer than the readers' fgets() buffer comes back truncated,
+ *     so its field count is wrong.
+ *
+ * Either one is written by root, then fails to parse on every subsequent
+ * lookup, falls back to an HTTPS round trip to LLNG, and is rewritten
+ * identically by that very lookup: a permanent miss for that user plus
+ * sustained LLNG load. The read side now unlinks an unparsable entry, but
+ * only refusing to produce one actually breaks the loop.
+ *
+ * gecos is cosmetic (a display name), so it is sanitized and, if the record
+ * would otherwise be too long, trimmed to fit. name/home/shell are
+ * load-bearing — a truncated home directory or shell is worse than no cache
+ * entry at all — so a record that cannot be written faithfully is refused and
+ * the lookup simply stays uncached (correct, just slower).
+ *
+ * Returns the record length on success, -1 if it must not be written.
+ */
+static int build_cache_line(char *out, size_t outlen, const struct passwd *pw,
+                            time_t now)
+{
+    const char *name  = pw->pw_name;
+    const char *gecos = pw->pw_gecos ? pw->pw_gecos : "";
+    const char *home  = pw->pw_dir   ? pw->pw_dir   : "";
+    const char *shell = pw->pw_shell ? pw->pw_shell : "";
+
+    if (field_breaks_format(name) || field_breaks_format(home) ||
+        field_breaks_format(shell)) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: refusing to cache uid %u: name, home or "
+               "shell contains a field separator", (unsigned)pw->pw_uid);
+        return -1;
+    }
+
+    char uidbuf[32], gidbuf[32], tsbuf[32];
+    snprintf(uidbuf, sizeof(uidbuf), "%u", (unsigned)pw->pw_uid);
+    snprintf(gidbuf, sizeof(gidbuf), "%u", (unsigned)pw->pw_gid);
+    snprintf(tsbuf,  sizeof(tsbuf),  "%ld", (long)now);
+
+    /* Everything except gecos, plus the 6 separators and the newline. */
+    size_t fixed = strlen(name) + strlen(uidbuf) + strlen(gidbuf) +
+                   strlen(home) + strlen(shell) + strlen(tsbuf) + 6 + 1;
+    if (fixed > CACHE_LINE_MAX) {
+        syslog(LOG_WARNING,
+               "libnss_openbastion: refusing to cache uid %u: record too long "
+               "(%zu bytes without gecos, limit %d)",
+               (unsigned)pw->pw_uid, fixed, CACHE_LINE_MAX);
+        return -1;
+    }
+
+    char gecos_buf[CACHE_LINE_MAX + 1];
+    copy_sanitized_gecos(gecos_buf, gecos, CACHE_LINE_MAX - fixed);
+
+    int len = snprintf(out, outlen, "%s:%s:%s:%s:%s:%s:%s\n",
+                       name, uidbuf, gidbuf, gecos_buf, home, shell, tsbuf);
+    if (len < 0 || (size_t)len >= outlen || len > CACHE_LINE_MAX) {
+        syslog(LOG_ERR, "libnss_openbastion: cache record for uid %u did not fit",
+               (unsigned)pw->pw_uid);
+        return -1;
+    }
+    return len;
+}
+
 /*
  * Atomically write a passwd cache record into an already-verified dir fd.
  *
@@ -965,6 +1095,13 @@ static FILE *open_cache_file_verified(int dirfd, const char *leaf)
 static void file_cache_write_atomic_at(int dirfd, const char *leaf,
                                        const struct passwd *pw)
 {
+    /* Serialize FIRST: a record that cannot be read back must not reach the
+     * directory at all, not even as a temp file we would then have to clean
+     * up. build_cache_line() has already logged the reason. */
+    char record[CACHE_LINE_MAX + 2];
+    int reclen = build_cache_line(record, sizeof(record), pw, time(NULL));
+    if (reclen < 0) return;
+
     char tmpleaf[128];
     int tlen = snprintf(tmpleaf, sizeof(tmpleaf), ".tmp.%s.%ld",
                         leaf, (long)getpid());
@@ -1005,15 +1142,10 @@ static void file_cache_write_atomic_at(int dirfd, const char *leaf,
         return;
     }
 
-    /* Write in format: username:uid:gid:gecos:home:shell:timestamp */
-    fprintf(f, "%s:%u:%u:%s:%s:%s:%ld\n",
-            pw->pw_name,
-            (unsigned)pw->pw_uid,
-            (unsigned)pw->pw_gid,
-            pw->pw_gecos ? pw->pw_gecos : "",
-            pw->pw_dir ? pw->pw_dir : "",
-            pw->pw_shell ? pw->pw_shell : "",
-            (long)time(NULL));
+    /* Format: username:uid:gid:gecos:home:shell:timestamp, bounded by
+     * build_cache_line() above so the readers' fgets() buffer always holds a
+     * whole record. */
+    fwrite(record, 1, (size_t)reclen, f);
 
     /*
      * File mode 0644, owned by the cache owner. It deliberately stays readable
@@ -1133,38 +1265,52 @@ static void file_cache_save_by_name(const struct passwd *pw)
  * verified filepath (relative leaf is `leaf`, opened via dirfd), parse it,
  * enforce TTL (unlinking expired entries via unlinkat), and populate `pw`
  * into the caller buffer. Returns 0 on success, -1 otherwise.
+ *
+ * A record that cannot be parsed is unlinked, exactly like an expired one. It
+ * is not a transient miss: it can never become readable, so leaving it in
+ * place would mean an HTTPS round trip to LLNG on every single lookup of that
+ * user, forever. build_cache_line() no longer produces such a record, but one
+ * can still be left by an older version, by a truncated write, or by an
+ * attempt at cache poisoning. unlinkat() only succeeds for the cache owner;
+ * an unprivileged reader just misses, exactly as it did before.
  */
 static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
                                  struct passwd *pw, char *buffer, size_t buflen,
                                  const uid_t *want_uid, const char *want_name)
 {
-    /* Split into EXACTLY 7 fields without collapsing empties. */
     char *fields[7];
+    char *username_str, *uid_str, *gid_str, *gecos_str;
+    char *home_str, *shell_str, *timestamp_str;
+    char *endptr;
+    long timestamp;
+    uid_t file_uid;
+    gid_t file_gid;
+
+    /* Split into EXACTLY 7 fields without collapsing empties. */
     if (split_cache_line(line, fields) != 0) {
-        return -1;
+        goto corrupt;
     }
-    char *username_str  = fields[0];
-    char *uid_str       = fields[1];
-    char *gid_str       = fields[2];
-    char *gecos_str     = fields[3];
-    char *home_str      = fields[4];
-    char *shell_str     = fields[5];
-    char *timestamp_str = fields[6];
+    username_str  = fields[0];
+    uid_str       = fields[1];
+    gid_str       = fields[2];
+    gecos_str     = fields[3];
+    home_str      = fields[4];
+    shell_str     = fields[5];
+    timestamp_str = fields[6];
 
     if (username_str[0] == '\0' || uid_str[0] == '\0' ||
         gid_str[0] == '\0' || timestamp_str[0] == '\0') {
-        return -1;
+        goto corrupt;
     }
 
     /* Check TTL - use strtol for safe parsing. */
-    char *endptr;
     errno = 0;
-    long timestamp = strtol(timestamp_str, &endptr, 10);
+    timestamp = strtol(timestamp_str, &endptr, 10);
     while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
         endptr++;
     }
     if (errno != 0 || endptr == timestamp_str || *endptr != '\0') {
-        return -1;  /* Invalid timestamp */
+        goto corrupt;  /* Invalid timestamp */
     }
     if (time(NULL) - timestamp > g_config.cache_ttl) {
         /* Expired - remove file relative to the verified dir. */
@@ -1173,22 +1319,22 @@ static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
     }
 
     /* Parse UID */
-    uid_t file_uid;
     if (safe_parse_uid(uid_str, &file_uid) != 0) {
-        return -1;
+        goto corrupt;
     }
     /* Parse GID */
-    gid_t file_gid;
     if (safe_parse_gid(gid_str, &file_gid) != 0) {
-        return -1;
+        goto corrupt;
     }
 
-    /* Key consistency checks: the stored record must match what was asked. */
+    /* Key consistency checks: the stored record must match what was asked.
+     * A record filed under the wrong key is as unusable as an unparsable one
+     * (the key IS the filename), so it is cleared the same way. */
     if (want_uid && file_uid != *want_uid) {
-        return -1;
+        goto corrupt;
     }
     if (want_name && strcmp(username_str, want_name) != 0) {
-        return -1;
+        goto corrupt;
     }
 
     /* Copy data to buffer with safe bounds checking */
@@ -1214,10 +1360,17 @@ static int file_cache_parse_into(char *line, int dirfd, const char *leaf,
     if (safe_strcpy(&p, &remaining, shell_str) != 0) return -1;
 
     return 0;
+
+corrupt:
+    /* Unreadable record: clear it so the next lookup can repopulate a valid
+     * one instead of retrying LLNG forever. See the function comment. */
+    unlinkat(dirfd, leaf, 0);
+    return -1;
 }
 
 /* Load user info from file cache by UID (via a verified dir + file fd). */
-static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer, size_t buflen)
+static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer,
+                                  size_t buflen)
 {
     int dirfd = open_cache_dir_read(CACHE_DIR);
     if (dirfd < 0) return -1;
@@ -1243,7 +1396,8 @@ static int file_cache_load_by_uid(uid_t uid, struct passwd *pw, char *buffer, si
     }
     fclose(f);
 
-    int rc = file_cache_parse_into(line, dirfd, leaf, pw, buffer, buflen, &uid, NULL);
+    int rc = file_cache_parse_into(line, dirfd, leaf, pw, buffer, buflen,
+                                   &uid, NULL);
     close(dirfd);
     return rc;
 }
@@ -1277,7 +1431,8 @@ static int file_cache_load_by_name(const char *name, struct passwd *pw,
     }
     fclose(f);
 
-    int rc = file_cache_parse_into(line, dirfd, name, pw, buffer, buflen, NULL, name);
+    int rc = file_cache_parse_into(line, dirfd, name, pw, buffer, buflen,
+                                   NULL, name);
     close(dirfd);
     return rc;
 }

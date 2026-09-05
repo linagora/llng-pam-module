@@ -418,6 +418,197 @@ static int test_name_missing(void)
     return file_cache_load_by_name("nobody_here", &out, buf, sizeof(buf)) != 0;
 }
 
+/* ------------------------------------------------------------------------
+ * Bounded write / unlink-on-corruption
+ *
+ * The readers use a 1024-byte fgets() buffer. Before build_cache_line(), the
+ * writer fprintf()'d the record unbounded: a gecos over ~1000 bytes, or one
+ * containing ':', produced a line that could NEVER be parsed back. Because the
+ * read path only unlinked on TTL expiry, that entry stayed forever: every
+ * lookup failed at parse, fell back to an HTTPS query to LLNG, and the
+ * root-side rewrite reproduced the same unreadable line.
+ * ------------------------------------------------------------------------ */
+
+/* A huge gecos must not poison the entry: it is trimmed so the record still
+ * parses, and the load-bearing fields survive untouched. */
+static int test_oversized_gecos_is_trimmed_not_poisoned(void)
+{
+    reset_cache_dirs();
+    char huge[5000];
+    memset(huge, 'G', sizeof(huge) - 1);
+    huge[sizeof(huge) - 1] = '\0';
+
+    struct passwd in = make_user("bigg", 70001, huge);
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[4096];
+    if (file_cache_load_by_name("bigg", &out, buf, sizeof(buf)) != 0) return 0;
+    if (out.pw_uid != 70001) return 0;
+    if (strlen(out.pw_gecos) == 0) return 0;
+    if (strlen(out.pw_gecos) > CACHE_LINE_MAX) return 0;
+    /* home and shell are load-bearing and must come back byte-exact. */
+    if (strcmp(out.pw_dir, "/home/bigg") != 0) return 0;
+    if (strcmp(out.pw_shell, "/bin/bash") != 0) return 0;
+
+    /* And the stored line really is within the readers' buffer. */
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/bigg", test_cache_byname());
+    if (stat(path, &st) != 0) return 0;
+    if (st.st_size > CACHE_LINE_MAX) return 0;
+    return 1;
+}
+
+/* A ':' in gecos would make an 8-field line, which split_cache_line() rejects
+ * forever. gecos is cosmetic, so it is folded to a space and the record stays
+ * readable. CR/LF (which would fake a second record) go the same way. */
+static int test_separator_in_gecos_is_folded(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("colon", 70002, "Doe:John\nx:y");
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[1024];
+    if (file_cache_load_by_name("colon", &out, buf, sizeof(buf)) != 0) return 0;
+    if (strchr(out.pw_gecos, ':') != NULL) return 0;
+    if (strchr(out.pw_gecos, '\n') != NULL) return 0;
+    if (strcmp(out.pw_gecos, "Doe John x y") != 0) return 0;
+    if (out.pw_uid != 70002) return 0;
+    if (strcmp(out.pw_dir, "/home/colon") != 0) return 0;
+    return 1;
+}
+
+/* Multi-byte gecos: trimming must land on a character boundary, never leave a
+ * half-written UTF-8 sequence in the cache. */
+static int test_gecos_trim_keeps_utf8_valid(void)
+{
+    reset_cache_dirs();
+    char accents[4096];
+    size_t n = 0;
+    while (n + 2 < sizeof(accents) - 1) {          /* U+00E9, 2 bytes */
+        accents[n++] = (char)0xC3;
+        accents[n++] = (char)0xA9;
+    }
+    accents[n] = '\0';
+
+    struct passwd in = make_user("accent", 70003, accents);
+    file_cache_save_by_name(&in);
+
+    struct passwd out = {0};
+    char buf[4096];
+    if (file_cache_load_by_name("accent", &out, buf, sizeof(buf)) != 0) return 0;
+    size_t len = strlen(out.pw_gecos);
+    if (len == 0 || (len % 2) != 0) return 0;      /* whole 2-byte chars only */
+    for (size_t i = 0; i < len; i += 2) {
+        if ((unsigned char)out.pw_gecos[i] != 0xC3) return 0;
+        if ((unsigned char)out.pw_gecos[i + 1] != 0xA9) return 0;
+    }
+    return 1;
+}
+
+/* home and shell are NOT cosmetic: a value that cannot round-trip must make
+ * the write be refused outright rather than be silently mangled. Nothing is
+ * left in the directory, not even a temp file. */
+static int test_unrepresentable_home_refuses_write(void)
+{
+    reset_cache_dirs();
+    struct passwd in = make_user("weird", 70004, "Weird");
+    in.pw_dir = (char *)"/home/we:ird";
+    file_cache_save_by_name(&in);
+
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/weird", test_cache_byname());
+    if (stat(path, &st) == 0) return 0;            /* nothing must be published */
+
+    /* No temp leaf either. */
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp.weird.%ld", test_cache_byname(), (long)getpid());
+    if (stat(tmp, &st) == 0) return 0;
+
+    /* Same rule for the uid-keyed cache. */
+    file_cache_save(&in);
+    snprintf(path, sizeof(path), "%s/70004", test_cache_root());
+    if (stat(path, &st) == 0) return 0;
+    return 1;
+}
+
+/* A record whose fixed fields alone overflow the line budget is refused: the
+ * only alternative would be truncating a home directory. */
+static int test_oversized_home_refuses_write(void)
+{
+    reset_cache_dirs();
+    static char longhome[CACHE_LINE_MAX + 100];
+    memset(longhome, 'h', sizeof(longhome) - 1);
+    longhome[0] = '/';
+    longhome[sizeof(longhome) - 1] = '\0';
+
+    struct passwd in = make_user("longhome", 70005, "");
+    in.pw_dir = longhome;
+    file_cache_save_by_name(&in);
+
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/longhome", test_cache_byname());
+    return stat(path, &st) != 0;
+}
+
+/*
+ * An entry that cannot be parsed is unlinked, exactly like an expired one.
+ * Without this, a single bad record (left by an older version, a truncated
+ * write, or a poisoning attempt) means one HTTPS round trip to LLNG per
+ * lookup of that user, for as long as the file exists.
+ */
+static int test_unparsable_entry_is_unlinked(void)
+{
+    struct passwd out = {0};
+    char buf[2048];
+    char path[512];
+    struct stat st;
+
+    /* (a) too few fields */
+    reset_cache_dirs();
+    if (write_raw_entry(test_cache_byname(), "broken", "not-a-record\n") != 0) return 0;
+    if (file_cache_load_by_name("broken", &out, buf, sizeof(buf)) == 0) return 0;
+    snprintf(path, sizeof(path), "%s/broken", test_cache_byname());
+    if (stat(path, &st) == 0) return 0;
+
+    /* (b) a line longer than the readers' fgets() buffer: it comes back
+     *     truncated, so the field count is wrong. This is exactly what the
+     *     unbounded fprintf() used to produce. */
+    reset_cache_dirs();
+    char big[2048];
+    int off = snprintf(big, sizeof(big), "toolong:70006:100:");
+    memset(big + off, 'X', 1500);
+    snprintf(big + off + 1500, sizeof(big) - off - 1500,
+             ":/home/toolong:/bin/bash:%ld\n", (long)time(NULL));
+    if (write_raw_entry(test_cache_byname(), "toolong", big) != 0) return 0;
+    if (file_cache_load_by_name("toolong", &out, buf, sizeof(buf)) == 0) return 0;
+    snprintf(path, sizeof(path), "%s/toolong", test_cache_byname());
+    if (stat(path, &st) == 0) return 0;
+
+    /* (c) an unparsable timestamp, and (d) a record filed under the wrong key:
+     *     both are permanently unusable, both must be cleared. */
+    reset_cache_dirs();
+    if (write_raw_entry(test_cache_byname(), "badts",
+                        "badts:70007:100::/home/badts:/bin/sh:not-a-number\n") != 0) return 0;
+    if (file_cache_load_by_name("badts", &out, buf, sizeof(buf)) == 0) return 0;
+    snprintf(path, sizeof(path), "%s/badts", test_cache_byname());
+    if (stat(path, &st) == 0) return 0;
+
+    reset_cache_dirs();
+    char rec[256];
+    snprintf(rec, sizeof(rec), "someone_else:70008:100::/home/x:/bin/sh:%ld\n",
+             (long)time(NULL));
+    if (write_raw_entry(test_cache_byname(), "claimed", rec) != 0) return 0;
+    if (file_cache_load_by_name("claimed", &out, buf, sizeof(buf)) == 0) return 0;
+    snprintf(path, sizeof(path), "%s/claimed", test_cache_byname());
+    if (stat(path, &st) == 0) return 0;
+    return 1;
+}
+
 /*
  * The READ path must never mkdir() and must never warn on an absent cache.
  * On a host where /var/cache/nss_llng does not exist, every unprivileged
@@ -659,6 +850,14 @@ int main(void)
     RUN(test_split_field_count);
     RUN(test_cache_dirs_are_0711_entries_0644);
     RUN(test_stale_temp_file_does_not_block_save);
+
+    printf("\n  Bounded records / unlink on corruption:\n");
+    RUN(test_oversized_gecos_is_trimmed_not_poisoned);
+    RUN(test_separator_in_gecos_is_folded);
+    RUN(test_gecos_trim_keeps_utf8_valid);
+    RUN(test_unrepresentable_home_refuses_write);
+    RUN(test_oversized_home_refuses_write);
+    RUN(test_unparsable_entry_is_unlinked);
 
     printf("\n  Cache trust checks (anti cache-poisoning):\n");
     RUN(test_load_rejects_writable_file);
