@@ -394,6 +394,120 @@ static int test_binary_data(void)
     return 1;
 }
 
+/*
+ * Test that a stored secret larger than the caller's output buffer is refused
+ * instead of overflowing it. Before the fix, secret_store_get() passed the
+ * caller's buffer straight to EVP_DecryptUpdate() with the on-disk ciphertext
+ * length and never compared it to secret_size, so the overflow happened before
+ * the GCM tag was even verified.
+ *
+ * The canary bytes around the (deliberately undersized) buffer must be intact
+ * on return.
+ */
+static int test_output_buffer_too_small(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char big_secret[512];
+    for (size_t i = 0; i < sizeof(big_secret); i++) {
+        big_secret[i] = (unsigned char)(i & 0xff);
+    }
+
+    int ret = secret_store_put(store, "toobig:key", big_secret, sizeof(big_secret));
+    if (ret != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* 64-byte window inside a 192-byte area; the surrounding bytes are canaries. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *small = area + 64;
+    size_t actual_len = 12345;
+
+    ret = secret_store_get(store, "toobig:key", small, 64, &actual_len);
+
+    int ok = (ret == -1);
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 128) continue;  /* the buffer we handed over */
+        if (area[i] != 0xAA) ok = 0;       /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "toobig:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
+/*
+ * The bound must be exactly the plaintext length: AES-256-GCM is unpadded, so
+ * a caller that allocates exactly what *actual_len will report is a correct
+ * caller and must not be refused. Guards against re-introducing the
+ * "+ TAG_SIZE" margin flagged in review of PR #222.
+ */
+static int test_output_buffer_exact_size(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = (char *)test_store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    unsigned char secret[64];
+    for (size_t i = 0; i < sizeof(secret); i++) {
+        secret[i] = (unsigned char)(0x40 + (i & 0x1f));
+    }
+
+    if (secret_store_put(store, "exact:key", secret, sizeof(secret)) != 0) {
+        secret_store_destroy(store);
+        return 0;
+    }
+
+    /* Exactly sizeof(secret) bytes of usable buffer, with canaries around it. */
+    unsigned char area[192];
+    memset(area, 0xAA, sizeof(area));
+    unsigned char *exact = area + 64;
+    size_t actual_len = 0;
+
+    int ok = (secret_store_get(store, "exact:key", exact, sizeof(secret),
+                               &actual_len) == 0);
+    if (ok && actual_len != sizeof(secret)) ok = 0;
+    if (ok && memcmp(exact, secret, sizeof(secret)) != 0) ok = 0;
+    for (size_t i = 0; i < sizeof(area); i++) {
+        if (i >= 64 && i < 64 + sizeof(secret)) continue;
+        if (area[i] != 0xAA) ok = 0;   /* canary clobbered => overflow */
+    }
+
+    secret_store_delete(store, "exact:key");
+    secret_store_destroy(store);
+    return ok;
+}
+
 /* Test error message */
 static int test_error_message(void)
 {
@@ -672,6 +786,8 @@ int main(void)
     TEST(overwrite);
     TEST(disabled);
     TEST(binary_data);
+    TEST(output_buffer_too_small);
+    TEST(output_buffer_exact_size);
     TEST(error_message);
     TEST(rotate_key_not_implemented);
     TEST(temp_file_is_private);
