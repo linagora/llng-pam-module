@@ -1,7 +1,10 @@
 # Session Containment Hardening
 
-> **Status (v0.1.x):** PR1 of a two-part hardening series. PR2 (auditd as
-> primary trace) will be tracked separately.
+> **Status: shipped in v0.2.0.** Both halves of the hardening series are
+> implemented and opt-in: session containment via
+> `ob-bastion-setup --enable-hardening` (this document) and the primary audit
+> trace via `ob-bastion-setup --enable-audit-trace`, documented in
+> [Primary audit trace](audit.md).
 
 This document describes the host-level configuration deployed by
 `ob-bastion-setup --enable-hardening` to keep an authenticated user from
@@ -31,9 +34,10 @@ An authenticated user can still try to:
    commands run later, again outside the recorded session.
 3. **Fork bomb** the host to deny service to other users.
 
-PR1 closes channels (1)–(3) by configuration. PR2 will additionally
-log every `execve()` system-wide via `auditd` so any attempt to bypass
-the recorder leaves a primary trace independent of the wrapper.
+`--enable-hardening` closes channels (1)–(3) by configuration.
+`--enable-audit-trace` additionally logs every `execve()` system-wide via
+`auditd`, so any attempt to bypass the recorder leaves a primary trace
+independent of the wrapper — see [audit.md](audit.md).
 
 ## What `ob-bastion-setup --enable-hardening` deploys
 
@@ -175,7 +179,7 @@ loginctl list-users
 loginctl show-user <user> | grep Linger
 ```
 
-End-to-end manual check (the canonical PR1 acceptance test):
+End-to-end manual check (the canonical containment acceptance test):
 
 ```bash
 # From a workstation
@@ -240,12 +244,14 @@ To activate the hardening at install time (opt-in, off by default):
 ob-bastion-setup --portal https://auth.example.com --enable-hardening
 ```
 
-## What PR1 does **not** cover
+## What `--enable-hardening` does **not** cover
 
-- **Primary trace.** If the recorder is bypassed (e.g. through a PAM
-  mis-config), nothing else logs `execve()`. PR2 will add an `auditd`
-  ruleset that records every `execve()` system-wide, so even a process
-  that escapes the recorder leaves a syscall trail.
+- **Primary trace.** Containment alone does not log `execve()`: if the recorder
+  is bypassed (e.g. through a PAM mis-config), nothing else records what ran.
+  That is what the separate `--enable-audit-trace` opt-in is for — it installs
+  an `auditd` ruleset that records every `execve()` system-wide, so a process
+  that escapes the recorder still leaves a syscall trail. See
+  [audit.md](audit.md).
 - **Container escape / kernel exploits.** Out of scope; rely on
   upstream kernel hardening and timely patching.
 - **`systemd-run --user` with a service template.** Covered by

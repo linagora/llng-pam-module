@@ -1,9 +1,13 @@
 # Design: tamper-evident session recording (root socket sink)
 
-Status: **proposed**.
-Issues: [#151] (a user can delete/alter their own recordings), [#150] (`who`
-does not show bastion sessions — solved as a side effect, see §11).
-Repo: `open-bastion` only (no LLNG change).
+Status: **implemented and shipped in v0.5.0** (`ob-record-sink`,
+`ob-record.socket`, `ob-record-connect`).
+Issues: [#151] (a user can delete/alter their own recordings) — solved as
+described here. [#150] (`who` does not show bastion sessions) — solved
+**differently**; see §11.
+Kept as a design record: for the shipped behaviour read
+[session-recording.md](../session-recording.md), which wins over this document
+wherever they differ. Repo: `open-bastion` only (no LLNG change).
 
 ## Threat model (agreed)
 
@@ -319,17 +323,26 @@ degrade to "recorded but user-deletable". The legacy user-owned-file path is
   guarantees are needed, restrict the socket to a dedicated group and/or have
   `ForceCommand` inject a per-session nonce the sink correlates with sshd.
 
-## §11. Bonus: this also fixes #150 (`who`)
+## §11. #150 (`who`) — proposed here, solved another way
 
-Because the sink runs as **root**, it (or a small helper it calls) can register
-the session in `utmp`/`wtmp` at start and `DEAD_PROCESS` at end — something the
-user-side recorder cannot do (no `utmp` group). With `ForceCommand`, OpenSSH
-never writes a utmp entry (every session is a "command" execution, and `script`
-hides the pty), so `who`/`w`/`last` show nothing today. Registering from the
-sink, keyed on the session's `ssh_tty` (from the header) and the
-`SO_PEERCRED` user, makes native session tooling work again **without** a
-setgid-utmp binary. #150 thus folds into this work instead of needing its own
-privileged component.
+> **Not implemented as designed.** This section is kept for the record; do not
+> use it as a description of the shipped system. `ob-record-sink` writes no
+> `utmp`/`wtmp` entry (`grep -rn utmp src/` finds nothing).
+
+The original proposal: because the sink runs as **root**, it (or a small helper
+it calls) could register the session in `utmp`/`wtmp` at start and
+`DEAD_PROCESS` at end — something the user-side recorder cannot do (no `utmp`
+group) — keyed on the session's `ssh_tty` (from the header) and the
+`SO_PEERCRED` user, making native session tooling work again without a
+setgid-utmp binary.
+
+**What actually shipped (v0.5.1):** the cause turned out to be simpler. The
+generated `/etc/pam.d/sshd` omitted `pam_systemd`, so sessions were never
+registered with `systemd-logind` at all. Both setup scripts now append
+`session optional pam_systemd.so` to the sshd session stack (only when the
+module is installed), which makes `who`, `w`, `loginctl` and the heartbeat's
+connected-users report see cert-hop sessions again — with no privileged
+component in the recording path and no utmp writing from the sink.
 
 ## §12. Migration
 

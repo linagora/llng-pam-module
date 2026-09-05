@@ -451,9 +451,10 @@ loginctl show-user <user> | grep Linger    # expected: Linger=no
 The full rationale, deployment details, and re-enable instructions are
 in [`hardening.md`](hardening.md).
 
-> **Note:** PR2 will introduce an `auditd` ruleset as the primary
-> trace, so any process that escapes the recorder still produces a
-> syscall log. Tracked separately.
+> **Note:** the `auditd` primary trace shipped in v0.2.0. Enable it with
+> `ob-bastion-setup --enable-audit-trace` (opt-in) so any process that escapes
+> the recorder still produces a syscall log. See
+> [Primary audit trace](audit.md).
 
 ## See Also
 
