@@ -69,6 +69,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/etc/open-bastion/nss_openbastion.conf` (accepted range 0–86400 s); see
   "NSS cache and LLNG outages" in the admin guide for the trade-off against
   how quickly a deprovisioned user disappears.
+- **Only root can refill the NSS cache, which is now visible in normal
+  operation.** The module authenticates to LLNG with the root-only server
+  token, so an unprivileged process can never query the portal and reads the
+  file cache alone. With `nscd` gone there is no other refresher: an entry that
+  expires while no root process happens to resolve that user is simply not
+  renewed. In a long idle SSH session, past `cache_ttl` since the last
+  root-side lookup, `ls -l` falls back to numeric uids, `whoami`/`id` fail, and
+  an outgoing `ssh`/`scp` refuses with `You don't exist, go away!`. Any
+  root-side lookup — a new session, `su`, `sudo`, a `cron` job — repairs it at
+  once, and authentication and authorization are unaffected; this is a
+  nuisance, not a lockout. Documented under "Who refreshes the cache" in the
+  admin guide, with `cache_ttl` and a periodic root lookup as mitigations. A
+  proper fix (a socket-activated root refresher like `ob-cert-daemon`, or a
+  refresh driven by `ob-heartbeat`) is not implemented yet.
+- **A lookup for a user that does not exist now reaches LLNG on every
+  attempt.** Negative results are cached in memory only, per process, and the
+  on-disk cache is written on success only — deliberately, since it is
+  populated from an unauthenticated path (`sshd` resolves the login name before
+  authenticating) and letting that path create files would let a remote client
+  fill `/var/cache/nss_llng` with inodes. Since `sshd` forks per connection,
+  each SSH attempt with an unknown username costs one HTTPS `/pam/userinfo`
+  request, triggerable by an unauthenticated remote client. `nscd` only
+  partially covered this before: its negative cache is keyed per name
+  (`negative-time-to-live passwd`, 20 s), so it absorbed a flood repeating one
+  username and did nothing against a flood of distinct ones. Bound it where
+  connection floods are already bounded — `MaxStartups`, `fail2ban`/CrowdSec —
+  as described under "Lookups for users that do not exist" in the admin guide.
+
+### Known issues
+
+- **SELinux in `enforcing` mode (Rocky/RHEL/AlmaLinux) is untested with the
+  on-disk cache.** An NSS module runs inside the calling process, so the cache
+  is written from `sshd_t`, `sudo_t`, `crond_t` and friends rather than from a
+  daemon of its own. If the default policy denies those domains a write under
+  `/var/cache/nss_llng`, the write fails silently (a failed cache write is
+  non-fatal by design) and the cross-process cache is never populated on RPM
+  hosts — which would make the root-only-refresh regime above the normal state
+  rather than an edge case. This has **not** been verified on Rocky 9
+  enforcing, and no policy module ships with the RPM. The admin guide gives the
+  `ausearch`/`audit2allow` check to run before deploying there, and a sketch of
+  the policy module such a host would need.
 
 ## [0.6.2] - 2026-06-25
 

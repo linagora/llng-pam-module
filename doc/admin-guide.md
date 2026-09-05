@@ -502,6 +502,136 @@ confused with it:
   `cache_ttl`. Keeping one break-glass service account is the recommended
   backstop for a prolonged outage.
 
+#### Who refreshes the cache
+
+Only **root** can populate the NSS cache. The module authenticates to LLNG with
+the server token in `/etc/open-bastion/`, which is `0600 root:root`, so an
+unprivileged process can never query the portal: for it, the file cache under
+`/var/cache/nss_llng` is the *only* source of LLNG-backed passwd data
+(`getpwuid` is served from the cache and nothing else). Root processes refill
+it as a side effect of their own lookups — `sshd` on every login, `sudo`,
+`cron`, `systemd --user` session setup.
+
+The consequence, in **normal operation and with LLNG perfectly healthy**: an
+entry that expires while no root process happens to resolve that user is not
+renewed. In a long idle SSH session, once `cache_ttl` has elapsed since the
+last root-side lookup:
+
+- `ls -l` shows numeric uids instead of names;
+- `whoami` and `id` fail;
+- an outgoing `ssh` or `scp` from that session refuses to start with
+  `You don't exist, go away!` (OpenSSH calls `getpwuid(getuid())` at startup).
+
+Anything that triggers a root-side lookup repairs it instantly — a new SSH
+session, an `su`, a `sudo`, any `cron` job for that user — so this is a
+transient nuisance in an idle session, not a lockout: authentication and
+authorization are unaffected. Two mitigations, in order of bluntness:
+
+```bash
+# 1. Raise the TTL so an idle session outlives it (also raises the
+#    deprovisioning lag -- see the table above).
+sed -i 's/^cache_ttl = .*/cache_ttl = 3600/' /etc/open-bastion/nss_openbastion.conf
+
+# 2. Or keep a root-side lookup ticking. Any cron job resolving the users you
+#    care about will do; it runs as root, so it repopulates the shared cache.
+```
+
+Keeping `nscd` installed does **not** fix this — nscd's own entries expire the
+same way, and it repopulates them through this same module, so a refresh from
+an unprivileged caller still cannot reach LLNG.
+
+Removing the root-only constraint properly needs a privileged refresher: a
+socket-activated root helper along the lines of the existing `ob-cert-daemon`,
+or a periodic refresh driven by `ob-heartbeat` (which already runs as root on a
+timer). Neither is implemented yet.
+
+#### Lookups for users that do not exist
+
+A name LLNG does not know is cached **in memory only**, per process. The
+on-disk cache is written on success only, on purpose: it is populated from an
+unauthenticated code path (`sshd` resolves the login name *before*
+authenticating), and letting that path create files would hand a remote
+attacker a way to fill `/var/cache/nss_llng` with inodes.
+
+So every SSH attempt with an unknown username costs one HTTPS
+`/pam/userinfo` request to LLNG, and `sshd` forks a fresh process per
+connection, so the in-memory negative entry never helps across attempts. This
+is reachable by an unauthenticated remote client and should be sized for.
+
+Two honest qualifications:
+
+- `nscd` never really covered this either. Its negative cache
+  (`negative-time-to-live passwd`, 20 s by default) is keyed *per name*, so it
+  absorbed a flood repeating one username and did nothing at all against a
+  flood of distinct usernames — which is the cheap attack. Dropping nscd
+  widens the repeated-name case only.
+- The cost is one request per *connection*, and `sshd` bounds concurrent
+  pre-auth connections itself.
+
+If this matters on an exposed bastion, bound it where connection floods are
+already bounded, not in the resolver:
+
+```
+# /etc/ssh/sshd_config -- cap unauthenticated connections in flight
+MaxStartups 10:30:60
+```
+
+and keep `fail2ban` or CrowdSec (which this project already integrates for PAM)
+watching `sshd` for repeated failures from one source.
+
+#### SELinux (Rocky, RHEL, AlmaLinux)
+
+The cache is written from the **calling process's** domain — `sshd_t`,
+`sudo_t`, `crond_t` — because an NSS module runs inside whatever process
+resolves a user, not in a daemon of its own. On a host with SELinux in
+`enforcing` mode, the default policy may not permit those domains to create
+files under `/var/cache/nss_llng`.
+
+**This has not been verified on Rocky 9 enforcing.** If the write is denied,
+it fails silently (the module treats a failed cache write as non-fatal and
+keeps serving from LLNG), and the on-disk cache is simply never populated —
+which makes the "who refreshes the cache" section above the normal state of
+affairs rather than an edge case, since nothing would ever be shared between
+processes.
+
+Check it before deploying on an enforcing host:
+
+```bash
+getenforce                     # Enforcing?
+ls -la /var/cache/nss_llng/    # populated after an SSH login?
+ausearch -m avc -ts recent | grep nss_llng
+```
+
+There is no stock type that `sshd_t`, `sudo_t` and `crond_t` may all write, so
+relabelling to an existing type is not a solution: this needs a small policy
+module giving the directory its own type and allowing the NSS callers (the
+`nsswitch_domain` attribute is exactly the set of domains that resolve users)
+to manage it. Untested sketch, to be confirmed against the actual denials:
+
+```
+# nss_llng.te
+policy_module(nss_llng, 1.0.0)
+
+require { attribute nsswitch_domain; }
+
+type nss_llng_cache_t;
+files_type(nss_llng_cache_t)
+
+allow nsswitch_domain nss_llng_cache_t:dir  { search add_name remove_name write };
+allow nsswitch_domain nss_llng_cache_t:file { create read write open getattr unlink rename };
+```
+
+```bash
+make -f /usr/share/selinux/devel/Makefile nss_llng.pp && semodule -i nss_llng.pp
+semanage fcontext -a -t nss_llng_cache_t '/var/cache/nss_llng(/.*)?'
+restorecon -Rv /var/cache/nss_llng
+```
+
+Confirm against the real denials with `ausearch -m avc -ts recent | audit2allow`
+rather than trusting the sketch. `setenforce 0` is a diagnostic, not a fix.
+Shipping such a module from the RPM is the correct long-term answer; the RPM
+does not ship one yet.
+
 ### Step 4: Configure NSS
 
 ```bash

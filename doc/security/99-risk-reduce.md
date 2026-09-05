@@ -249,6 +249,11 @@ Avant remédiation, ce risque est en **zone rouge** (P=2, I=4). La remédiation 
 >
 > **Contrepartie en cas de panne LLNG :** le module ne sert jamais d'entrée périmée (elle est supprimée à la lecture) et un échec transitoire renvoie `NSS_STATUS_UNAVAIL` sans repli sur le cache. Le tampon de résolution vaut donc exactement `cache_ttl` (défaut **300 s**, `/etc/open-bastion/nss_openbastion.conf`), là où le cache persistant de `nscd` couvrait plusieurs dizaines de minutes. Augmenter `cache_ttl` (jusqu'à 86400 s) sur les hôtes exposés à ce risque.
 
+> **Trois limites à connaître en régime nominal**, détaillées dans le guide d'administration :
+> 1. **Seul root remplit le cache** (le jeton serveur LLNG est `0600 root:root`) : une entrée qui expire sans qu'un processus root ne résolve l'utilisateur n'est pas renouvelée. Dans une session SSH inactive : `ls -l` en uid numériques, `whoami`/`id` en échec, `ssh`/`scp` sortant refusé (« You don't exist, go away! »). Toute résolution root (nouvelle session, `su`, `sudo`, `cron`) répare immédiatement ; l'authentification et l'autorisation ne sont pas affectées.
+> 2. **Les résultats négatifs ne sont cachés qu'en mémoire, par processus** : le cache fichier n'est peuplé que sur succès, volontairement, car il est alimenté depuis un chemin non authentifié (`sshd` résout le nom avant l'authentification) et l'y autoriser donnerait à un attaquant distant un moyen de remplir `/var/cache/nss_llng` d'inodes. Chaque tentative SSH avec un nom inexistant coûte donc une requête HTTPS `/pam/userinfo`. `nscd` ne couvrait ce cas que partiellement (cache négatif keyé par nom, 20 s). Borner côté connexions (`MaxStartups`, `fail2ban`/CrowdSec).
+> 3. **SELinux `enforcing` (Rocky/RHEL) non validé** : le cache est écrit depuis le domaine du processus appelant (`sshd_t`, `sudo_t`, `crond_t`). Si la politique par défaut le refuse, l'écriture échoue en silence et le cache partagé n'est jamais peuplé — vérifier par `ausearch -m avc` avant déploiement.
+
 Pistes pour réduire davantage :
 
 1. **Test de recouvrement périodique** : Simuler un lockout (désactiver LLNG en environnement de test) et valider la procédure console + compte de service de secours au moins une fois par an
