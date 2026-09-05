@@ -278,9 +278,12 @@ test_node_role_default() {
 }
 
 # ── Test 19: the generated sshd PAM auth stack is fail-closed (#180) ──
-# A bare "auth required pam_permit.so" makes pam_authenticate() succeed for any
-# password if sshd ever runs the stack (PasswordAuthentication /
-# KbdInteractiveAuthentication yes with UsePAM yes).
+# A bare "auth required pam_permit.so" made pam_authenticate() succeed for any
+# password if sshd ever ran the stack (PasswordAuthentication /
+# KbdInteractiveAuthentication yes with UsePAM yes). The stack now denies
+# outright: sshd never calls pam_authenticate() for a certificate login, so the
+# only thing that reaches it is a password/keyboard-interactive attempt.
+# tests/test_ob_pam_runtime.sh proves the denial by running the stack.
 test_pam_sshd_fail_closed() {
     local out
     out=$(
@@ -288,7 +291,7 @@ test_pam_sshd_fail_closed() {
         parse_args -p "https://x" --dry-run
         configure_pam_sshd 2>&1
     )
-    assert_auth_stack_fail_closed "generated /etc/pam.d/sshd auth stack is fail-closed" "$out"
+    assert_auth_stack_denies "generated /etc/pam.d/sshd auth stack denies" "$out"
 }
 
 # ── Test 20: the Mode E sudo stack keeps its pam_deny backstop (#180) ──

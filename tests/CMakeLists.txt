@@ -239,3 +239,23 @@ add_test(NAME test_ssh_key_policy COMMAND test_ssh_key_policy)
 
 # Note: Integration tests require a running Open Bastion instance
 # and are meant to be run manually
+
+# ── Runtime PAM stack test (issue #180) ─────────────────────────────────────
+# tests/test_ob_pam_runtime.sh builds tests/pam_stack_probe.c and calls
+# pam_authenticate() on every auth stack the project generates, asserting that
+# the certificate-mode sshd stacks deny and the mode-c sudo stack still
+# succeeds. The other tests/test_ob_*.sh suites only check the TEXT of those
+# stacks, which is what let an inverted stack ship once already.
+#
+# It exits 77 (and is reported as skipped) when a C compiler, libpam0g-dev or
+# pam_start_confdir() is unavailable, so it never turns a build red on a host
+# that cannot run it. CI installs libpam0g-dev, so it runs there.
+find_program(BASH_EXECUTABLE bash)
+if(BASH_EXECUTABLE)
+    add_test(NAME test_ob_pam_runtime
+             COMMAND ${BASH_EXECUTABLE}
+                     "${CMAKE_CURRENT_SOURCE_DIR}/test_ob_pam_runtime.sh")
+    set_tests_properties(test_ob_pam_runtime PROPERTIES SKIP_RETURN_CODE 77)
+else()
+    message(STATUS "bash not found — skipping test_ob_pam_runtime")
+endif()
