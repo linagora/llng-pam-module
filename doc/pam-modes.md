@@ -63,14 +63,13 @@ You can restrict allowed key types with [SSH Key Policy](security.md#ssh-key-pol
 ```
 # /etc/pam.d/sshd
 #
-# AUTHENTICATION: Handled by SSH keys (not PAM)
+# AUTHENTICATION: Handled by SSH keys (not PAM); the PAM auth stack denies
 # - Unix passwords: NOT USED (disable PasswordAuthentication in sshd_config)
 # - LLNG tokens: NOT USED
 # - SSH keys: REQUIRED
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       [success=1 default=ignore] pam_permit.so
 auth       required     pam_deny.so
 
 account    required     pam_openbastion.so
@@ -86,15 +85,20 @@ PasswordAuthentication no
 PubkeyAuthentication yes
 ```
 
-> **Important:** `PasswordAuthentication no` (and `KbdInteractiveAuthentication no`)
-> is what actually keeps passwords out of this mode — a certificate/pubkey login
-> never calls `pam_authenticate()`, so the `auth` stack above is only reached if
-> sshd is left with password or keyboard-interactive authentication enabled.
-> The `pam_deny.so` backstop makes that stack fail closed instead of silently
-> granting everything, but it is a backstop, not a replacement for the sshd
-> settings. `ob-bastion-setup` / `ob-backend-setup` write both; if you configure
-> PAM by hand (or via the Debian package's `pam-mode` debconf prompt, which does
-> not touch `sshd_config`), set the sshd options yourself.
+> **Why `auth required pam_deny.so`?** A certificate/pubkey login never calls
+> `pam_authenticate()` — sshd only runs `pam_acct_mgmt()` for it — so this
+> `auth` stack is reached only by password and keyboard-interactive
+> authentication, which is exactly what this mode refuses. The single
+> `pam_deny.so` line returns `PAM_AUTH_ERR` for those: a deliberate,
+> unconditional refusal. Earlier versions used `auth required pam_permit.so`
+> here, which made `pam_authenticate()` succeed for any password on a host
+> where password authentication was still enabled.
+>
+> Set `PasswordAuthentication no` and `KbdInteractiveAuthentication no` anyway,
+> so sshd never prompts in the first place. `ob-bastion-setup` /
+> `ob-backend-setup` write both; the Debian package's `pam-mode` debconf prompt
+> writes the PAM stack but does **not** touch `sshd_config`, so set the sshd
+> options yourself if you install that way.
 
 ## Mode D: All Methods with LLNG Authorization (Most Flexible)
 
@@ -162,14 +166,13 @@ PermitRootLogin no
 ```
 # /etc/pam.d/sshd
 #
-# AUTHENTICATION: Handled by SSH certificates (not PAM)
+# AUTHENTICATION: Handled by SSH certificates (not PAM); the PAM auth stack denies
 # - Unix passwords: DISABLED
 # - LLNG tokens: NOT USED for SSH
 # - SSH certificates: REQUIRED (signed by LLNG CA)
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       [success=1 default=ignore] pam_permit.so
 auth       required     pam_deny.so
 
 account    required     pam_openbastion.so

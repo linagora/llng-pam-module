@@ -375,10 +375,14 @@ auth       required     pam_deny.so
 ## Mode C: SSH Key + LLNG Authorization
 
 ```
-auth       [success=1 default=ignore] pam_permit.so
 auth       required     pam_deny.so
 account    required     pam_openbastion.so
 ```
+
+<!-- pause -->
+
+The `auth` stack denies on purpose: sshd never calls `pam_authenticate()` for
+key/certificate logins, so anything reaching it is a password attempt.
 
 <!-- end_slide -->
 
