@@ -2,8 +2,14 @@
  * ssh_key_policy.h - SSH key type and size policy enforcement
  *
  * This module enforces policy restrictions on SSH key types and minimum
- * key sizes. It validates keys during authentication based on the algorithm
- * information exposed by SSH via the SSH_USER_AUTH environment variable.
+ * key sizes.
+ *
+ * Two sources of truth are supported:
+ *   - an algorithm *name* (e.g. from SSH_USER_AUTH), which cannot carry the
+ *     RSA modulus size — see ssh_key_policy_check();
+ *   - the key material itself (sshd's `%k` token), decoded by
+ *     ssh_key_blob_info(), which yields both the real type and the real size.
+ * Production enforcement uses ssh_key_policy_check_key() with the latter.
  *
  * Copyright (C) 2025 Linagora
  * License: AGPL-3.0
@@ -13,6 +19,7 @@
 #define SSH_KEY_POLICY_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* SSH key types */
 typedef enum {
@@ -83,12 +90,17 @@ ssh_key_type_t ssh_key_parse_algorithm(const char *algorithm);
 int ssh_key_type_bits(ssh_key_type_t type);
 
 /*
- * Check if a key type is allowed by the policy.
- * Also checks minimum key size requirements.
+ * Check if a key type is allowed by the policy (TYPE ONLY).
+ *
+ * WARNING: this entry point cannot enforce `min_rsa_bits`, because an RSA
+ * algorithm name carries no size information. It accepts any RSA key when
+ * `allow_rsa` is set. Production code that has (or should have) the key size
+ * MUST use ssh_key_policy_check_key() instead; this variant is kept for
+ * callers that only ever see an algorithm string.
  *
  * Parameters:
  *   policy    - Policy configuration
- *   algorithm - SSH algorithm string from SSH_USER_AUTH
+ *   algorithm - SSH algorithm string (e.g. from SSH_USER_AUTH)
  *   result    - Output validation result (may be NULL)
  *
  * Returns true if allowed, false if rejected.
@@ -96,6 +108,50 @@ int ssh_key_type_bits(ssh_key_type_t type);
 bool ssh_key_policy_check(const ssh_key_policy_t *policy,
                           const char *algorithm,
                           ssh_key_validation_result_t *result);
+
+/*
+ * Full policy check: key type AND key size.
+ *
+ * `key_bits` is the size derived from the key material itself (see
+ * ssh_key_blob_info()); pass 0 when it is unknown.
+ *
+ * Fail-closed semantics: when the policy is enabled and the size of a
+ * variable-size key (RSA) is unknown, the key is REJECTED — an unverifiable
+ * key must not be treated as a compliant one.
+ *
+ * Returns true if allowed, false if rejected.
+ */
+bool ssh_key_policy_check_key(const ssh_key_policy_t *policy,
+                              const char *algorithm,
+                              int key_bits,
+                              ssh_key_validation_result_t *result);
+
+/* Maximum accepted length of a base64-encoded SSH key/certificate blob. */
+#define SSH_KEY_BLOB_B64_MAX 16384
+
+/*
+ * Decode a base64-encoded SSH public key or certificate blob — the `%k` token
+ * of sshd's AuthorizedKeysCommand / AuthorizedPrincipalsCommand — and derive
+ * the key type and size from the key material itself.
+ *
+ * This is strictly stronger than parsing an algorithm *name*: the RSA modulus
+ * size is only available here, and the type cannot be misreported.
+ *
+ * Parameters:
+ *   blob_b64  - base64 blob (no whitespace, optional '=' padding)
+ *   algo_out  - buffer receiving the algorithm name found inside the blob
+ *               (may be NULL), e.g. "ssh-rsa-cert-v01@openssh.com"
+ *   algo_sz   - size of algo_out
+ *   type_out  - receives the detected key type (may be NULL)
+ *   bits_out  - receives the key size in bits (may be NULL)
+ *
+ * Returns true when the blob was decoded and understood, false otherwise
+ * (invalid base64, truncated blob, unknown key type).
+ */
+bool ssh_key_blob_info(const char *blob_b64,
+                       char *algo_out, size_t algo_sz,
+                       ssh_key_type_t *type_out,
+                       int *bits_out);
 
 /*
  * Get human-readable name for a key type.

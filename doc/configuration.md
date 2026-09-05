@@ -1,5 +1,46 @@
 # Configuration Reference
 
+## Boolean values
+
+Boolean settings accept exactly `true`, `yes`, `1`, `on` and `false`, `no`,
+`0`, `off` — lowercase only. Any other value (an empty value, `TRUE`, `tru`,
+`enabled`, …) is a **fatal configuration error**: the offending key and value
+are logged to syslog and the PAM module refuses to start rather than guessing.
+
+This is deliberate. Before, an unrecognised value silently meant `false`, so a
+typo in `verify_ssl` disabled TLS certificate verification without any warning.
+
+The same strict rule applies to PAM module arguments in `/etc/pam.d/*`, where
+both `ssh_cert_aware=true` and `ssh_cert_aware="true"` are accepted.
+
+## Comments
+
+A `#` or `;` at the start of a line comments out the whole line. A `#` may also
+appear at the end of a value line:
+
+```ini
+verify_ssl = true          # comment: everything from '#' is ignored
+```
+
+The rule for inline comments is narrow on purpose, so it can never truncate a
+legitimate value:
+
+| Written | Value used | Why |
+|---|---|---|
+| `verify_ssl = true # prod` | `true` | `#` preceded by whitespace ⇒ comment |
+| `portal_url = https://sso.example.com/#frag` | `https://sso.example.com/#frag` | `#` not preceded by whitespace |
+| `client_secret = s3cr3t # keep` | `s3cr3t # keep` | secret-bearing key, never stripped |
+| `server_group = "prod # 2"` | `prod # 2` | quoted value, never stripped |
+| `server_group = "prod" # note` | `prod` | value ends at the closing quote |
+
+Keys exempt from inline-comment stripping (their value is an opaque secret or
+hash, where `#` is an ordinary character): `client_secret`, `notify_secret`,
+`webhook_secret`, `request_signing_secret`, `crowdsec_bouncer_key`,
+`crowdsec_password`, `cert_pin`.
+
+For any other key, put the value in double quotes if it must contain a `#`
+preceded by a space.
+
 ## Main Configuration File
 
 ### /etc/open-bastion/openbastion.conf
@@ -25,12 +66,10 @@ timeout = 10
 verify_ssl = true
 # ca_cert = /etc/ssl/certs/custom-ca.pem
 
-# Cache settings
-cache_enabled = true
-cache_dir = /var/cache/open-bastion
-cache_ttl = 300
-cache_ttl_high_risk = 60
-high_risk_services = sudo,su
+# Authorization cache (offline mode); TTL comes from the server
+auth_cache_enabled = true
+# auth_cache_dir = /var/cache/open-bastion/auth
+# auth_cache_force_online = /etc/open-bastion/force_online
 
 # Logging: error, warn, info, debug
 log_level = warn
@@ -78,7 +117,7 @@ auth required pam_openbastion.so portal_url=https://auth.example.com debug
 | `server_group=GROUP` | Override server group                  |
 | `debug`              | Enable debug logging                   |
 | `authorize_only`     | Skip password check (for SSH key mode) |
-| `no_cache`           | Disable token caching                  |
+| `no_auth_cache`      | Disable the authorization cache        |
 | `insecure`           | Skip SSL verification                  |
 | `no_audit`           | Disable audit logging                  |
 | `no_rate_limit`      | Disable rate limiting                  |

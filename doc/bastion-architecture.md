@@ -248,6 +248,12 @@ cache_ttl = 300
 min_uid = 10000
 max_uid = 60000
 default_gid = 100
+# Policy range for a server-supplied gid (LDAP gidNumber via
+# pamAccessExportedVars). Defaults to the Debian/RHEL system-vs-user group
+# boundary; gid 0 is always refused. An out-of-range gid falls back to
+# default_gid with a syslog warning.
+min_gid = 1000
+max_gid = 65533
 ```
 
 ## Automatic Account Creation

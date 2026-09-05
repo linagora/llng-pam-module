@@ -464,6 +464,346 @@ TEST(scenario_enterprise_fips)
     ASSERT(ssh_key_policy_check(&policy, "ssh-rsa", &result) == true);
 }
 
+
+/* ----------------------------------------------------------------------- *
+ * Real key/certificate blobs, as sshd passes them via %k.
+ * Generated with ssh-keygen; sizes verified with `ssh-keygen -lf`.
+ * ----------------------------------------------------------------------- */
+
+/* ssh-keygen -t rsa -b 2048 */
+static const char BLOB_RSA_2048[] =
+    "AAAAB3NzaC1yc2EAAAADAQABAAABAQCsIF+rKMSyTSilKcq0vCzGmlKuI5W2c2V1NkXR"
+    "+MXl03GL3gON7PIQZ4R85gN6/4xjwE8obd4L7Zf75343Hk43j4z2HUK6/FcIaq4ja2a/"
+    "vb1bXG3YvOY1KsTcL6qttSORbSi06OpZVuOWnfyyzDgiGWFC3G47RjyuMJRvEwIFRQDz"
+    "ZFxuPWSe/LJTqXUkLPj72PuZacR6deQuQ71ar0yq9hB7A9MzFLHukP6I5Ea+K1t46HgZ"
+    "TYDMc992gd5bGTMRakJOGI3J75Qk1jauC3ytzDSmXkV9gTHrTTm1YCvOStEnR/MEBM/v"
+    "G6OFnl+6UvaPjBqtcXGu5c3xeZabMuOt";
+
+/* ssh-keygen -t rsa -b 1024 (below the 2048 default minimum) */
+static const char BLOB_RSA_1024[] =
+    "AAAAB3NzaC1yc2EAAAADAQABAAAAgQDOGb73dzqJzjgpOyvDx/K85l5FDaEL/7j3LFr5"
+    "s+4tG2bv4mJ74p7qmTcOhtqH6Q1K75wVghkW82GojH3apk5zJfRb5clWD1l2stLrIpW0"
+    "aMgQHPDNXeuw9yyC5eLCXTX5iA4tO8d7byx3Y+xYySpeF2rDkU4qSLOTk4FUmjXbkw==";
+
+/* ssh-keygen -t ed25519 */
+static const char BLOB_ED25519[] =
+    "AAAAC3NzaC1lZDI1NTE5AAAAILsowx9DXYSSOCdnpC+9upU7TbW6thHwXvHY/128Qfrg";
+
+/* ssh-keygen -t ecdsa -b 256 */
+static const char BLOB_ECDSA_256[] =
+    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKqVK1kE/jZnfx0/"
+    "yx8yNWzuKCSspB0KOpSS2RHbAW+U6TbfK3R0HvG7+bQo8qLwFsvVxGqZTjekvRfsi5nU"
+    "hU8=";
+
+/* ssh-keygen -t ecdsa -b 521 */
+static const char BLOB_ECDSA_521[] =
+    "AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAAuT8vxg+KxrH8E"
+    "WRJ6eocXDsnBrLZNVr6zDI7rxzvd+/sa7KeIGJDTCXTwbXD8gEA2FzFGMW/4qL82FrWF"
+    "dsgPHwEku6zKmzJFWZ4BMruWiIM+BrGJYYOitZjj3GMOJ7MFzrnpB/J3r9gR+J4xeiIu"
+    "uQfPHNoc5VxlgrWPCMYqZT8GbA==";
+
+/* RSA-2048 key signed into a certificate */
+static const char BLOB_RSA_2048_CERT[] =
+    "AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgUryn8Ne+yHgGr0MP4wO8"
+    "vHhz2i43v3uDLamQ6/4x+a4AAAADAQABAAABAQCsIF+rKMSyTSilKcq0vCzGmlKuI5W2"
+    "c2V1NkXR+MXl03GL3gON7PIQZ4R85gN6/4xjwE8obd4L7Zf75343Hk43j4z2HUK6/FcI"
+    "aq4ja2a/vb1bXG3YvOY1KsTcL6qttSORbSi06OpZVuOWnfyyzDgiGWFC3G47RjyuMJRv"
+    "EwIFRQDzZFxuPWSe/LJTqXUkLPj72PuZacR6deQuQ71ar0yq9hB7A9MzFLHukP6I5Ea+"
+    "K1t46HgZTYDMc992gd5bGTMRakJOGI3J75Qk1jauC3ytzDSmXkV9gTHrTTm1YCvOStEn"
+    "R/MEBM/vG6OFnl+6UvaPjBqtcXGu5c3xeZabMuOtAAAAAAAAAAAAAAABAAAACXVzZXI9"
+    "ZHdobwAAAAgAAAAEZHdobwAAAABqnBxkAAAAAGqcHfcAAAAAAAAAggAAABVwZXJtaXQt"
+    "WDExLWZvcndhcmRpbmcAAAAAAAAAF3Blcm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAA"
+    "ABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5nAAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5w"
+    "ZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACCHFpmV908+"
+    "+iM0ufEo7Nt+rX9Md2WoxJWEaMGnVzXb9AAAAFMAAAALc3NoLWVkMjU1MTkAAABAiOFK"
+    "HVLY0aum9hh2KxTX+Lsnn2p05S3VSyZBfBQMacp6eq/FS+rxEu/50DGN1jYMoFHc63Ue"
+    "5Wk1x3e7toesCg==";
+
+/* Ed25519 key signed into a certificate */
+static const char BLOB_ED25519_CERT[] =
+    "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAICtgCu9HkdyTX1Ca"
+    "E0MwPqHscltZrGqwI3B9UiJe71OWAAAAILsowx9DXYSSOCdnpC+9upU7TbW6thHwXvHY"
+    "/128QfrgAAAAAAAAAAAAAAABAAAACXVzZXI9ZHdobwAAAAgAAAAEZHdobwAAAABqnBxk"
+    "AAAAAGqcHfcAAAAAAAAAggAAABVwZXJtaXQtWDExLWZvcndhcmRpbmcAAAAAAAAAF3Bl"
+    "cm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAAABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5n"
+    "AAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5wZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAA"
+    "MwAAAAtzc2gtZWQyNTUxOQAAACCHFpmV908++iM0ufEo7Nt+rX9Md2WoxJWEaMGnVzXb"
+    "9AAAAFMAAAALc3NoLWVkMjU1MTkAAABAUxtkh1L5b4++3ptPrwZ/qg5CpyQiCRR4Az0y"
+    "Eo58YMswQ4UYKSMRcVVzafe0+8medJvUE6GZ/ZUxVHhL0VVJCA==";
+
+/* ===================================================================== *
+ * Key-blob decoding (issue #181): the RSA modulus size is only available
+ * from the key material, never from the algorithm name.
+ * ===================================================================== */
+
+TEST(blob_info_rsa_2048)
+{
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ASSERT(ssh_key_blob_info(BLOB_RSA_2048, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ssh-rsa");
+    ASSERT(type == SSH_KEY_TYPE_RSA);
+    ASSERT(bits == 2048);
+}
+
+TEST(blob_info_rsa_1024)
+{
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ASSERT(ssh_key_blob_info(BLOB_RSA_1024, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ssh-rsa");
+    ASSERT(type == SSH_KEY_TYPE_RSA);
+    ASSERT(bits == 1024);
+}
+
+TEST(blob_info_ed25519)
+{
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ASSERT(ssh_key_blob_info(BLOB_ED25519, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ssh-ed25519");
+    ASSERT(type == SSH_KEY_TYPE_ED25519);
+    ASSERT(bits == 256);
+}
+
+TEST(blob_info_ecdsa)
+{
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ASSERT(ssh_key_blob_info(BLOB_ECDSA_256, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ecdsa-sha2-nistp256");
+    ASSERT(type == SSH_KEY_TYPE_ECDSA_256);
+    ASSERT(bits == 256);
+
+    ASSERT(ssh_key_blob_info(BLOB_ECDSA_521, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ecdsa-sha2-nistp521");
+    ASSERT(type == SSH_KEY_TYPE_ECDSA_521);
+    ASSERT(bits == 521);
+}
+
+/* Certificates carry a nonce before the key material; the size must still
+ * come out right (this is what the bastion actually presents). */
+TEST(blob_info_certificate)
+{
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ASSERT(ssh_key_blob_info(BLOB_RSA_2048_CERT, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ssh-rsa-cert-v01@openssh.com");
+    ASSERT(type == SSH_KEY_TYPE_RSA);
+    ASSERT(bits == 2048);
+
+    ASSERT(ssh_key_blob_info(BLOB_ED25519_CERT, algo, sizeof(algo), &type, &bits));
+    ASSERT_STR_EQ(algo, "ssh-ed25519-cert-v01@openssh.com");
+    ASSERT(type == SSH_KEY_TYPE_ED25519);
+    ASSERT(bits == 256);
+}
+
+TEST(blob_info_rejects_garbage)
+{
+    char algo[128];
+    ssh_key_type_t type = SSH_KEY_TYPE_RSA;
+    int bits = 4096;
+
+    /* NULL / empty */
+    ASSERT(!ssh_key_blob_info(NULL, algo, sizeof(algo), &type, &bits));
+    ASSERT(!ssh_key_blob_info("", algo, sizeof(algo), &type, &bits));
+
+    /* Not base64 at all */
+    ASSERT(!ssh_key_blob_info("not base64!!", algo, sizeof(algo), &type, &bits));
+
+    /* Base64 alphabet but length not a multiple of 4 */
+    ASSERT(!ssh_key_blob_info("AAAAB3NzaC1yc2E", algo, sizeof(algo), &type, &bits));
+
+    /* Whitespace is refused (the spool writer never emits any) */
+    ASSERT(!ssh_key_blob_info("AAAA AAAA", algo, sizeof(algo), &type, &bits));
+
+    /* Valid base64, but the blob is truncated right after the type string */
+    ASSERT(!ssh_key_blob_info("AAAAB3NzaC1yc2EA", algo, sizeof(algo), &type, &bits));
+
+    /* Well-formed blob whose type is not a key type we know */
+    ASSERT(!ssh_key_blob_info("AAAABG5vcGU=", algo, sizeof(algo), &type, &bits));
+
+    /* Outputs are reset even on failure - no stale value can leak through */
+    ASSERT(type == SSH_KEY_TYPE_UNKNOWN);
+    ASSERT(bits == 0);
+    ASSERT(algo[0] == '\0');
+}
+
+/* An oversized blob is refused rather than allocated. */
+TEST(blob_info_rejects_oversized)
+{
+    char *huge = malloc(SSH_KEY_BLOB_B64_MAX + 5);
+    ASSERT(huge != NULL);
+    memset(huge, 'A', SSH_KEY_BLOB_B64_MAX + 4);
+    huge[SSH_KEY_BLOB_B64_MAX + 4] = '\0';
+    ASSERT(!ssh_key_blob_info(huge, NULL, 0, NULL, NULL));
+    free(huge);
+}
+
+/* ===================================================================== *
+ * ssh_key_policy_check_key(): the RSA size check is finally wired up.
+ * ===================================================================== */
+
+TEST(check_key_rsa_size_enforced)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+    policy.min_rsa_bits = 2048;
+
+    /* Too small -> rejected (this is what R-S11 is about) */
+    ASSERT(!ssh_key_policy_check_key(&policy, "ssh-rsa", 1024, &result));
+    ASSERT(result.valid == false);
+    ASSERT(result.key_bits == 1024);
+    ASSERT(result.error != NULL);
+
+    /* Exactly the minimum -> accepted */
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-rsa", 2048, &result));
+    ASSERT(result.valid == true);
+    ASSERT(result.key_bits == 2048);
+
+    /* Above the minimum -> accepted */
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-rsa", 4096, &result));
+    ASSERT(result.valid == true);
+
+    /* A stricter deployment minimum is honoured */
+    policy.min_rsa_bits = 3072;
+    ASSERT(!ssh_key_policy_check_key(&policy, "ssh-rsa", 2048, &result));
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-rsa", 3072, &result));
+}
+
+/* THE regression guard for #181: an RSA key whose size we cannot measure must
+ * be DENIED, not waved through. */
+TEST(check_key_rsa_unknown_size_fails_closed)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+
+    ASSERT(!ssh_key_policy_check_key(&policy, "ssh-rsa", 0, &result));
+    ASSERT(result.valid == false);
+    ASSERT(result.type == SSH_KEY_TYPE_RSA);
+    ASSERT(result.error != NULL);
+    ASSERT(strstr(result.error, "could not be determined") != NULL);
+
+    /* Same for a certificate over an RSA key */
+    ASSERT(!ssh_key_policy_check_key(&policy, "ssh-rsa-cert-v01@openssh.com",
+                                     0, &result));
+    ASSERT(result.valid == false);
+}
+
+/* Fixed-size types need no external size information. */
+TEST(check_key_fixed_size_types)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-ed25519", 0, &result));
+    ASSERT(result.key_bits == 256);
+
+    ASSERT(ssh_key_policy_check_key(&policy, "ecdsa-sha2-nistp384", 0, &result));
+    ASSERT(result.key_bits == 384);
+
+    /* min_ecdsa_bits is still enforced */
+    policy.min_ecdsa_bits = 384;
+    ASSERT(!ssh_key_policy_check_key(&policy, "ecdsa-sha2-nistp256", 0, &result));
+    ASSERT(ssh_key_policy_check_key(&policy, "ecdsa-sha2-nistp384", 0, &result));
+}
+
+/* A disabled policy must behave exactly as before: allow everything, including
+ * an RSA key of unknown size. This is the default configuration. */
+TEST(check_key_disabled_policy_unchanged)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    ASSERT(policy.enabled == false);
+
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-rsa", 0, &result));
+    ASSERT(result.valid == true);
+    ASSERT(ssh_key_policy_check_key(&policy, "ssh-dss", 0, &result));
+    ASSERT(result.valid == true);
+    ASSERT(ssh_key_policy_check_key(&policy, "some-unknown-algo", 0, &result));
+    ASSERT(result.valid == true);
+}
+
+/* Missing/empty algorithm is a denial when the policy is on (fail closed). */
+TEST(check_key_no_algorithm_denied)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+
+    ASSERT(!ssh_key_policy_check_key(&policy, NULL, 0, &result));
+    ASSERT(!ssh_key_policy_check_key(&policy, "", 0, &result));
+    ASSERT(!ssh_key_policy_check_key(&policy, "some-unknown-algo", 0, &result));
+}
+
+/* Contract pin: ssh_key_policy_check() is the TYPE-ONLY entry point and does
+ * NOT enforce min_rsa_bits. Production code must use _check_key(); this test
+ * exists so the difference stays deliberate. */
+TEST(check_type_only_does_not_enforce_rsa_size)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+    policy.min_rsa_bits = 4096;
+
+    ASSERT(ssh_key_policy_check(&policy, "ssh-rsa", &result));
+    ASSERT(!ssh_key_policy_check_key(&policy, "ssh-rsa", 2048, &result));
+}
+
+/* End to end: the blob sshd hands us decides whether the login is allowed. */
+TEST(scenario_blob_to_policy_decision)
+{
+    ssh_key_policy_t policy;
+    ssh_key_validation_result_t result;
+    char algo[128];
+    ssh_key_type_t type;
+    int bits;
+
+    ssh_key_policy_init(&policy);
+    policy.enabled = true;
+    policy.min_rsa_bits = 2048;
+
+    /* RSA-1024 presented -> denied on size */
+    ASSERT(ssh_key_blob_info(BLOB_RSA_1024, algo, sizeof(algo), &type, &bits));
+    ASSERT(!ssh_key_policy_check_key(&policy, algo, bits, &result));
+
+    /* RSA-2048 presented -> allowed */
+    ASSERT(ssh_key_blob_info(BLOB_RSA_2048, algo, sizeof(algo), &type, &bits));
+    ASSERT(ssh_key_policy_check_key(&policy, algo, bits, &result));
+
+    /* Ed25519-only deployment: the RSA certificate is denied on type */
+    ASSERT(ssh_key_policy_parse_types(&policy, "ed25519") == 0);
+    ASSERT(ssh_key_blob_info(BLOB_RSA_2048_CERT, algo, sizeof(algo), &type, &bits));
+    ASSERT(!ssh_key_policy_check_key(&policy, algo, bits, &result));
+    ASSERT(ssh_key_blob_info(BLOB_ED25519_CERT, algo, sizeof(algo), &type, &bits));
+    ASSERT(ssh_key_policy_check_key(&policy, algo, bits, &result));
+}
+
 int main(void)
 {
     printf("SSH Key Policy Tests\n");
@@ -515,6 +855,24 @@ int main(void)
     RUN_TEST(scenario_strict_modern);
     RUN_TEST(scenario_no_rsa);
     RUN_TEST(scenario_enterprise_fips);
+
+    /* Key blob decoding (#181) */
+    RUN_TEST(blob_info_rsa_2048);
+    RUN_TEST(blob_info_rsa_1024);
+    RUN_TEST(blob_info_ed25519);
+    RUN_TEST(blob_info_ecdsa);
+    RUN_TEST(blob_info_certificate);
+    RUN_TEST(blob_info_rejects_garbage);
+    RUN_TEST(blob_info_rejects_oversized);
+
+    /* Enforced (fail-closed) policy check (#181) */
+    RUN_TEST(check_key_rsa_size_enforced);
+    RUN_TEST(check_key_rsa_unknown_size_fails_closed);
+    RUN_TEST(check_key_fixed_size_types);
+    RUN_TEST(check_key_disabled_policy_unchanged);
+    RUN_TEST(check_key_no_algorithm_denied);
+    RUN_TEST(check_type_only_does_not_enforce_rsa_size);
+    RUN_TEST(scenario_blob_to_policy_decision);
 
     printf("\n====================\n");
     printf("Tests: %d passed, %d failed\n", tests_passed, tests_failed);

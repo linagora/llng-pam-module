@@ -5,10 +5,14 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); echo "  PASS: $1"; }
 fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 run_test() { TESTS_RUN=$((TESTS_RUN + 1)); "$@"; }
+
+# shellcheck source=tests/lib_pam_stack.sh
+. "$TESTS_DIR/lib_pam_stack.sh"
 
 source_script() {
     local script="$1"
@@ -273,6 +277,126 @@ test_node_role_default() {
     fi
 }
 
+# -- Test 17: portal URL with shell metacharacters is rejected --
+# PORTAL_URL is interpolated into generated artefacts (notably the root-cron
+# open-bastion-refresh-krl script, written through an unquoted heredoc), so the
+# script validates its shape the same way ob-builder's is_valid_url() does.
+test_portal_url_rejects_metacharacters() {
+    local bad out rc failed=0
+    for bad in 'https://x.example.com/$(id)' 'https://x.example.com/`id`' \
+               'https://x.example.com/a b' 'https://x.example.com/";reboot;"' \
+               'ftp://x.example.com'; do
+        out=$(bash "$SCRIPT_DIR/ob-bastion-setup" -p "$bad" --dry-run --yes 2>&1)
+        rc=$?
+        if [ $rc -eq 0 ] || ! grep -q "Invalid portal URL" <<<"$out"; then
+            failed=1
+            echo "    (not rejected: $bad)"
+        fi
+    done
+    if [ "$failed" -eq 0 ]; then
+        pass "portal URL with shell metacharacters is rejected"
+    else
+        fail "portal URL with shell metacharacters is rejected"
+    fi
+}
+
+# -- Test 18: ordinary portal URLs still pass validation --
+test_portal_url_accepts_normal() {
+    local good out failed=0
+    for good in "https://auth.example.com" "http://localhost:8080/portal" \
+                "https://auth.example.com/path?a=b#c"; do
+        # The run still fails later (not root); it must not fail HERE.
+        out=$(bash "$SCRIPT_DIR/ob-bastion-setup" -p "$good" --dry-run --yes 2>&1)
+        if grep -q "Invalid portal URL" <<<"$out"; then
+            failed=1
+            echo "    (wrongly rejected: $good)"
+        fi
+    done
+    if [ "$failed" -eq 0 ]; then
+        pass "ordinary portal URLs pass validation"
+    else
+        fail "ordinary portal URLs pass validation"
+    fi
+}
+
+# -- Test 19: sudoers drop-in is validated before it is installed --
+# A malformed /etc/sudoers.d/open-bastion breaks sudo host-wide, so the rule is
+# written to a temp file, checked with visudo -cf, and only then installed 0440
+# -- the same sequence ob-backend-setup uses.
+test_sudoers_validated_before_install() {
+    local body ok=1
+    body=$(sed -n '/^configure_max_security_sudo()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
+
+    grep -q 'visudo -cf' <<<"$body" || { ok=0; echo "    (no visudo -cf)"; }
+    grep -q 'install -m 0440 -o root -g root' <<<"$body" || { ok=0; echo "    (no install -m 0440)"; }
+    # The rule must never be echoed straight into the live sudoers.d path.
+    if grep -qE '>[[:space:]]*"\$sudoers_file"' <<<"$body"; then
+        ok=0; echo "    (writes \$sudoers_file directly)"
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        pass "sudoers drop-in is visudo-validated before install"
+    else
+        fail "sudoers drop-in is visudo-validated before install"
+    fi
+}
+
+# -- Test 20: the generated sudoers rule actually parses --
+test_sudoers_rule_is_valid() {
+    if ! command -v visudo >/dev/null 2>&1; then
+        pass "generated sudoers rule parses (skipped: no visudo)"
+        return
+    fi
+
+    local body tmp
+    body=$(sed -n '/^configure_max_security_sudo()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
+    tmp=$(mktemp)
+    # Replay exactly the lines the script writes into its temp sudoers file.
+    grep -oE '^[[:space:]]*echo "(#|%)[^"]*"' <<<"$body" \
+        | sed -E 's/^[[:space:]]*echo "//; s/"$//' > "$tmp"
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        fail "generated sudoers rule parses" "could not extract the rule"
+        return
+    fi
+
+    if visudo -cf "$tmp" >/dev/null 2>&1; then
+        pass "generated sudoers rule parses under visudo"
+    else
+        fail "generated sudoers rule parses under visudo" "$(cat "$tmp")"
+    fi
+    rm -f "$tmp"
+}
+
+# ── Test 21: the generated sshd PAM auth stack is fail-closed (#180) ──
+# A bare "auth required pam_permit.so" made pam_authenticate() succeed for any
+# password if sshd ever ran the stack (PasswordAuthentication /
+# KbdInteractiveAuthentication yes with UsePAM yes). The stack now denies
+# outright: sshd never calls pam_authenticate() for a certificate login, so the
+# only thing that reaches it is a password/keyboard-interactive attempt.
+# tests/test_ob_pam_runtime.sh proves the denial by running the stack.
+test_pam_sshd_fail_closed() {
+    local out
+    out=$(
+        source_script "ob-bastion-setup"
+        parse_args -p "https://x" --dry-run
+        configure_pam_sshd 2>&1
+    )
+    assert_auth_stack_denies "generated /etc/pam.d/sshd auth stack denies" "$out"
+}
+
+# ── Test 22: the Mode E sudo stack keeps its pam_deny backstop (#180) ──
+test_pam_sudo_max_security_fail_closed() {
+    local out
+    out=$(
+        source_script "ob-bastion-setup"
+        parse_args -p "https://x" --max-security --dry-run
+        configure_max_security_sudo 2>&1
+    )
+    assert_auth_stack_fail_closed "generated Mode E /etc/pam.d/sudo auth stack is fail-closed" "$out"
+}
+
 # ── Run all tests ──
 echo "=== Testing ob-bastion-setup ==="
 run_test test_syntax
@@ -293,6 +417,13 @@ run_test test_max_security
 run_test test_node_role
 run_test test_node_role_invalid
 run_test test_node_role_default
+run_test test_portal_url_rejects_metacharacters
+run_test test_portal_url_accepts_normal
+run_test test_sudoers_validated_before_install
+run_test test_sudoers_rule_is_valid
+
+run_test test_pam_sshd_fail_closed
+run_test test_pam_sudo_max_security_fail_closed
 
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed ==="

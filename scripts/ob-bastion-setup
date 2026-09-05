@@ -254,14 +254,20 @@ install_principals_helper() {
     cat > "$script_path" << 'PRINCIPALS'
 #!/bin/sh
 # ob-ssh-principals — sshd AuthorizedPrincipalsCommand helper.
-# Args: <username> <fingerprint>
-# Outputs the username if known (to NSS/local passwd), and writes the
-# SSH key fingerprint to /run/open-bastion/ssh-fp/<sshd-session-pid>.fp
-# so pam_openbastion can pick it up during pam_acct_mgmt and forward
-# it to LLNG.
+# spool-format: v1 (fingerprint drop + key-metadata drop)
+# Args: <username> <fingerprint> <key-type> <key-blob-base64>
+# Outputs the username if known (to NSS/local passwd), and writes to
+# /run/open-bastion/ssh-fp/<sshd-session-pid>.{fp,key}:
+#   .fp  - the SHA256 fingerprint, forwarded to LLNG during pam_acct_mgmt
+#   .key - the key type and the base64 key/certificate blob, used by
+#          pam_openbastion to enforce ssh_key_policy_* (issue #181). sshd does
+#          not expose SSH_USER_AUTH to PAM during pam_acct_mgmt, so this is the
+#          only way the module can see which key was actually presented.
 
 USERNAME="$1"
 FINGERPRINT="$2"
+KEYTYPE="$3"
+KEYBLOB="$4"
 SPOOL_DIR="/run/open-bastion/ssh-fp"
 
 # Record the fingerprint keyed by the per-connection sshd anchor PID.
@@ -275,6 +281,15 @@ SPOOL_DIR="/run/open-bastion/ssh-fp"
 case "$FINGERPRINT" in
     SHA256:[A-Za-z0-9+/]*) : ;;
     *) FINGERPRINT="" ;;
+esac
+# Reject anything that is not a plausible OpenSSH algorithm name / base64 blob
+# before it reaches the spool (pam_openbastion re-validates; this is defence in
+# depth and keeps the drop file parseable).
+case "$KEYTYPE" in
+    ""|*[!A-Za-z0-9@._-]*) KEYTYPE="" ;;
+esac
+case "$KEYBLOB" in
+    ""|*[!A-Za-z0-9+/=]*) KEYBLOB="" ;;
 esac
 if [ -n "$FINGERPRINT" ] && [ -d "$SPOOL_DIR" ]; then
     pid=$PPID
@@ -295,10 +310,29 @@ if [ -n "$FINGERPRINT" ] && [ -d "$SPOOL_DIR" ]; then
     done
     if [ "$anchor" -gt 1 ]; then
         umask 077
-        tmp=$(mktemp "$SPOOL_DIR/."$anchor".XXXXXX" 2>/dev/null) || tmp=""
+        tmp=$(mktemp "$SPOOL_DIR/.$anchor.XXXXXX" 2>/dev/null) || tmp=""
         if [ -n "$tmp" ]; then
             printf '%s\n' "$FINGERPRINT" > "$tmp"
             mv -f "$tmp" "$SPOOL_DIR/$anchor.fp"
+        fi
+        # v1 key-metadata drop, consumed by pam_openbastion's ssh_key_policy
+        # enforcement (issue #181). Written as a SEPARATE file so the .fp drop
+        # above keeps its exact legacy content: an older pam_openbastion, which
+        # only ever reads .fp, is unaffected by this helper being newer.
+        # "alg" is sshd's %t; "key" is sshd's %k, the base64 blob of the key or
+        # certificate actually presented -- the only source for the RSA modulus
+        # size, which the module decodes itself.
+        if [ -n "$KEYTYPE" ]; then
+            tmp=$(mktemp "$SPOOL_DIR/.$anchor.XXXXXX" 2>/dev/null) || tmp=""
+            if [ -n "$tmp" ]; then
+                {
+                    printf 'v=1\n'
+                    printf 'fp=%s\n' "$FINGERPRINT"
+                    printf 'alg=%s\n' "$KEYTYPE"
+                    if [ -n "$KEYBLOB" ]; then printf 'key=%s\n' "$KEYBLOB"; fi
+                } > "$tmp"
+                mv -f "$tmp" "$SPOOL_DIR/$anchor.key"
+            fi
         fi
     fi
 fi
@@ -370,7 +404,7 @@ TrustedUserCAKeys $SSH_CA_FILE
 # Accept certificate if principal matches the requested username and drop the
 # SSH key fingerprint to /run/open-bastion/ssh-fp/ so pam_openbastion can
 # forward it to LLNG (see fingerprint binding on /pam/authorize + /pam/verify).
-AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k
 AuthorizedPrincipalsCommandUser nobody
 
 # Enable public key (certificate) authentication
@@ -469,8 +503,11 @@ configure_pam_sshd() {
 # Authorization: LLNG checks if user can access this bastion
 # Session: Standard Unix session handling
 
-# Authentication - permit (handled by SSH certs)
-auth       required     pam_permit.so
+# Authentication - refused. SSH certificates are validated by sshd, which never
+# calls pam_authenticate() on the pubkey/certificate path, so this stack is only
+# reached by password or keyboard-interactive authentication - neither of which
+# this mode allows. pam_deny returns PAM_AUTH_ERR (authentication failure).
+auth       required     pam_deny.so
 
 # Authorization - check with LLNG (certificate-aware mode)
 account    required     pam_openbastion.so ssh_cert_aware=true
@@ -953,11 +990,32 @@ session    required     pam_unix.so
     # Configure sudoers: only open-bastion-sudo group members can sudo (PAM also required)
     local sudoers_file="/etc/sudoers.d/open-bastion"
     if [ ! -f "$sudoers_file" ]; then
-        echo "# Open Bastion Mode E: defense-in-depth sudo authorization" > "$sudoers_file"
-        echo "# Both group membership (managed by PAM session) AND LLNG token are required" >> "$sudoers_file"
-        echo "%open-bastion-sudo ALL=(ALL) ALL" >> "$sudoers_file"
-        chmod 440 "$sudoers_file"
-        info "Created $sudoers_file"
+        # Write to a temp file and validate with visudo before installing, so a
+        # malformed drop-in can never break sudo on the host. (Mirrors
+        # ob-backend-setup; the previous echo-into-place version published the
+        # file before anything had checked it.)
+        local tmp_sudoers
+        tmp_sudoers=$(mktemp)
+        {
+            echo "# Open Bastion Mode E: defense-in-depth sudo authorization"
+            echo "# Both group membership (managed by PAM session) AND LLNG token are required"
+            echo "%open-bastion-sudo ALL=(ALL) ALL"
+        } > "$tmp_sudoers"
+        if visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+            # Ensure the drop-in directory exists (created 0750 root:root only
+            # when missing, so we never relax an existing one), then install and
+            # CHECK the result — otherwise a failed install would leave sudo
+            # broken while we log success.
+            [ -d /etc/sudoers.d ] || install -d -m 0750 -o root -g root /etc/sudoers.d
+            if install -m 0440 -o root -g root "$tmp_sudoers" "$sudoers_file"; then
+                info "Created $sudoers_file"
+            else
+                warn "Failed to install $sudoers_file; sudo may not work for SSO users"
+            fi
+        else
+            warn "Generated sudoers rule failed visudo validation; not installing"
+        fi
+        rm -f "$tmp_sudoers"
     fi
 }
 
@@ -1956,6 +2014,22 @@ main() {
 
     # Remove trailing slash
     PORTAL_URL="${PORTAL_URL%/}"
+
+    # Validate the URL shape before it is used anywhere.
+    #
+    # PORTAL_URL is interpolated into generated artefacts, notably
+    # /usr/local/bin/open-bastion-refresh-krl (an unquoted heredoc, run from
+    # root cron every ${KRL_REFRESH_INTERVAL} minutes). No privilege boundary is
+    # crossed here — this script already requires root and the value is the
+    # admin's own --portal argument — but a URL containing shell metacharacters
+    # would silently produce a broken or surprising cron script. The character
+    # class is the same one ob-builder enforces with is_valid_url(), so a portal
+    # accepted by the builder is accepted here.
+    if ! [[ "$PORTAL_URL" =~ ^https?://[A-Za-z0-9._:/?#@!()*+,\;=~%-]+$ ]]; then
+        error "Invalid portal URL: $PORTAL_URL"
+        error "Expected http(s)://host[:port][/path] without shell metacharacters"
+        exit 1
+    fi
 
     # Pick up client_secret from env if not provided via --client-secret-file.
     # Storing it in OB_CLIENT_SECRET keeps it out of /proc/<pid>/cmdline.
