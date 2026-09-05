@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Generated certificate-mode PAM stacks are now fail-closed (#180).** The
+  `auth` path of the stacks written for the certificate/SSH-key modes consisted
+  of a single `auth required pam_permit.so`, so `pam_authenticate()` returned
+  success unconditionally and logged nothing. The certificate path never calls
+  `pam_authenticate()`, but sshd does for password and keyboard-interactive
+  authentication: on a host where those are still enabled — which is what
+  `apt install open-bastion` leaves behind, since the postinst writes the PAM
+  stack but never touches `sshd_config` — any password authenticated any
+  account the `account` phase approved. Every generated stack (Debian postinst,
+  `ob-bastion-setup`, `ob-backend-setup`, the demo images) and every documented
+  stack now uses `auth [success=1 default=ignore] pam_permit.so` followed
+  immediately by `auth required pam_deny.so`, so anything that falls through is
+  denied. `PasswordAuthentication no` / `KbdInteractiveAuthentication no` in
+  `sshd_config` — written by both setup scripts, but *not* by the package
+  postinst — remains what keeps passwords out of these modes; the doc now says
+  so explicitly.
+
 ### Fixed
 
 - **A rejected `/pam/verify` token now fails cleanly instead of looking like a

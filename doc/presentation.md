@@ -375,7 +375,8 @@ auth       required     pam_deny.so
 ## Mode C: SSH Key + LLNG Authorization
 
 ```
-auth       required     pam_permit.so
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 account    required     pam_openbastion.so
 ```
 

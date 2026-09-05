@@ -70,7 +70,8 @@ You can restrict allowed key types with [SSH Key Policy](security.md#ssh-key-pol
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       required     pam_permit.so
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 
 account    required     pam_openbastion.so
 account    required     pam_unix.so
@@ -84,6 +85,16 @@ For this mode, configure `/etc/ssh/sshd_config`:
 PasswordAuthentication no
 PubkeyAuthentication yes
 ```
+
+> **Important:** `PasswordAuthentication no` (and `KbdInteractiveAuthentication no`)
+> is what actually keeps passwords out of this mode — a certificate/pubkey login
+> never calls `pam_authenticate()`, so the `auth` stack above is only reached if
+> sshd is left with password or keyboard-interactive authentication enabled.
+> The `pam_deny.so` backstop makes that stack fail closed instead of silently
+> granting everything, but it is a backstop, not a replacement for the sshd
+> settings. `ob-bastion-setup` / `ob-backend-setup` write both; if you configure
+> PAM by hand (or via the Debian package's `pam-mode` debconf prompt, which does
+> not touch `sshd_config`), set the sshd options yourself.
 
 ## Mode D: All Methods with LLNG Authorization (Most Flexible)
 
@@ -158,7 +169,8 @@ PermitRootLogin no
 #
 # AUTHORIZATION: LLNG checks if user can access this server
 
-auth       required     pam_permit.so
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 
 account    required     pam_openbastion.so
 account    required     pam_unix.so

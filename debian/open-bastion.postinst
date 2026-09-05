@@ -47,7 +47,11 @@ EOF
         mode-c)
             cat << 'EOF'
 # AUTHENTICATION: SSH keys only (handled by sshd, not PAM)
-auth       required     pam_permit.so
+# Fail closed: pam_permit succeeds and jumps over pam_deny (success=1 skips
+# exactly the next module); anything else falls through to pam_deny, so this
+# stack can never be an unconditional "yes" if pam_permit is missing or errors.
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 EOF
             ;;
     esac
@@ -92,7 +96,10 @@ EOF
         mode-c)
             cat << 'EOF'
 # AUTHENTICATION: Permit (for SSH key scenarios)
-auth       required     pam_permit.so
+# Fail closed: success=1 jumps over the pam_deny backstop on the intended
+# path; any other pam_permit result falls through to pam_deny.
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 EOF
             ;;
     esac

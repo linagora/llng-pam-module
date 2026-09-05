@@ -275,7 +275,10 @@ fi
 # Configure PAM for SSH (Mode E)
 cat > /etc/pam.d/sshd << EOF
 # PAM configuration for SSH with Open Bastion (Mode E - Maximum Security)
-auth       required     pam_permit.so
+# Fail closed: success=1 jumps over the pam_deny backstop on the intended
+# (certificate) path; anything else falls through to pam_deny.
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 account    required     pam_openbastion.so
 session    required     pam_unix.so
 session    optional     pam_mkhomedir.so skel=/etc/skel umask=0077

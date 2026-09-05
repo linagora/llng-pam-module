@@ -66,7 +66,10 @@ RUN mkdir -p build && cd build && \
 # Configure PAM for SSH (bastion mode)
 RUN echo '# PAM configuration for SSH Bastion with Open Bastion\n\
 # Authentication via SSH certificates (not PAM)\n\
-auth       required     pam_permit.so\n\
+# Fail closed: success=1 jumps over the pam_deny backstop on the intended\n\
+# (certificate) path; anything else falls through to pam_deny.\n\
+auth       [success=1 default=ignore] pam_permit.so\n\
+auth       required     pam_deny.so\n\
 \n\
 # Authorization - check with Open Bastion\n\
 account    required     pam_openbastion.so\n\

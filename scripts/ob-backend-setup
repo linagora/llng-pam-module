@@ -511,8 +511,13 @@ configure_pam_sshd() {
 # Authorization: LLNG checks if user can access this server
 # Session: Create user account if needed, standard Unix session
 
-# Authentication - permit (handled by SSH certs)
-auth       required     pam_permit.so
+# Authentication - permit (handled by SSH certs), but fail closed.
+# pam_permit returns PAM_SUCCESS and success=1 jumps over exactly one module
+# (the pam_deny below), ending the stack with that recorded success. Any other
+# result (module missing/error) is ignored and falls through to pam_deny, so
+# this stack is never an unconditional 'yes'.
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 
 # Authorization - check with LLNG (certificate-aware mode)
 account    required     pam_openbastion.so ssh_cert_aware=true

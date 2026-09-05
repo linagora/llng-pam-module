@@ -465,7 +465,8 @@ ob-enroll -g production
 ```bash
 cat > /etc/pam.d/sshd << 'EOF'
 # Authentication: Accept from bastion (SSH keys)
-auth       required     pam_permit.so
+auth       [success=1 default=ignore] pam_permit.so
+auth       required     pam_deny.so
 
 # Authorization: LLNG required
 account    required     pam_openbastion.so
