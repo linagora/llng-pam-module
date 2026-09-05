@@ -414,9 +414,7 @@ static int test_output_buffer_too_small(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
@@ -471,9 +469,7 @@ static int test_output_buffer_exact_size(void)
     secret_store_config_t config = {
         .enabled = true,
         .store_dir = (char *)test_store_dir,
-        .salt = "test-salt",
-        .use_keyring = false,
-        .keyring_name = NULL
+        .salt = "test-salt"
     };
 
     secret_store_t *store = secret_store_init(&config);
