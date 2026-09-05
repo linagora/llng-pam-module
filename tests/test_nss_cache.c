@@ -20,13 +20,62 @@
  * (init_cache/cache_add/cache_find) against the real g_cache/g_config state.
  */
 
+/* ---------------------------------------------------------------------------
+ * Harness overrides. These MUST precede the #include of the module.
+ * ------------------------------------------------------------------------- */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
 /* Point the on-disk cache at a throwaway directory: file_cache_save() must
- * never touch the real /var/cache/nss_llng from a unit test. */
-#define CACHE_DIR "/tmp/test_nss_openbastion_cache"
+ * never touch the real /var/cache/nss_llng from a unit test. Function-valued
+ * rather than a literal so each run gets a private mkdtemp() root - two ctest
+ * jobs running in parallel must not share cache state, and a fixed /tmp path is
+ * a symlink target an unrelated local user could pre-create (the suite runs as
+ * root in CI). Same shape as branch fix/nss-name-file-cache, so the two do not
+ * diverge. */
+const char *test_cache_root(void);
+#define CACHE_DIR test_cache_root()
 
 #include "../nss/libnss_openbastion.c"
 
 #include <assert.h>
+
+static char g_test_base[128];
+
+static const char *test_base(void)
+{
+    if (g_test_base[0] == '\0') {
+        snprintf(g_test_base, sizeof(g_test_base), "/tmp/ob_nss_cache_test_XXXXXX");
+        if (!mkdtemp(g_test_base)) {
+            perror("mkdtemp");
+            exit(1);
+        }
+    }
+    return g_test_base;
+}
+
+/* The cache root itself is NOT pre-created: the privilege test asserts that an
+ * unprivileged file_cache_save() leaves a missing directory missing. */
+const char *test_cache_root(void)
+{
+    static char path[192];
+    snprintf(path, sizeof(path), "%s/cache", test_base());
+    return path;
+}
+
+static void rm_rf(const char *dir)
+{
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
+    if (system(cmd) != 0) {
+        /* best-effort cleanup */
+    }
+}
 
 /* Release everything init_cache()/cache_add() allocated, so the test leaves
  * no leaks under LeakSanitizer (free() is NULL-safe for expired holes). */
@@ -239,6 +288,8 @@ int main(void)
         printf("FAIL\n");
         ok = 0;
     }
+
+    rm_rf(test_base());
 
     printf("%s\n", ok ? "All NSS cache tests passed" : "NSS cache tests FAILED");
     return ok ? 0 : 1;
