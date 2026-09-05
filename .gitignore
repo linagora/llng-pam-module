@@ -47,3 +47,8 @@ local/
 # Local libvirt lab: VM disk images, seeds and the mkvm helper are
 # machine-local scratch, never part of the source archive.
 local-test/vm/
+
+# Répertoires de vérification locale (build ad hoc, sanitizers)
+build-verify/
+build-asan/
+bv/
