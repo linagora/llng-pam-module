@@ -63,7 +63,6 @@ Features:
 %build
 %set_build_flags
 %cmake \
-    -DENABLE_CACHE=ON \
     -DUSE_LIBSODIUM=ON \
     -DBUILD_TESTING=ON \
     -DINSTALL_DESKTOP=ON \
@@ -113,6 +112,10 @@ ctest --output-on-failure --verbose
 %dir %{_datadir}/open-bastion/audit/cron.daily
 %{_datadir}/open-bastion/audit/rules.d/open-bastion.rules
 %{_datadir}/open-bastion/audit/cron.daily/open-bastion-audit-rotate
+# logrotate template for the JSON audit log (the admin copies it into
+# /etc/logrotate.d/; not %config, since audit_log_file is configurable)
+%dir %{_datadir}/open-bastion/logrotate
+%{_datadir}/open-bastion/logrotate/open-bastion
 %{_unitdir}/ob-heartbeat.service
 %{_unitdir}/ob-heartbeat.timer
 %{_unitdir}/ob-cert.socket
@@ -206,6 +209,36 @@ done
 if [ $1 -eq 1 ]; then
     systemctl --no-reload enable ob-session-prune.timer >/dev/null 2>&1 || :
     systemctl start ob-session-prune.timer >/dev/null 2>&1 || :
+fi
+# Re-assert bastion socket activation, mirroring the Debian postinst.
+#
+# This is repair/migration parity, not a fix for an RPM regression: nothing in
+# these scriptlets disables the sockets on upgrade (%systemd_preun is a no-op
+# while $1 >= 1), and there is no RPM analogue of the deb-systemd-helper state
+# layer that dropped them on Debian. What this does buy is the same
+# self-healing behaviour on both distros — a host whose ob-cert.socket or
+# ob-record.socket ended up inactive (manual disable, a restored image, a
+# half-finished setup run) is repaired by reinstalling or upgrading the
+# package, instead of requiring a full ob-bastion-setup re-run.
+#
+# ob-cert.socket (hop-certificate minting) and ob-record.socket (session-
+# recording sink) are deliberately not enabled at install: the package cannot
+# know a host's role, so ob-bastion-setup is what enables them. We therefore
+# only act when this host is ALREADY a bastion — the sshd drop-in written by
+# ob-bastion-setup is the role marker. This never enables anything on a backend
+# or an unconfigured host. Failures are non-fatal.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    for _ob_dropin in /etc/ssh/sshd_config.d/*-open-bastion-bastion.conf; do
+        [ -f "$_ob_dropin" ] || continue
+        # Bastion role -> hop-certificate minting socket (ob-ssh / ob-scp).
+        systemctl enable --now ob-cert.socket >/dev/null 2>&1 || :
+        # Recording sink, only when recording is enabled (the ForceCommand is
+        # absent under ob-bastion-setup --disable-session-recorder).
+        if grep -Eq '^[[:space:]]*ForceCommand[[:space:]]+.*ob-session-recorder' "$_ob_dropin"; then
+            systemctl enable --now ob-record.socket >/dev/null 2>&1 || :
+        fi
+        break
+    done
 fi
 
 %preun

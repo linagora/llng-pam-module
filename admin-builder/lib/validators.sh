@@ -72,6 +72,26 @@ is_valid_abs_path() {
     [[ "$s" =~ ^/[A-Za-z0-9._/-]+$ ]]
 }
 
+# is_valid_apt_suite <s>
+# APT suite / codename (e.g. trixie, bookworm-backports, stable/updates).
+# Embedded verbatim into the `deb ... <suite> <component>` line that the
+# generated installer writes to /etc/apt/sources.list.d as root, so the
+# charset must exclude every shell metacharacter, whitespace and newline.
+# Debian codenames and suite names use letters, digits, '-', '.', '_' and '/'
+# (the "suite/updates" form); nothing else is legal in a sources.list entry.
+is_valid_apt_suite() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
+}
+
+# is_valid_apt_component <s>
+# APT component(s), e.g. "main", "main contrib non-free-firmware". Same
+# injection concern as is_valid_apt_suite; a single space is allowed as the
+# separator between components but nothing else, so no newline can smuggle an
+# extra sources.list line and no metacharacter can reach the root shell.
+is_valid_apt_component() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*([[:blank:]]+[A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]
+}
+
 # is_valid_scenario <s>
 is_valid_scenario() {
     case "$1" in

@@ -111,8 +111,13 @@ EOF
 mkdir -p /etc/open-bastion
 
 echo "=== Server Enrollment via Device Authorization ==="
-COOKIE_FILE="/tmp/admin_cookies"
-touch "$COOKIE_FILE"
+# The admin SSO session cookie is a live credential for the whole portal, so it
+# gets an unpredictable per-run name, 0600, and removal on every exit path —
+# not a fixed /tmp path any other process in the container can pre-create,
+# read, or find left behind. Same pattern as quick-start/server/entrypoint.sh.
+COOKIE_FILE=$(mktemp /tmp/admin_cookies.XXXXXX)
+chmod 600 "$COOKIE_FILE"
+trap 'rm -f "$COOKIE_FILE"' EXIT
 
 echo "Getting login token..."
 LOGIN_TOKEN=$(curl -s "$PORTAL_URL/" | grep -oP 'name="token" value="\K[^"]+' | head -1)
@@ -129,7 +134,9 @@ if grep -q "lemonldap" "$COOKIE_FILE"; then
     echo "Admin login successful"
 else
     echo "ERROR: Failed to login as admin"
-    cat "$COOKIE_FILE" || true
+    # Never dump the cookie jar: it would print a usable session cookie
+    # into the container log.
+    echo "  (session cookie withheld from the log)"
     exit 1
 fi
 

@@ -194,8 +194,19 @@ static int ensure_user_dir(const char *user, gid_t gid)
 }
 
 /* Build and write the metadata JSON for this session at dirfd/<name>.
- * Overwrites if it already exists (our own file). Returns 0/-1. */
-static int write_metadata(int dirfd, const char *name, const char *session_id,
+ *
+ * "exclusive" selects the two callers' very different needs (#198):
+ *   - the INITIAL write creates the file and must never clobber an existing one:
+ *     the name is <ts>_<session_id> and session_id is client-supplied, so a
+ *     replayed session_id landing in the same second would otherwise truncate a
+ *     live/finished session's metadata BEFORE the O_EXCL on the typescript gets
+ *     the chance to reject the duplicate connection. Returns -2 on EEXIST so the
+ *     caller can refuse the session exactly like a duplicate recording.
+ *   - the FINAL write updates our own file in place (end time + status) and
+ *     therefore truncates.
+ * Returns 0 ok, -1 error, -2 already exists (exclusive only). */
+static int write_metadata(int dirfd, const char *name, int exclusive,
+                          const char *session_id,
                           const char *user, const char *client_ip, const char *tty,
                           const char *start, const char *end, const char *status,
                           const char *command, const char *format,
@@ -222,8 +233,13 @@ static int write_metadata(int dirfd, const char *name, const char *session_id,
         o, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_SPACED);
     size_t len = strlen(txt);
 
-    int fd = openat(dirfd, name, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0640);
+    int flags = O_WRONLY | O_CREAT | O_NOFOLLOW | (exclusive ? O_EXCL : O_TRUNC);
+    int fd = openat(dirfd, name, flags, 0640);
     int ret = -1;
+    if (fd < 0 && exclusive && errno == EEXIST) {
+        json_object_put(o);
+        return -2;
+    }
     if (fd >= 0) {
         if (fchown(fd, 0, gid) != 0)
             fail("fchown(metadata) failed (continuing)");
@@ -345,10 +361,17 @@ int main(void)
     /* Write the initial metadata (status "active") so a killed sink still leaves
      * a record of the session having started. The lifecycle status is always
      * active → completed/truncated/aborted; the transfer vs script distinction
-     * is carried by the "format" field, not the status. */
-    write_metadata(dirfd, meta_name, session_id, user, client_ip, tty,
-                   start_time, NULL, "active",
-                   command, format, rec_name, gid);
+     * is carried by the "format" field, not the status.
+     *
+     * Created with O_EXCL: a duplicate <ts>_<session_id> must be refused here
+     * rather than truncate an existing session's metadata (#198). Other write
+     * failures are non-fatal, as before — the recording itself still matters. */
+    if (write_metadata(dirfd, meta_name, 1, session_id, user, client_ip, tty,
+                       start_time, NULL, "active",
+                       command, format, rec_name, gid) == -2) {
+        fail("metadata for this session id/timestamp already exists; refusing");
+        goto reject_dir;
+    }
 
     /* Create the recording file root-owned (root:ob-sessions 0640), no symlink,
      * no clobber. For a transfer session it stays an empty placeholder. */
@@ -423,7 +446,7 @@ int main(void)
 
     /* 5. Final metadata with end time + observed status. */
     iso_utc(end_time, sizeof(end_time));
-    write_metadata(dirfd, meta_name, session_id, user, client_ip, tty,
+    write_metadata(dirfd, meta_name, 0, session_id, user, client_ip, tty,
                    start_time, end_time, status, command, format, rec_name, gid);
 
     close(dirfd);

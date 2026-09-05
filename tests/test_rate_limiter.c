@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -272,6 +273,96 @@ static int test_disabled(void)
     return (check == 0);  /* Should always be allowed when disabled */
 }
 
+/*
+ * Concurrency regression for #186.
+ *
+ * PAM runs one process per authentication attempt, so the lockout counter is
+ * updated by concurrent processes. Before the fix the read-modify-write in
+ * rate_limiter_record_failure() had no inter-process lock: N processes each
+ * read the same count k and each wrote k+1, so the counter advanced by 1
+ * instead of N and the threshold could be outrun by attacking in parallel.
+ *
+ * The children are released together by a pipe barrier (no sleeps), and the
+ * expected value is exact — CONC_CHILDREN * CONC_ROUNDS — so the test is a
+ * deterministic assertion, not a timing measurement.
+ */
+#define CONC_CHILDREN 8
+#define CONC_ROUNDS   25
+
+static int test_concurrent_failures(void)
+{
+    rate_limiter_config_t config = {
+        .enabled = true,
+        .state_dir = (char *)test_state_dir,
+        /* Never reach the threshold: a lockout would add expiry-driven resets
+         * to the count and blur the exact-N assertion below. */
+        .max_attempts = CONC_CHILDREN * CONC_ROUNDS + 1,
+        .initial_lockout_sec = 3600,
+        .max_lockout_sec = 3600,
+        .backoff_multiplier = 2.0
+    };
+
+    rate_limiter_t *rl = rate_limiter_init(&config);
+    if (!rl) return 0;
+
+    const char *key = "concurrent:10.0.0.9";
+    rate_limiter_reset(rl, key);
+
+    int barrier[2];
+    if (pipe(barrier) != 0) {
+        rate_limiter_destroy(rl);
+        return 0;
+    }
+
+    int started = 0;
+    for (int i = 0; i < CONC_CHILDREN; i++) {
+        pid_t pid = fork();
+        if (pid < 0) break;
+        if (pid == 0) {
+            close(barrier[1]);
+            /* Block until the parent releases every child at once. */
+            char c;
+            ssize_t r;
+            do {
+                r = read(barrier[0], &c, 1);
+            } while (r < 0 && errno == EINTR);
+            close(barrier[0]);
+
+            for (int j = 0; j < CONC_ROUNDS; j++) {
+                rate_limiter_record_failure(rl, key);
+            }
+            _exit(0);
+        }
+        started++;
+    }
+
+    close(barrier[0]);
+    /* Release all children. */
+    for (int i = 0; i < started; i++) {
+        if (write(barrier[1], "g", 1) != 1) break;
+    }
+    close(barrier[1]);
+
+    for (int i = 0; i < started; i++) {
+        int status;
+        wait(&status);
+    }
+
+    int ok = (started == CONC_CHILDREN);
+
+    rate_limit_state_t state;
+    ok = ok && rate_limiter_get_state(rl, key, &state);
+    if (ok && state.failure_count != CONC_CHILDREN * CONC_ROUNDS) {
+        printf("(count=%d expected=%d) ", state.failure_count,
+               CONC_CHILDREN * CONC_ROUNDS);
+        ok = 0;
+    }
+
+    rate_limiter_reset(rl, key);
+    rate_limiter_destroy(rl);
+    return ok;
+}
+
 int main(void)
 {
     printf("Running rate limiter tests...\n\n");
@@ -285,6 +376,7 @@ int main(void)
     TEST(reset);
     TEST(build_key);
     TEST(disabled);
+    TEST(concurrent_failures);
 
     cleanup();
 
