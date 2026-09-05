@@ -30,6 +30,9 @@
 /* Shared path validation functions */
 #include "path_validator.h"
 
+/* Shared string helpers (str_parse_bool_strict, issue #183) */
+#include "str_utils.h"
+
 /* Mark NSS entry points as visible when using -fvisibility=hidden */
 #define NSS_VISIBLE __attribute__((visibility("default")))
 
@@ -161,6 +164,48 @@ static char *trim(char *str)
         *end-- = '\0';
     }
     return str;
+}
+
+/*
+ * Parse a boolean configuration value, fail-closed (issue #183).
+ *
+ * The old code was `strcmp(value, "true") == 0 || strcmp(value, "1") == 0`,
+ * so every unrecognised value — `TRUE`, `tru`, `yes`, an empty value — mapped
+ * silently to 0. For `verify_ssl` that turned OFF TLS certificate verification
+ * on every NSS call to the portal: a typo downgraded the module to plaintext-
+ * equivalent trust without a word.
+ *
+ * Unlike pam_openbastion, the NSS module cannot refuse to start on a bad
+ * config: it is dlopen'd into *every* process that resolves a name (sshd,
+ * sudo, systemd, ls, ...). Failing the load would make every SSO user
+ * unresolvable host-wide — getpwnam() would stop returning them and no one
+ * could log in — turning a one-character typo into a full lockout with no
+ * interactive error to guide the operator. Availability must not be the
+ * casualty of a config typo here.
+ *
+ * So we fail closed on the *security property* rather than on availability:
+ * an unrecognised value is loudly reported to syslog and the SAFE value is
+ * used (verify_ssl = 1, verification ON). The worst case is then a lookup
+ * failure against an untrusted certificate, which is exactly the behaviour an
+ * administrator writing `verify_ssl = true` would have asked for.
+ *
+ * Returns safe_value when the value is not one of the documented tokens.
+ */
+static int nss_parse_bool_or_safe(const char *key, const char *value,
+                                  int safe_value)
+{
+    bool parsed;
+
+    if (str_parse_bool_strict(value, &parsed)) {
+        return parsed ? 1 : 0;
+    }
+
+    syslog(LOG_ERR, "libnss_openbastion: invalid boolean value for '%s': '%s' "
+           "(expected one of true/yes/1/on or false/no/0/off); "
+           "keeping the safe value '%s'",
+           key, value ? value : "", safe_value ? "true" : "false");
+
+    return safe_value;
 }
 
 /*
@@ -563,7 +608,8 @@ static int load_config(nss_llng_config_t *config)
             }
         }
         else if (strcmp(key, "verify_ssl") == 0) {
-            config->verify_ssl = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+            /* Safe value is 1: never silently disable TLS verification. */
+            config->verify_ssl = nss_parse_bool_or_safe("verify_ssl", value, 1);
         }
         else if (strcmp(key, "cache_ttl") == 0) {
             int cache_ttl;

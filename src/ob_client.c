@@ -158,30 +158,37 @@ static char *strdup_or_null(const char *s)
 
 /*
  * Generate HMAC-SHA256 signature for request signing.
- * Message format: timestamp.method.path.body
+ * Message format: timestamp.nonce.method.path.body
  * Output: hex-encoded signature string (65 bytes including null terminator)
+ *
+ * Security (#188): the nonce MUST be part of the signed message. It is sent
+ * in its own X-Nonce header for the server's replay window; if it were left
+ * out of the HMAC an attacker could replay a captured request with a fresh
+ * nonce and the signature would still verify, defeating replay protection.
  */
 static void generate_request_signature(const char *secret,
                                         long timestamp,
+                                        const char *nonce,
                                         const char *method,
                                         const char *path,
                                         const char *body,
                                         char *signature,
                                         size_t sig_size)
 {
-    if (!secret || !signature || sig_size < 65) {
+    if (!secret || !nonce || !signature || sig_size < 65) {
         if (signature && sig_size > 0) signature[0] = '\0';
         return;
     }
 
-    /* Build message: timestamp.method.path.body
+    /* Build message: timestamp.nonce.method.path.body
      * Use stack allocation for typical message sizes to avoid malloc overhead.
-     * Typical: timestamp(~10) + method(~4) + path(~50) + body(~200) < SIGNATURE_STACK_BUFFER_SIZE
+     * Typical: timestamp(~10) + nonce(~55) + method(~4) + path(~50) + body(~200)
+     * < SIGNATURE_STACK_BUFFER_SIZE
      */
     char ts_str[32];
     snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
 
-    size_t msg_len = strlen(ts_str) + 1 + strlen(method) + 1 +
+    size_t msg_len = strlen(ts_str) + 1 + strlen(nonce) + 1 + strlen(method) + 1 +
                      strlen(path) + 1 + (body ? strlen(body) : 0);
 
     /* Use stack buffer for small messages, heap for large ones */
@@ -200,8 +207,8 @@ static void generate_request_signature(const char *secret,
         heap_allocated = true;
     }
 
-    snprintf(message, msg_len + 1, "%s.%s.%s.%s",
-             ts_str, method, path, body ? body : "");
+    snprintf(message, msg_len + 1, "%s.%s.%s.%s.%s",
+             ts_str, nonce, method, path, body ? body : "");
 
     /* Generate HMAC-SHA256 */
     unsigned char hmac[EVP_MAX_MD_SIZE];
@@ -276,7 +283,9 @@ static void generate_nonce(char *nonce, size_t nonce_size)
  * Adds X-Timestamp, X-Nonce, and X-Signature-256 headers.
  *
  * The nonce provides replay protection - server should reject
- * requests with previously seen nonces within a time window.
+ * requests with previously seen nonces within a time window. It is covered
+ * by the signature (see generate_request_signature) so it cannot be swapped
+ * for a fresh value on a replayed request.
  */
 static struct curl_slist *add_signing_headers(struct curl_slist *headers,
                                                const char *signing_secret,
@@ -294,9 +303,9 @@ static struct curl_slist *add_signing_headers(struct curl_slist *headers,
     char nonce[80];
     generate_nonce(nonce, sizeof(nonce));
 
-    /* Generate signature (includes nonce in message) */
+    /* Generate signature over timestamp.nonce.method.path.body (#188) */
     char signature[65];
-    generate_request_signature(signing_secret, timestamp, method, path, body,
+    generate_request_signature(signing_secret, timestamp, nonce, method, path, body,
                                signature, sizeof(signature));
 
     /* Add headers */

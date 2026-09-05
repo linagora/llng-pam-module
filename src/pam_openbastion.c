@@ -1246,6 +1246,17 @@ static pam_openbastion_data_t *init_module_data(pam_handle_t *pamh,
         OB_LOG_ERR(pamh, "Security error: portal_url must use HTTPS (use verify_ssl=false to disable)");
         goto error;
     }
+    if (validate_result == -6) {
+        /*
+         * A boolean setting had an unparseable value (#183). Refusing here is
+         * deliberate: silently treating it as false would, for verify_ssl,
+         * disable TLS verification. The offending key and value were logged to
+         * syslog by config.c.
+         */
+        OB_LOG_ERR(pamh, "Configuration error: a boolean setting has an invalid value "
+                         "(expected true/yes/1/on or false/no/0/off); see syslog for the key");
+        goto error;
+    }
     if (validate_result != 0) {
         OB_LOG_ERR(pamh, "Invalid configuration");
         goto error;

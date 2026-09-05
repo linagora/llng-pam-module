@@ -1,5 +1,46 @@
 # Configuration Reference
 
+## Boolean values
+
+Boolean settings accept exactly `true`, `yes`, `1`, `on` and `false`, `no`,
+`0`, `off` — lowercase only. Any other value (an empty value, `TRUE`, `tru`,
+`enabled`, …) is a **fatal configuration error**: the offending key and value
+are logged to syslog and the PAM module refuses to start rather than guessing.
+
+This is deliberate. Before, an unrecognised value silently meant `false`, so a
+typo in `verify_ssl` disabled TLS certificate verification without any warning.
+
+The same strict rule applies to PAM module arguments in `/etc/pam.d/*`, where
+both `ssh_cert_aware=true` and `ssh_cert_aware="true"` are accepted.
+
+## Comments
+
+A `#` or `;` at the start of a line comments out the whole line. A `#` may also
+appear at the end of a value line:
+
+```ini
+verify_ssl = true          # comment: everything from '#' is ignored
+```
+
+The rule for inline comments is narrow on purpose, so it can never truncate a
+legitimate value:
+
+| Written | Value used | Why |
+|---|---|---|
+| `verify_ssl = true # prod` | `true` | `#` preceded by whitespace ⇒ comment |
+| `portal_url = https://sso.example.com/#frag` | `https://sso.example.com/#frag` | `#` not preceded by whitespace |
+| `client_secret = s3cr3t # keep` | `s3cr3t # keep` | secret-bearing key, never stripped |
+| `server_group = "prod # 2"` | `prod # 2` | quoted value, never stripped |
+| `server_group = "prod" # note` | `prod` | value ends at the closing quote |
+
+Keys exempt from inline-comment stripping (their value is an opaque secret or
+hash, where `#` is an ordinary character): `client_secret`, `notify_secret`,
+`webhook_secret`, `request_signing_secret`, `crowdsec_bouncer_key`,
+`crowdsec_password`, `cert_pin`.
+
+For any other key, put the value in double quotes if it must contain a `#`
+preceded by a space.
+
 ## Main Configuration File
 
 ### /etc/open-bastion/openbastion.conf
