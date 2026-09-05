@@ -2323,8 +2323,9 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
 
     /*
      * Try the cross-process name file cache before going to the network.
-     * Once nscd is gone this is what keeps getpwnam() answers shared between
-     * processes (sshd pre-auth, login, sudo, ...) without an HTTPS round trip.
+     * With no nscd in front of us this is what keeps getpwnam() answers shared
+     * between processes (sshd pre-auth, login, sudo, ...) without an HTTPS round
+     * trip.
      * Only LLNG-resolved users land here (service accounts are kept
      * memory-only on purpose), so a hit is safe to promote into the in-memory
      * cache exactly like the getpwuid file-cache-hit path does.
@@ -2358,7 +2359,7 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
         /* Add to memory cache */
         cache_add(name, result, 1);
         /* Also save to file cache for cross-process lookups: by UID (getpwuid)
-         * and by name (getpwnam once nscd is gone). */
+         * and by name (getpwnam, which has no external cache in front of it). */
         file_cache_save(result);
         file_cache_save_by_name(result);
         g_in_nss_lookup = 0;
@@ -2374,8 +2375,17 @@ NSS_VISIBLE enum nss_status _nss_openbastion_getpwnam_r(const char *name,
     }
 
     /* qr < 0: transient/unavailable (network, persistent 401, 5xx). Do NOT
-     * cache, and return UNAVAIL so nscd does not store an authoritative
-     * negative that would lock the user out until nscd is restarted. */
+     * cache, and return UNAVAIL rather than NOTFOUND: NOTFOUND is an
+     * authoritative "no such user" that any caller (or a caching consumer, if
+     * one is ever put in front of us) may treat as final, locking the user out
+     * well past the outage. UNAVAIL keeps the failure transient.
+     *
+     * Note the deliberate asymmetry with the file cache: an entry past
+     * cache_ttl is unlinked in file_cache_parse_into() and is NOT served here
+     * as a fallback. The module never answers with stale data, so an LLNG
+     * outage stops resolving users roughly cache_ttl after the last successful
+     * lookup. Sites that need a longer buffer raise cache_ttl; see
+     * "NSS cache and LLNG outages" in doc/admin-guide.md. */
     g_in_nss_lookup = 0;
     *errnop = EAGAIN;
     return NSS_STATUS_UNAVAIL;

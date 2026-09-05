@@ -459,6 +459,199 @@ EOF
 chmod 644 /etc/open-bastion/nss_openbastion.conf
 ```
 
+#### NSS cache and LLNG outages
+
+`cache_ttl` is not only a load knob: on a host without `nscd` — the default,
+since it is no longer a dependency — it is the *only* thing standing between an
+LLNG outage and a host that can no longer resolve its users.
+
+The NSS module deliberately **never serves stale data**:
+
+- a file-cache entry older than `cache_ttl` is deleted the moment it is read,
+  rather than returned;
+- a transient LLNG failure (network error, 5xx, persistent 401) returns
+  `NSS_STATUS_UNAVAIL` and is *not* answered from the expired entry — this is
+  what stops a blip from being cached as an authoritative "no such user".
+
+The practical consequence is a cliff rather than a slope. Roughly `cache_ttl`
+after the last successful lookup, `getent passwd <user>` returns nothing and
+`sshd` can no longer map the account, so new logins for LLNG-backed users fail
+until the portal is reachable again. With the default of 300 s that is about
+five minutes of buffer. (This is a real change from the days when `nscd` was a
+dependency: its persistent cache and `reload-count` re-served known users for
+tens of minutes or longer.)
+
+Choose `cache_ttl` accordingly:
+
+| `cache_ttl` | Outage buffer | Deprovisioning lag |
+| ----------- | ------------- | ------------------ |
+| `300` (default) | ~5 min | a removed user stops resolving within ~5 min |
+| `3600` | ~1 h | up to ~1 h |
+| `86400` (maximum) | ~24 h | up to ~24 h |
+
+```bash
+# Raise the buffer to one hour on hosts where a short LLNG outage must not
+# lock out new logins. Accepted range: 0-86400 seconds.
+sed -i 's/^cache_ttl = .*/cache_ttl = 3600/' /etc/open-bastion/nss_openbastion.conf
+```
+
+Raising it is safe with respect to *revocation*, which does not depend on this
+cache: PAM re-checks authorization at each login (against its own, separate
+cache), and the SSH CA KRL revokes certificates independently. A stale passwd
+entry lets a name resolve; it does not grant access.
+
+What a longer TTL delays is how quickly a user **deprovisioned in LLNG** stops
+appearing in `getent passwd`. Note the distinction:
+
+- changes this host performs itself — user creation, `open-bastion-sudo` and
+  managed-group membership changes — invalidate the user's cache entry
+  immediately, so the TTL never applies to them;
+- a deletion made upstream in LLNG is not observed locally, so there the TTL
+  is genuinely the upper bound on how long the name keeps resolving.
+
+Two things that do **not** substitute for this buffer, and should not be
+confused with it:
+
+- `offline_cache_ttl` (in `openbastion.conf`) covers PAM *authorization*
+  during an outage. It does nothing if NSS can no longer resolve the user in
+  the first place; the two need to be sized together. Note that the `cache_ttl`
+  discussed here is the one in `nss_openbastion.conf`; `openbastion.conf` has
+  its own unrelated `cache_ttl` for the PAM authorization cache.
+- Service accounts declared in `/etc/open-bastion/service-accounts.conf` are
+  resolved locally without contacting LLNG, so they keep working regardless of
+  `cache_ttl`. Keeping one break-glass service account is the recommended
+  backstop for a prolonged outage.
+
+#### Who refreshes the cache
+
+Only **root** can populate the NSS cache. The module authenticates to LLNG with
+the server token in `/etc/open-bastion/`, which is `0600 root:root`, so an
+unprivileged process can never query the portal: for it, the file cache under
+`/var/cache/nss_llng` is the *only* source of LLNG-backed passwd data
+(`getpwuid` is served from the cache and nothing else). Root processes refill
+it as a side effect of their own lookups — `sshd` on every login, `sudo`,
+`cron`, `systemd --user` session setup.
+
+The consequence, in **normal operation and with LLNG perfectly healthy**: an
+entry that expires while no root process happens to resolve that user is not
+renewed. In a long idle SSH session, once `cache_ttl` has elapsed since the
+last root-side lookup:
+
+- `ls -l` shows numeric uids instead of names;
+- `whoami` and `id` fail;
+- an outgoing `ssh` or `scp` from that session refuses to start with
+  `You don't exist, go away!` (OpenSSH calls `getpwuid(getuid())` at startup).
+
+Anything that triggers a root-side lookup repairs it instantly — a new SSH
+session, an `su`, a `sudo`, any `cron` job for that user — so this is a
+transient nuisance in an idle session, not a lockout: authentication and
+authorization are unaffected. Two mitigations, in order of bluntness:
+
+```bash
+# 1. Raise the TTL so an idle session outlives it (also raises the
+#    deprovisioning lag -- see the table above).
+sed -i 's/^cache_ttl = .*/cache_ttl = 3600/' /etc/open-bastion/nss_openbastion.conf
+
+# 2. Or keep a root-side lookup ticking. Any cron job resolving the users you
+#    care about will do; it runs as root, so it repopulates the shared cache.
+```
+
+Keeping `nscd` installed does **not** fix this — nscd's own entries expire the
+same way, and it repopulates them through this same module, so a refresh from
+an unprivileged caller still cannot reach LLNG.
+
+Removing the root-only constraint properly needs a privileged refresher: a
+socket-activated root helper along the lines of the existing `ob-cert-daemon`,
+or a periodic refresh driven by `ob-heartbeat` (which already runs as root on a
+timer). Neither is implemented yet.
+
+#### Lookups for users that do not exist
+
+A name LLNG does not know is cached **in memory only**, per process. The
+on-disk cache is written on success only, on purpose: it is populated from an
+unauthenticated code path (`sshd` resolves the login name *before*
+authenticating), and letting that path create files would hand a remote
+attacker a way to fill `/var/cache/nss_llng` with inodes.
+
+So every SSH attempt with an unknown username costs one HTTPS
+`/pam/userinfo` request to LLNG, and `sshd` forks a fresh process per
+connection, so the in-memory negative entry never helps across attempts. This
+is reachable by an unauthenticated remote client and should be sized for.
+
+Two honest qualifications:
+
+- `nscd` never really covered this either. Its negative cache
+  (`negative-time-to-live passwd`, 20 s by default) is keyed *per name*, so it
+  absorbed a flood repeating one username and did nothing at all against a
+  flood of distinct usernames — which is the cheap attack. Dropping nscd
+  widens the repeated-name case only.
+- The cost is one request per *connection*, and `sshd` bounds concurrent
+  pre-auth connections itself.
+
+If this matters on an exposed bastion, bound it where connection floods are
+already bounded, not in the resolver:
+
+```
+# /etc/ssh/sshd_config -- cap unauthenticated connections in flight
+MaxStartups 10:30:60
+```
+
+and keep `fail2ban` or CrowdSec (which this project already integrates for PAM)
+watching `sshd` for repeated failures from one source.
+
+#### SELinux (Rocky, RHEL, AlmaLinux)
+
+The cache is written from the **calling process's** domain — `sshd_t`,
+`sudo_t`, `crond_t` — because an NSS module runs inside whatever process
+resolves a user, not in a daemon of its own. On a host with SELinux in
+`enforcing` mode, the default policy may not permit those domains to create
+files under `/var/cache/nss_llng`.
+
+**This has not been verified on Rocky 9 enforcing.** If the write is denied,
+it fails silently (the module treats a failed cache write as non-fatal and
+keeps serving from LLNG), and the on-disk cache is simply never populated —
+which makes the "who refreshes the cache" section above the normal state of
+affairs rather than an edge case, since nothing would ever be shared between
+processes.
+
+Check it before deploying on an enforcing host:
+
+```bash
+getenforce                     # Enforcing?
+ls -la /var/cache/nss_llng/    # populated after an SSH login?
+ausearch -m avc -ts recent | grep nss_llng
+```
+
+There is no stock type that `sshd_t`, `sudo_t` and `crond_t` may all write, so
+relabelling to an existing type is not a solution: this needs a small policy
+module giving the directory its own type and allowing the NSS callers (the
+`nsswitch_domain` attribute is exactly the set of domains that resolve users)
+to manage it. Untested sketch, to be confirmed against the actual denials:
+
+```
+# nss_llng.te
+policy_module(nss_llng, 1.0.0)
+
+require { attribute nsswitch_domain; }
+
+type nss_llng_cache_t;
+files_type(nss_llng_cache_t)
+
+allow nsswitch_domain nss_llng_cache_t:dir  { search add_name remove_name write };
+allow nsswitch_domain nss_llng_cache_t:file { create read write open getattr unlink rename };
+```
+
+```bash
+make -f /usr/share/selinux/devel/Makefile nss_llng.pp && semodule -i nss_llng.pp
+semanage fcontext -a -t nss_llng_cache_t '/var/cache/nss_llng(/.*)?'
+restorecon -Rv /var/cache/nss_llng
+```
+
+Confirm against the real denials with `ausearch -m avc -ts recent | audit2allow`
+rather than trusting the sketch. `setenforce 0` is a diagnostic, not a fix.
+Shipping such a module from the RPM is the correct long-term answer; the RPM
+does not ship one yet.
+
 ### Step 4: Configure NSS
 
 ```bash
@@ -470,8 +663,18 @@ chmod 644 /etc/open-bastion/nss_openbastion.conf
 
 sed -i 's/^passwd:.*/passwd: files openbastion/' /etc/nsswitch.conf
 
-# Restart nscd so the new NSS module is picked up immediately
-systemctl restart nscd
+# No name-service cache daemon is required. The NSS module keeps its own
+# in-memory and on-disk cache (/var/cache/nss_llng), so nscd would only add a
+# redundant second cache in front of it -- and nscd is deprecated upstream and
+# absent from modern distributions. PAM invalidates the module's file cache
+# directly when users or group memberships change, so the new resolver takes
+# effect immediately.
+#
+# Keeping nscd is still supported: it is no longer a dependency, but it is not
+# disabled either, and PAM still runs `nscd --invalidate passwd group` when the
+# binary is present -- which matters, because nscd also caches the *group*
+# database this module does not implement.
+# See "NSS cache and LLNG outages" below for the cache_ttl trade-off.
 ```
 
 ### Step 5: Enroll Server
@@ -631,16 +834,7 @@ It performs all of the following automatically:
 - Downloads the initial KRL to `/etc/ssh/revoked_keys`
 - Creates `/etc/sudoers.d/open-bastion` for sudo authorization
 
-### Step 4: Restart nscd
-
-After NSS configuration, restart the name service cache daemon so the new resolver
-is picked up immediately:
-
-```bash
-systemctl restart nscd
-```
-
-### Step 5: Verify
+### Step 4: Verify
 
 ```bash
 # Check NSS resolves LLNG users

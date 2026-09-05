@@ -209,6 +209,95 @@ response`, returning `PAM_AUTHINFO_UNAVAIL` — which reads as a server problem
   reporting run as intended. The verify-response parser was extracted
   (`ob_parse_verify_response`) and is now covered by unit tests.
 
+### Removed
+
+- **`nscd` is no longer a dependency.** The NSS module keeps its own in-memory
+  and cross-process on-disk cache (`/var/cache/nss_llng`), so a separate
+  name-service cache daemon adds nothing: it only interposes a second cache in
+  front of one that already exists. `nscd` is also deprecated upstream and
+  absent from modern distributions (Fedora builds glibc with `--disable-nscd`
+  and dropped the package; other distributions have followed, superseding it
+  with `systemd-resolved` and SSSD), so requiring it made the package harder to
+  install rather than safer. The `Depends:` (Debian) and `Requires:` (RPM) are
+  dropped, the demo/quick-start Docker environments no longer install or start
+  it, and the documentation no longer instructs restarting it. Existing hosts
+  are left alone: with the dependency gone, `apt autoremove` reclaims `nscd` if
+  nothing else wants it, and an administrator who runs it deliberately for
+  `hosts`/`services` keeps it. (Historically `nscd` also crashed with `SIGABRT`
+  in this module's NSS path; that was a double-free in the module itself and
+  was fixed in 0.6.1 — it is no longer a reason to avoid `nscd`, only the
+  reason the redundancy was noticed.)
+- **The PAM module now invalidates the NSS module's own file cache.** It removes
+  the entries directly (by name, and by uid for newly created users), so user
+  and group-membership changes stay visible immediately. Entries are removed
+  with `unlinkat()` relative to directory file descriptors opened `O_NOFOLLOW`
+  and verified root-owned, so no path component can be swapped for a symlink.
+  The `nscd --invalidate passwd group` fork is **kept as well**, best-effort,
+  on hosts where `/usr/sbin/nscd` exists: this release does not disable `nscd`
+  on upgraded hosts, and where it still runs, glibc routes both `passwd` and
+  `group` through it. The module implements `passwd` only, so without that fork
+  a removal from `open-bastion-sudo` would have stayed cached by `nscd` for
+  `positive-time-to-live group` (3600 s on Debian) — turning an immediate sudo
+  revocation into a delay of up to an hour. Hosts without `nscd` installed pay
+  nothing: no binary, no fork.
+
+### Changed
+
+- **Resilience to an LLNG outage no longer depends on `nscd`, and the buffer is
+  shorter.** `nscd`'s persistent cache, combined with its `reload-count`,
+  effectively re-served known users for the length of an outage. The NSS
+  module's own cache expires at `cache_ttl` (default **300 s**) and never
+  serves stale data: an expired file-cache entry is deleted on read, and a
+  transient LLNG failure returns `NSS_STATUS_UNAVAIL` rather than falling back
+  to the expired entry. On a host where LLNG becomes unreachable, `getent
+  passwd <user>` therefore stops resolving roughly `cache_ttl` after the last
+  successful lookup, and `sshd` can no longer map the user. Sites that want a
+  longer buffer should raise `cache_ttl` in
+  `/etc/open-bastion/nss_openbastion.conf` (accepted range 0–86400 s); see
+  "NSS cache and LLNG outages" in the admin guide for the trade-off against
+  how quickly a deprovisioned user disappears.
+- **Only root can refill the NSS cache, which is now visible in normal
+  operation.** The module authenticates to LLNG with the root-only server
+  token, so an unprivileged process can never query the portal and reads the
+  file cache alone. With `nscd` gone there is no other refresher: an entry that
+  expires while no root process happens to resolve that user is simply not
+  renewed. In a long idle SSH session, past `cache_ttl` since the last
+  root-side lookup, `ls -l` falls back to numeric uids, `whoami`/`id` fail, and
+  an outgoing `ssh`/`scp` refuses with `You don't exist, go away!`. Any
+  root-side lookup — a new session, `su`, `sudo`, a `cron` job — repairs it at
+  once, and authentication and authorization are unaffected; this is a
+  nuisance, not a lockout. Documented under "Who refreshes the cache" in the
+  admin guide, with `cache_ttl` and a periodic root lookup as mitigations. A
+  proper fix (a socket-activated root refresher like `ob-cert-daemon`, or a
+  refresh driven by `ob-heartbeat`) is not implemented yet.
+- **A lookup for a user that does not exist now reaches LLNG on every
+  attempt.** Negative results are cached in memory only, per process, and the
+  on-disk cache is written on success only — deliberately, since it is
+  populated from an unauthenticated path (`sshd` resolves the login name before
+  authenticating) and letting that path create files would let a remote client
+  fill `/var/cache/nss_llng` with inodes. Since `sshd` forks per connection,
+  each SSH attempt with an unknown username costs one HTTPS `/pam/userinfo`
+  request, triggerable by an unauthenticated remote client. `nscd` only
+  partially covered this before: its negative cache is keyed per name
+  (`negative-time-to-live passwd`, 20 s), so it absorbed a flood repeating one
+  username and did nothing against a flood of distinct ones. Bound it where
+  connection floods are already bounded — `MaxStartups`, `fail2ban`/CrowdSec —
+  as described under "Lookups for users that do not exist" in the admin guide.
+
+### Known issues
+
+- **SELinux in `enforcing` mode (Rocky/RHEL/AlmaLinux) is untested with the
+  on-disk cache.** An NSS module runs inside the calling process, so the cache
+  is written from `sshd_t`, `sudo_t`, `crond_t` and friends rather than from a
+  daemon of its own. If the default policy denies those domains a write under
+  `/var/cache/nss_llng`, the write fails silently (a failed cache write is
+  non-fatal by design) and the cross-process cache is never populated on RPM
+  hosts — which would make the root-only-refresh regime above the normal state
+  rather than an edge case. This has **not** been verified on Rocky 9
+  enforcing, and no policy module ships with the RPM. The admin guide gives the
+  `ausearch`/`audit2allow` check to run before deploying there, and a sketch of
+  the policy module such a host would need.
+
 ## [0.6.2] - 2026-06-25
 
 Hotfix for 0.6.1: the Debian package failed to install/upgrade.

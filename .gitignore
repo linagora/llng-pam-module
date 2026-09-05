@@ -34,6 +34,7 @@ debian/open-bastion-dbgsym/
 debian/open-bastion-builder/
 debian/*.debhelper.log
 debian/*.substvars
+debian/*.postinst.debhelper
 debian/*.postrm.debhelper
 debian/debhelper-build-stamp
 debian/files
@@ -48,7 +49,7 @@ local/
 # machine-local scratch, never part of the source archive.
 local-test/vm/
 
-# Répertoires de vérification locale (build ad hoc, sanitizers)
+# Verification build trees (ad-hoc build-and-test recipes, sanitizers)
 build-verify/
 build-asan/
 bv/

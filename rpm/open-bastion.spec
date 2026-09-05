@@ -25,7 +25,6 @@ Requires:       openssl-libs
 Requires:       libsodium
 Requires:       curl
 Requires:       jq
-Requires:       nscd
 Requires:       glibc-langpack-en
 Requires:       systemd
 Requires:       util-linux
