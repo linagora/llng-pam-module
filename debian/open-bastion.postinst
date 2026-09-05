@@ -18,6 +18,54 @@ backup_pam_file() {
     fi
 }
 
+# Warn when a certificate-only PAM mode is installed while sshd still accepts
+# passwords (#180).
+#
+# We deliberately do NOT edit sshd_config here. Disabling password
+# authentication from a package postinst can lock out an administrator who is
+# connected over a password session, and this project's convention is that
+# intrusive hardening is opt-in. ob-bastion-setup writes the
+# `PasswordAuthentication no` drop-in, and it is run deliberately.
+#
+# The generated PAM stack already denies (auth required pam_deny.so), so a
+# password attempt is refused -- but only while sshd routes it through PAM.
+# With `UsePAM no` sshd checks /etc/shadow itself and never consults the stack,
+# so the mismatch is worth reporting rather than leaving silent.
+warn_if_sshd_accepts_passwords() {
+    _mode="$1"
+
+    case "$_mode" in
+        mode-c|mode-d) ;;   # certificate/key modes: passwords are not expected
+        *) return 0 ;;
+    esac
+
+    command -v sshd >/dev/null 2>&1 || return 0
+
+    # Effective configuration, comments and drop-ins resolved by sshd itself.
+    _eff=$(sshd -T 2>/dev/null) || return 0
+    [ -n "$_eff" ] || return 0
+
+    _pw=$(printf '%s\n' "$_eff" | sed -n 's/^passwordauthentication //p')
+    _kbd=$(printf '%s\n' "$_eff" | sed -n 's/^kbdinteractiveauthentication //p')
+    _usepam=$(printf '%s\n' "$_eff" | sed -n 's/^usepam //p')
+
+    [ "$_pw" = "yes" ] || [ "$_kbd" = "yes" ] || return 0
+
+    echo "open-bastion: WARNING - PAM mode '$_mode' expects certificate or key" >&2
+    echo "  authentication, but sshd still accepts passwords" >&2
+    echo "  (PasswordAuthentication=$_pw, KbdInteractiveAuthentication=$_kbd)." >&2
+    echo "  The installed PAM stack denies password authentication, so logins" >&2
+    echo "  are refused -- but that protection depends on sshd using PAM." >&2
+    if [ "$_usepam" = "no" ]; then
+        echo "  UsePAM is 'no' on this host: sshd checks /etc/shadow itself and" >&2
+        echo "  never consults the PAM stack. Password logins are NOT refused." >&2
+    fi
+    echo "  Run ob-bastion-setup (or ob-backend-setup) to write the sshd" >&2
+    echo "  drop-in that turns password authentication off." >&2
+
+    return 0
+}
+
 # Generate PAM configuration for sshd
 generate_pam_sshd() {
     mode="$1"
@@ -231,6 +279,7 @@ case "$1" in
             # Backup and configure sshd
             backup_pam_file "$PAM_SSHD" "sshd"
             generate_pam_sshd "$MODE" "$SERVER_GROUP" > "$PAM_SSHD"
+            warn_if_sshd_accepts_passwords "$MODE"
 
             # Configure sudo if requested
             if [ "$CONFIGURE_SUDO" = "true" ]; then
