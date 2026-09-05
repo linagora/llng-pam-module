@@ -525,7 +525,12 @@ static int test_temp_file_is_private(void)
     if (ok) {
         cache_entry_t entry;
         memset(&entry, 0, sizeof(entry));
-        ok = cache_lookup(cache, token, user, &entry) && entry.authorized;
+        if (cache_lookup(cache, token, user, &entry)) {
+            ok = entry.authorized;
+            cache_entry_free(&entry);
+        } else {
+            ok = 0;
+        }
     }
 
     cache_destroy(cache);
