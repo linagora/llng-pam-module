@@ -212,9 +212,18 @@ bool ssh_key_policy_check_rsa_size(const ssh_key_policy_t *policy, int bits)
     return bits >= policy->min_rsa_bits;
 }
 
-bool ssh_key_policy_check(const ssh_key_policy_t *policy,
-                          const char *algorithm,
-                          ssh_key_validation_result_t *result)
+/*
+ * Shared implementation of the policy check.
+ *
+ * key_bits      - size derived from the key material (0 = unknown)
+ * enforce_size  - when true, a variable-size key (RSA) whose size is unknown
+ *                 is REJECTED instead of silently accepted.
+ */
+static bool policy_check_impl(const ssh_key_policy_t *policy,
+                              const char *algorithm,
+                              int key_bits,
+                              bool enforce_size,
+                              ssh_key_validation_result_t *result)
 {
     /* Initialize result */
     ssh_key_validation_result_t local_result = {
@@ -234,7 +243,8 @@ bool ssh_key_policy_check(const ssh_key_policy_t *policy,
     if (!policy->enabled) {
         local_result.valid = true;
         local_result.type = ssh_key_parse_algorithm(algorithm);
-        local_result.key_bits = ssh_key_type_bits(local_result.type);
+        local_result.key_bits = key_bits > 0 ? key_bits
+                                             : ssh_key_type_bits(local_result.type);
         if (result) *result = local_result;
         return true;
     }
@@ -247,7 +257,12 @@ bool ssh_key_policy_check(const ssh_key_policy_t *policy,
 
     /* Parse the algorithm */
     local_result.type = ssh_key_parse_algorithm(algorithm);
-    local_result.key_bits = ssh_key_type_bits(local_result.type);
+    /*
+     * Prefer the size derived from the key material; fall back to the size
+     * implied by the algorithm name (exact for Ed25519/ECDSA, unknown for RSA).
+     */
+    local_result.key_bits = key_bits > 0 ? key_bits
+                                         : ssh_key_type_bits(local_result.type);
 
     /* Check if type is allowed */
     switch (local_result.type) {
@@ -258,10 +273,26 @@ bool ssh_key_policy_check(const ssh_key_policy_t *policy,
             return false;
         }
         /*
-         * For RSA, we can't check the key size from the algorithm alone.
-         * The size check must be done separately if size information
-         * is available from another source.
+         * RSA is the only variable-size type here, and its size is NOT
+         * derivable from the algorithm name. When the caller supplied the size
+         * (decoded from the key blob) we enforce min_rsa_bits; when it did not
+         * and size enforcement was requested, we fail CLOSED — accepting a key
+         * we cannot measure would make ssh_key_min_rsa_bits inert.
          */
+        if (enforce_size) {
+            if (local_result.key_bits <= 0) {
+                local_result.error =
+                    "RSA key size could not be determined - cannot enforce "
+                    "ssh_key_min_rsa_bits";
+                if (result) *result = local_result;
+                return false;
+            }
+            if (!ssh_key_policy_check_rsa_size(policy, local_result.key_bits)) {
+                local_result.error = "RSA key size below minimum required";
+                if (result) *result = local_result;
+                return false;
+            }
+        }
         local_result.valid = true;
         break;
 
@@ -355,4 +386,239 @@ bool ssh_key_policy_check(const ssh_key_policy_t *policy,
 
     if (result) *result = local_result;
     return local_result.valid;
+}
+
+bool ssh_key_policy_check(const ssh_key_policy_t *policy,
+                          const char *algorithm,
+                          ssh_key_validation_result_t *result)
+{
+    /* Type-only check: no size information available, no size enforcement. */
+    return policy_check_impl(policy, algorithm, 0, false, result);
+}
+
+bool ssh_key_policy_check_key(const ssh_key_policy_t *policy,
+                              const char *algorithm,
+                              int key_bits,
+                              ssh_key_validation_result_t *result)
+{
+    return policy_check_impl(policy, algorithm, key_bits, true, result);
+}
+
+/* ------------------------------------------------------------------------ *
+ * SSH public key / certificate blob decoding
+ *
+ * sshd hands the base64 blob of the presented key or certificate to
+ * AuthorizedPrincipalsCommand via the %k token. Decoding it gives the
+ * authoritative key type and, for RSA, the modulus size - neither of which can
+ * be obtained from an algorithm name. The wire format (RFC 4253 section 6.6
+ * and PROTOCOL.certkeys) is a sequence of length-prefixed strings/mpints:
+ *
+ *   plain key   : string type, <key material>
+ *   certificate : string type, string nonce, <key material>, ...
+ *
+ * with key material:
+ *   ssh-rsa                  : mpint e, mpint n         -> bits = |n|
+ *   ssh-dss                  : mpint p, q, g, y         -> bits = |p|
+ *   ssh-ed25519 / sk-ed25519 : string pk                -> 256
+ *   ecdsa-sha2-*             : string curve, string Q   -> from curve
+ *
+ * The same decode is implemented in Perl in the LLNG ssh-ca plugin
+ * (_parseSshPubKey / _mpintBits); keep the two in sync.
+ * ------------------------------------------------------------------------ */
+
+static int b64_value(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/*
+ * Strict base64 decoder: rejects whitespace and any character outside the
+ * standard alphabet (the spool writer already filters; this is defence in
+ * depth). Returns a malloc'd buffer, or NULL.
+ */
+static unsigned char *b64_decode(const char *s, size_t *out_len)
+{
+    if (!s || !out_len) return NULL;
+
+    size_t len = strlen(s);
+    if (len == 0 || len > SSH_KEY_BLOB_B64_MAX || (len % 4) != 0) return NULL;
+
+    /* Padding: at most two '=', only at the very end */
+    size_t pad = 0;
+    while (pad < 2 && len > pad && s[len - 1 - pad] == '=') pad++;
+    for (size_t i = 0; i < len - pad; i++) {
+        if (b64_value(s[i]) < 0) return NULL;
+    }
+
+    size_t out_cap = (len / 4) * 3;
+    unsigned char *out = malloc(out_cap ? out_cap : 1);
+    if (!out) return NULL;
+
+    size_t o = 0;
+    for (size_t i = 0; i + 3 < len; i += 4) {
+        int v0 = b64_value(s[i]);
+        int v1 = b64_value(s[i + 1]);
+        int v2 = s[i + 2] == '=' ? 0 : b64_value(s[i + 2]);
+        int v3 = s[i + 3] == '=' ? 0 : b64_value(s[i + 3]);
+        if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) {
+            free(out);
+            return NULL;
+        }
+        unsigned int triple = ((unsigned int)v0 << 18) | ((unsigned int)v1 << 12) |
+                              ((unsigned int)v2 << 6)  | (unsigned int)v3;
+        out[o++] = (unsigned char)((triple >> 16) & 0xFF);
+        out[o++] = (unsigned char)((triple >> 8) & 0xFF);
+        out[o++] = (unsigned char)(triple & 0xFF);
+    }
+    if (o < pad) {
+        free(out);
+        return NULL;
+    }
+    o -= pad;
+
+    *out_len = o;
+    return out;
+}
+
+/* Minimal cursor over an SSH wire-format buffer. */
+typedef struct {
+    const unsigned char *data;
+    size_t len;
+    size_t off;
+} ssh_blob_reader_t;
+
+/* Read a length-prefixed string (also used for mpints). */
+static bool blob_get_string(ssh_blob_reader_t *r,
+                            const unsigned char **out, size_t *out_len)
+{
+    if (!r || r->len < 4 || r->off > r->len - 4) return false;
+    size_t n = ((size_t)r->data[r->off] << 24) |
+               ((size_t)r->data[r->off + 1] << 16) |
+               ((size_t)r->data[r->off + 2] << 8) |
+               ((size_t)r->data[r->off + 3]);
+    r->off += 4;
+    /* Cannot overflow: r->off <= r->len, and n is compared to what is left */
+    if (n > r->len - r->off) return false;
+    if (out) *out = r->data + r->off;
+    if (out_len) *out_len = n;
+    r->off += n;
+    return true;
+}
+
+/* Bit length of an SSH mpint (leading zero bytes stripped). */
+static int mpint_bits(const unsigned char *d, size_t len)
+{
+    size_t i = 0;
+    while (i < len && d[i] == 0) i++;
+    if (i >= len) return 0;
+    int bits = (int)((len - i - 1) * 8);
+    unsigned char top = d[i];
+    while (top) {
+        bits++;
+        top >>= 1;
+    }
+    return bits;
+}
+
+bool ssh_key_blob_info(const char *blob_b64,
+                       char *algo_out, size_t algo_sz,
+                       ssh_key_type_t *type_out,
+                       int *bits_out)
+{
+    if (algo_out && algo_sz) algo_out[0] = '\0';
+    if (type_out) *type_out = SSH_KEY_TYPE_UNKNOWN;
+    if (bits_out) *bits_out = 0;
+
+    if (!blob_b64 || !*blob_b64) return false;
+
+    size_t raw_len = 0;
+    unsigned char *raw = b64_decode(blob_b64, &raw_len);
+    if (!raw) return false;
+
+    bool ok = false;
+    ssh_blob_reader_t r = { raw, raw_len, 0 };
+    char algo_buf[128];
+    ssh_key_type_t type = SSH_KEY_TYPE_UNKNOWN;
+    int bits = 0;
+    const unsigned char *field = NULL;
+    size_t field_len = 0;
+    const unsigned char *algo = NULL;
+    size_t algo_len = 0;
+
+    if (!blob_get_string(&r, &algo, &algo_len) || algo_len == 0
+        || algo_len >= sizeof(algo_buf)) {
+        goto out;
+    }
+
+    memcpy(algo_buf, algo, algo_len);
+    algo_buf[algo_len] = '\0';
+    /* The type name must be printable ASCII without spaces */
+    for (size_t i = 0; i < algo_len; i++) {
+        if (algo_buf[i] < 0x21 || algo_buf[i] > 0x7e) goto out;
+    }
+
+    type = ssh_key_parse_algorithm(algo_buf);
+    if (type == SSH_KEY_TYPE_UNKNOWN) goto out;
+
+    /* Certificates insert a nonce string before the key material */
+    if (strstr(algo_buf, "-cert-") != NULL) {
+        if (!blob_get_string(&r, NULL, NULL)) goto out;
+    }
+
+    switch (type) {
+    case SSH_KEY_TYPE_RSA:
+        /* mpint e, mpint n */
+        if (!blob_get_string(&r, NULL, NULL)) goto out;
+        if (!blob_get_string(&r, &field, &field_len)) goto out;
+        bits = mpint_bits(field, field_len);
+        if (bits <= 0) goto out;
+        break;
+
+    case SSH_KEY_TYPE_DSA:
+        /* mpint p, q, g, y -> the prime p sets the size */
+        if (!blob_get_string(&r, &field, &field_len)) goto out;
+        bits = mpint_bits(field, field_len);
+        if (bits <= 0) goto out;
+        break;
+
+    case SSH_KEY_TYPE_ED25519:
+    case SSH_KEY_TYPE_SK_ED25519:
+        /* string pk (32 bytes) */
+        if (!blob_get_string(&r, &field, &field_len)) goto out;
+        if (field_len != 32) goto out;
+        bits = 256;
+        break;
+
+    case SSH_KEY_TYPE_ECDSA_256:
+    case SSH_KEY_TYPE_ECDSA_384:
+    case SSH_KEY_TYPE_ECDSA_521:
+    case SSH_KEY_TYPE_SK_ECDSA:
+        /* string curve name, string Q */
+        if (!blob_get_string(&r, &field, &field_len)) goto out;
+        if (field_len == 0 || field_len > 32) goto out;
+        if (!blob_get_string(&r, NULL, NULL)) goto out;
+        bits = ssh_key_type_bits(type);
+        if (bits <= 0) goto out;
+        break;
+
+    default:
+        goto out;
+    }
+
+    if (algo_out && algo_sz) {
+        if (algo_len + 1 > algo_sz) goto out;
+        memcpy(algo_out, algo_buf, algo_len + 1);
+    }
+    if (type_out) *type_out = type;
+    if (bits_out) *bits_out = bits;
+    ok = true;
+
+out:
+    free(raw);
+    return ok;
 }

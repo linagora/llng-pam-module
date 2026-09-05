@@ -1680,24 +1680,41 @@ static pid_t find_sshd_session_ancestor(void)
 }
 
 /*
- * Read the SSH key fingerprint dropped by llng-principals in
- * /run/open-bastion/ssh-fp/<sshd-session-pid>.fp. This is the out-of-band
+ * Read one drop file left by ob-ssh-principals in
+ * /run/open-bastion/ssh-fp/<sshd-session-pid>.<suffix>. This is the out-of-band
  * channel that compensates for the fact that OpenSSH does not propagate
  * SSH_USER_AUTH to the PAM environment during pam_acct_mgmt.
  *
+ * Two suffixes exist:
+ *   ".fp"  - v0 format, a bare "SHA256:<base64>" line (fingerprint binding)
+ *   ".key" - v1 format, "k=v" lines describing the presented key (key policy)
+ * They are separate files on purpose: an older pam_openbastion keeps reading
+ * ".fp" byte-for-byte as before, so a newer helper never breaks it.
+ *
  * The file is intentionally left in place on successful read: the same
  * sshd-session handles multiple PAM calls (SSH account phase + sudo
- * /pam/verify), and they all need to match the same cert. llng-principals
+ * /pam/verify), and they all need to match the same cert. ob-ssh-principals
  * always atomically overwrites the file on the next sshd connection (via
  * `mv -f`), so a stale PID reuse won't leak an old fingerprint.
  *
- * Returns allocated string (caller must free) on success, NULL otherwise.
+ * Keeps the strict integrity checks: spool dir not group/world-writable,
+ * regular file owned by the spool-dir owner, nlink == 1, mode 0600.
+ *
+ * Returns an allocated NUL-terminated buffer (caller must free), or NULL.
+ * On success `path_out` receives the file path so the caller can unlink it
+ * when the *contents* turn out to be malformed.
  */
 #ifndef OB_SSH_FP_SPOOL_DIR
 #define OB_SSH_FP_SPOOL_DIR "/run/open-bastion/ssh-fp"
 #endif
 
-static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
+/* Upper bound on the ".key" drop file: a few metadata lines plus the base64
+ * blob of an RSA-4096 certificate (~2.5 kB). */
+#define OB_SSH_SPOOL_FP_MAX  512
+#define OB_SSH_SPOOL_KEY_MAX 20480
+
+static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
+                             size_t max_size, char *path_out, size_t path_sz)
 {
     pid_t anchor = find_sshd_session_ancestor();
     if (anchor <= 1) {
@@ -1729,19 +1746,19 @@ static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
     }
 
     char path[128];
-    int n = snprintf(path, sizeof(path), "%s/%d.fp",
-                     OB_SSH_FP_SPOOL_DIR, (int)anchor);
+    int n = snprintf(path, sizeof(path), "%s/%d.%s",
+                     OB_SSH_FP_SPOOL_DIR, (int)anchor, suffix);
     if (n < 0 || (size_t)n >= sizeof(path)) return NULL;
 
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
-        OB_LOG_DEBUG(pamh, "SSH fp spool not found at %s (errno=%d)", path, errno);
+        OB_LOG_DEBUG(pamh, "SSH spool drop not found at %s (errno=%d)", path, errno);
         return NULL;
     }
 
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)
-        || st.st_size <= 0 || st.st_size > 512) {
+        || st.st_size <= 0 || (size_t)st.st_size > max_size) {
         close(fd);
         unlink(path);
         return NULL;
@@ -1755,7 +1772,7 @@ static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
     if (st.st_uid != dir_st.st_uid || st.st_nlink != 1
         || (st.st_mode & 0077) != 0) {
         OB_LOG_ERR(pamh,
-                   "SSH fp spool file %s has bad ownership/mode "
+                   "SSH spool file %s has bad ownership/mode "
                    "(uid=%u expected=%u, mode=%o, nlink=%lu) — refusing",
                    path, (unsigned)st.st_uid, (unsigned)dir_st.st_uid,
                    st.st_mode & 07777, (unsigned long)st.st_nlink);
@@ -1764,10 +1781,15 @@ static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
         return NULL;
     }
 
-    char buf[260];
-    ssize_t got = read(fd, buf, sizeof(buf) - 1);
+    char *buf = malloc(max_size + 1);
+    if (!buf) {
+        close(fd);
+        return NULL;
+    }
+    ssize_t got = read(fd, buf, max_size);
     close(fd);
     if (got <= 0) {
+        free(buf);
         unlink(path);
         return NULL;
     }
@@ -1777,14 +1799,33 @@ static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
         buf[--got] = '\0';
     }
     if (got <= 0) {
+        free(buf);
         unlink(path);
         return NULL;
     }
+
+    if (path_out && path_sz) {
+        snprintf(path_out, path_sz, "%s", path);
+    }
+    return buf;
+}
+
+/*
+ * Read and validate the v0 fingerprint drop (<anchor>.fp).
+ * Returns allocated "SHA256:<base64>" string (caller frees), or NULL.
+ */
+static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
+{
+    char path[128] = {0};
+    char *buf = read_spool_drop(pamh, "fp", OB_SSH_SPOOL_FP_MAX,
+                                path, sizeof(path));
+    if (!buf) return NULL;
 
     /* Validate strict SHA256:<base64> form. LLNG rejects anything else
      * with HTTP 400, so filter here too. */
     if (strncmp(buf, "SHA256:", 7) != 0) {
         OB_LOG_DEBUG(pamh, "SSH fp spool contents not SHA256: '%s'", buf);
+        free(buf);
         unlink(path);
         return NULL;
     }
@@ -1792,16 +1833,178 @@ static char *read_ssh_fp_from_spool(pam_handle_t *pamh)
         if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
               (*p >= '0' && *p <= '9') || *p == '+' || *p == '/' || *p == '=')) {
             OB_LOG_DEBUG(pamh, "SSH fp spool has invalid char, rejecting");
+            free(buf);
             unlink(path);
             return NULL;
         }
     }
 
-    char *fp = strdup(buf);
-    if (fp) {
-        OB_LOG_DEBUG(pamh, "SSH fp recovered from spool: %s", fp);
+    OB_LOG_DEBUG(pamh, "SSH fp recovered from spool: %s", buf);
+    return buf;
+}
+
+/*
+ * Metadata about the SSH key actually presented by the client, recovered from
+ * the v1 ".key" spool drop written by ob-ssh-principals (sshd %t / %k tokens).
+ */
+typedef struct {
+    bool present;             /* a well-formed v1 drop was found */
+    char *algorithm;          /* authoritative algorithm name (heap) */
+    ssh_key_type_t type;      /* type decoded from the key blob */
+    int bits;                 /* key size decoded from the blob, 0 if unknown */
+    bool from_blob;           /* true when type/bits came from the key material */
+} ob_ssh_key_meta_t;
+
+static void ssh_key_meta_free(ob_ssh_key_meta_t *meta)
+{
+    if (!meta) return;
+    free(meta->algorithm);
+    meta->algorithm = NULL;
+}
+
+/* Accept only the characters OpenSSH can put in an algorithm name. */
+static bool is_safe_algo_string(const char *s)
+{
+    if (!s || !*s || strlen(s) > 96) return false;
+    for (const char *p = s; *p; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' ||
+              *p == '.' || *p == '@')) {
+            return false;
+        }
     }
-    return fp;
+    return true;
+}
+
+static bool is_safe_b64_string(const char *s)
+{
+    if (!s || !*s) return false;
+    for (const char *p = s; *p; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '+' || *p == '/' || *p == '=')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Read the v1 key-metadata drop (<anchor>.key). Format, one "k=v" per line:
+ *
+ *   v=1
+ *   fp=SHA256:<base64>
+ *   alg=<sshd %t>
+ *   key=<sshd %k, base64 key or certificate blob>
+ *
+ * Unknown keys are ignored so the format can grow. The key material, when
+ * present, is decoded and wins over `alg=`: it cannot be misreported and it is
+ * the only source for the RSA modulus size.
+ *
+ * Returns true when usable metadata (at least an algorithm) was recovered.
+ */
+static bool read_ssh_key_meta_from_spool(pam_handle_t *pamh,
+                                         ob_ssh_key_meta_t *meta)
+{
+    if (!meta) return false;
+    memset(meta, 0, sizeof(*meta));
+    meta->type = SSH_KEY_TYPE_UNKNOWN;
+
+    char path[128] = {0};
+    char *buf = read_spool_drop(pamh, "key", OB_SSH_SPOOL_KEY_MAX,
+                                path, sizeof(path));
+    if (!buf) {
+        OB_LOG_DEBUG(pamh, "No SSH key metadata drop in spool");
+        return false;
+    }
+
+    const char *version = NULL;
+    const char *alg = NULL;
+    const char *blob = NULL;
+    const char *fp = NULL;
+
+    /* In-place line/field splitting */
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *k = line;
+        const char *v = eq + 1;
+        if (strcmp(k, "v") == 0)        version = v;
+        else if (strcmp(k, "alg") == 0) alg = v;
+        else if (strcmp(k, "key") == 0) blob = v;
+        else if (strcmp(k, "fp") == 0)  fp = v;
+        /* unknown keys ignored on purpose (forward compatibility) */
+    }
+
+    if (!version || strcmp(version, "1") != 0) {
+        OB_LOG_WARN(pamh, "SSH key metadata drop has unsupported version, ignoring");
+        free(buf);
+        unlink(path);
+        return false;
+    }
+
+    /*
+     * Both drops are written by the same helper run, keyed on the same anchor
+     * PID. If they disagree, one of them is stale (PID reuse with a partially
+     * failed write) and we must not police key A while binding fingerprint B:
+     * drop the metadata, which makes the policy check fail closed.
+     */
+    if (fp) {
+        char *fp_drop = read_ssh_fp_from_spool(pamh);
+        if (fp_drop && strcmp(fp_drop, fp) != 0) {
+            OB_LOG_ERR(pamh,
+                       "SSH key metadata drop does not match the fingerprint "
+                       "drop — refusing (stale spool entry)");
+            free(fp_drop);
+            free(buf);
+            unlink(path);
+            return false;
+        }
+        free(fp_drop);
+    }
+
+    /* Preferred source: the key material itself */
+    if (blob && is_safe_b64_string(blob)) {
+        char decoded_algo[128];
+        ssh_key_type_t type = SSH_KEY_TYPE_UNKNOWN;
+        int bits = 0;
+        if (ssh_key_blob_info(blob, decoded_algo, sizeof(decoded_algo),
+                              &type, &bits)) {
+            if (alg && is_safe_algo_string(alg) && strcmp(alg, decoded_algo) != 0) {
+                OB_LOG_WARN(pamh,
+                            "SSH key blob type '%s' differs from sshd-reported "
+                            "type '%s' — trusting the key material",
+                            decoded_algo, alg);
+            }
+            meta->algorithm = strdup(decoded_algo);
+            meta->type = type;
+            meta->bits = bits;
+            meta->from_blob = true;
+        } else {
+            OB_LOG_WARN(pamh, "SSH key blob in spool could not be decoded");
+        }
+    }
+
+    /* Fallback: the algorithm name reported by sshd (%t). No size information,
+     * so an RSA key will be rejected by the size check — on purpose. */
+    if (!meta->algorithm && alg && is_safe_algo_string(alg)) {
+        meta->algorithm = strdup(alg);
+        meta->type = ssh_key_parse_algorithm(alg);
+        meta->bits = 0;
+        meta->from_blob = false;
+    }
+
+    meta->present = meta->algorithm != NULL;
+    if (meta->present) {
+        OB_LOG_DEBUG(pamh, "SSH key metadata from spool: alg=%s bits=%d (%s)",
+                     meta->algorithm, meta->bits,
+                     meta->from_blob ? "decoded from key material"
+                                     : "sshd-reported type only");
+    }
+    free(buf);
+    return meta->present;
 }
 
 /*
@@ -3095,52 +3298,102 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
     service = canonical_service(service);
 
     /*
-     * SSH key policy validation (#91)
-     * If ssh_key_policy is enabled and this is an SSH connection with a key,
-     * verify the key type and size match the policy requirements.
+     * SSH key policy validation (#91, #181)
+     *
+     * When ssh_key_policy_enabled is true, the key type and size of the key
+     * presented for this SSH connection MUST satisfy the policy. This check is
+     * FAIL-CLOSED: if the key cannot be identified we deny, because silently
+     * skipping the block (the pre-#181 behaviour) made the policy a no-op on
+     * every modern OpenSSH — sshd does not export SSH_USER_AUTH to the PAM
+     * environment during pam_acct_mgmt.
+     *
+     * The key is identified from the ".key" drop written by ob-ssh-principals
+     * (sshd's %t and %k tokens), with SSH_USER_AUTH kept as a fallback for
+     * sshd variants that do export it.
+     *
+     * Nothing here runs unless the policy is explicitly enabled
+     * (ssh_key_policy_enabled defaults to false).
      */
     if (data->ssh_key_policy.enabled &&
         (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0)) {
 
-        char *ssh_algorithm = extract_ssh_algorithm(pamh);
-        if (ssh_algorithm) {
-            ssh_key_validation_result_t validation_result;
-            bool allowed = ssh_key_policy_check(&data->ssh_key_policy,
-                                                ssh_algorithm,
-                                                &validation_result);
+        ob_ssh_key_meta_t key_meta;
+        bool have_meta = read_ssh_key_meta_from_spool(pamh, &key_meta);
 
-            OB_LOG_DEBUG(pamh, "SSH key policy check: algorithm=%s type=%s bits=%d allowed=%s",
-                    ssh_algorithm,
+        char *ssh_algorithm = NULL;
+        const char *algorithm = have_meta ? key_meta.algorithm : NULL;
+        int key_bits = have_meta ? key_meta.bits : 0;
+
+        if (!algorithm) {
+            /* Fallback for an sshd that does populate SSH_USER_AUTH. No key
+             * material there, so the RSA size stays unknown. */
+            ssh_algorithm = extract_ssh_algorithm(pamh);
+            algorithm = ssh_algorithm;
+            key_bits = 0;
+        }
+
+        const char *deny_reason = NULL;
+        ssh_key_validation_result_t validation_result;
+        memset(&validation_result, 0, sizeof(validation_result));
+
+        if (!algorithm) {
+            deny_reason =
+                "SSH key policy is enabled but the key algorithm could not be "
+                "determined (no key metadata in /run/open-bastion/ssh-fp and no "
+                "SSH_USER_AUTH)";
+            OB_LOG_ERR(pamh,
+                       "SSH key policy: cannot identify the key presented by user "
+                       "%s — denying (fail-closed). Re-run ob-bastion-setup / "
+                       "ob-backend-setup so ob-ssh-principals records the key "
+                       "type, or disable ssh_key_policy_enabled.",
+                       user);
+        } else {
+            bool allowed = ssh_key_policy_check_key(&data->ssh_key_policy,
+                                                    algorithm,
+                                                    key_bits,
+                                                    &validation_result);
+
+            OB_LOG_DEBUG(pamh,
+                    "SSH key policy check: algorithm=%s type=%s bits=%d "
+                    "source=%s allowed=%s",
+                    algorithm,
                     ssh_key_type_name(validation_result.type),
                     validation_result.key_bits,
+                    (have_meta && key_meta.from_blob) ? "key-material"
+                                                      : "algorithm-name",
                     allowed ? "yes" : "no");
 
             if (!allowed) {
-                OB_LOG_ERR(pamh, "SSH key rejected by policy for user %s: %s (algorithm: %s)",
-                        user,
-                        validation_result.error ? validation_result.error : "unknown error",
-                        ssh_algorithm);
+                deny_reason = validation_result.error
+                    ? validation_result.error
+                    : "SSH key type not allowed by policy";
+                OB_LOG_ERR(pamh,
+                        "SSH key rejected by policy for user %s: %s "
+                        "(algorithm: %s, bits: %d)",
+                        user, deny_reason, algorithm, validation_result.key_bits);
+            }
+        }
 
-                if (data->audit) {
-                    audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);
-                    audit_event.user = user;
-                    audit_event.service = service;
-                    audit_event.client_ip = client_ip;
-                    audit_event.tty = tty;
-                    audit_event.result_code = PAM_PERM_DENIED;
-                    audit_event.reason = validation_result.error
-                        ? validation_result.error
-                        : "SSH key type not allowed by policy";
-                    audit_event_set_end_time(&audit_event);
-                    audit_log_event(data->audit, &audit_event);
-                }
-
-                free(ssh_algorithm);
-                return PAM_PERM_DENIED;
+        if (deny_reason) {
+            if (data->audit) {
+                audit_event_init(&audit_event, AUDIT_AUTHZ_DENIED);
+                audit_event.user = user;
+                audit_event.service = service;
+                audit_event.client_ip = client_ip;
+                audit_event.tty = tty;
+                audit_event.result_code = PAM_PERM_DENIED;
+                audit_event.reason = deny_reason;
+                audit_event_set_end_time(&audit_event);
+                audit_log_event(data->audit, &audit_event);
             }
 
             free(ssh_algorithm);
+            ssh_key_meta_free(&key_meta);
+            return PAM_PERM_DENIED;
         }
+
+        free(ssh_algorithm);
+        ssh_key_meta_free(&key_meta);
     }
 
     /*

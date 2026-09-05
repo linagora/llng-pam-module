@@ -245,25 +245,70 @@ to the PAM environment during `pam_acct_mgmt` — `ExposeAuthInfo yes`
 is not sufficient on its own. The bastion therefore uses an explicit
 out-of-band channel:
 
-1. sshd invokes `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f`
-   (deployed by `ob-bastion-setup` / `ob-backend-setup`). The `%f`
-   token is the SHA256 fingerprint of the client key or certificate
-   (not `%F`, which is the CA key's fingerprint).
-2. The helper writes the fingerprint to
-   `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp` (atomic `mktemp` +
-   `mv`). The spool directory is owned by the
-   `AuthorizedPrincipalsCommandUser` (typically `nobody`) with mode
-   `0700`, so no other unprivileged user can pre-create or substitute
-   a drop file.
+1. sshd invokes
+   `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k`
+   (deployed by `ob-bastion-setup` / `ob-backend-setup`; the backend
+   variant also gets `%i`, the certificate key-id). The `%f` token is
+   the SHA256 fingerprint of the client key or certificate (not `%F`,
+   which is the CA key's fingerprint), `%t` is the key or certificate
+   type and `%k` its base64 blob. All of these have been supported on
+   `AuthorizedPrincipalsCommand` since OpenSSH 7.4.
+2. The helper writes two drop files (atomic `mktemp` + `mv`), keyed on
+   the per-connection sshd anchor PID:
+   - `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp` — the fingerprint,
+     exactly as before (a bare `SHA256:<base64>` line);
+   - `/run/open-bastion/ssh-fp/<sshd-session-pid>.key` — v1 key metadata,
+     `v=1` / `fp=` / `alg=` / `key=` lines, used by the SSH key policy.
+
+   They are separate files on purpose: an older `pam_openbastion` that
+   only knows `.fp` keeps working byte-for-byte against a newer helper.
+   The spool directory is owned by the `AuthorizedPrincipalsCommandUser`
+   (typically `nobody`) with mode `0700`, so no other unprivileged user
+   can pre-create or substitute a drop file.
+
 3. `pam_openbastion` walks `/proc/<pid>/status` from its own PID up to
-   the `sshd-session` ancestor, reads the corresponding spool file,
-   validates it (regular file owned by the spool-dir owner, mode
-   `0600`, `nlink == 1`, strict `SHA256:<base64>` format, ≤ 512 B),
-   and forwards the fingerprint to LLNG.
+   the `sshd-session` ancestor, reads the corresponding spool files and
+   validates each one (regular file owned by the spool-dir owner, mode
+   `0600`, `nlink == 1`, size-capped; `.fp` must additionally match the
+   strict `SHA256:<base64>` format). The fingerprint is forwarded to
+   LLNG; the key metadata feeds the key policy below. If the two drops
+   disagree on the fingerprint, the metadata is discarded as stale.
 
 As a fallback, if a custom sshd variant does populate
 `SSH_USER_AUTH` with the content (`publickey <algo> SHA256:<fp>`), the
 module will parse it from there instead.
+
+#### SSH key policy enforcement (`ssh_key_policy_enabled`)
+
+The same channel is what makes `ssh_key_policy_*` enforceable. When
+`ssh_key_policy_enabled = true`, `pam_openbastion` determines the key
+type and size for the `sshd` PAM service and denies the account phase
+when they violate the policy.
+
+- The **key blob** (`%k`) is decoded by the module itself. That is the
+  only source for an RSA modulus size, so `ssh_key_min_rsa_bits` is
+  really applied; it also means the key type cannot be misreported.
+- If no blob is available, the sshd-reported type (`%t`) is used. An
+  RSA key is then rejected, because its size cannot be verified.
+- If neither is available, the login is **denied** (fail-closed) with an
+  explicit log line. Before this was fixed (issue #181), the whole check
+  was silently skipped in that case, which made the policy a no-op on
+  every OpenSSH that does not export `SSH_USER_AUTH` to PAM — i.e. all
+  current ones.
+
+`ssh_key_policy_enabled` is `false` by default, and nothing in this path
+runs while it is off. **Enable it only on a host whose setup script has
+been re-run with the version that installs the v1 helper**, otherwise no
+`.key` drop is written and every SSH login is denied. Check with:
+
+```bash
+grep -q 'spool-format: v1' /usr/local/sbin/ob-ssh-principals && echo OK
+```
+
+On a package upgrade the PAM module is replaced but the helper is not —
+it lives in `/usr/local/sbin` and is written by the setup script — so
+re-run `ob-bastion-setup` / `ob-backend-setup` for the host's role. The
+postinst warns when it sees the policy enabled next to a pre-v1 helper.
 
 #### Security properties
 

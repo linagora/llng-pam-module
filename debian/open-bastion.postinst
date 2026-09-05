@@ -297,4 +297,31 @@ if [ "$1" = configure ] \
     done
 fi
 
+# ── Upgrade safety: SSH key policy needs the v1 principals helper ────────────
+# pam_openbastion enforces ssh_key_policy_* FAIL-CLOSED (issue #181): with the
+# policy enabled, a key whose type/size cannot be determined is DENIED. The key
+# type and the key blob reach the module through the v1 key-metadata drop
+# written by /usr/local/sbin/ob-ssh-principals — and that helper is (re)written
+# only by ob-bastion-setup / ob-backend-setup, never by this package. A plain
+# upgrade therefore leaves a NEW module next to an OLD helper. Warn loudly here
+# instead of letting the admin find out at the next login. Hosts that never
+# enabled the policy (the default) are not concerned and print nothing.
+_ob_conf=/etc/open-bastion/openbastion.conf
+_ob_helper=/usr/local/sbin/ob-ssh-principals
+if [ "$1" = configure ] && [ -f "$_ob_conf" ] && [ -f "$_ob_helper" ] \
+    && grep -Eq '^[[:space:]]*ssh_key_policy(_enabled)?[[:space:]]*=[[:space:]]*(1|true|yes|on)[[:space:]]*$' "$_ob_conf" \
+    && ! grep -q 'spool-format: v1' "$_ob_helper"; then
+    echo "" >&2
+    echo "*** open-bastion: ACTION REQUIRED ***" >&2
+    echo "ssh_key_policy_enabled is set in $_ob_conf, but $_ob_helper" >&2
+    echo "is the pre-v1 version and does not record the SSH key type." >&2
+    echo "The PAM module now enforces this policy fail-closed, so SSH logins" >&2
+    echo "will be DENIED until you re-run the setup script for this host:" >&2
+    echo "    ob-bastion-setup ...      (bastion)" >&2
+    echo "    ob-backend-setup ...      (backend)" >&2
+    echo "or comment out ssh_key_policy_enabled to keep the previous behaviour." >&2
+    echo "" >&2
+fi
+unset _ob_conf _ob_helper
+
 exit 0
