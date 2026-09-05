@@ -61,6 +61,7 @@ AuthorizedPrincipalsCommandUser nobody
 | ------------------------------------ | ------------------- | --------------------------------------- |
 | `/usr/share/open-bastion/hardening/` | `config/hardening/` | `ob-bastion-setup --enable-hardening`   |
 | `/usr/share/open-bastion/audit/`     | `config/audit/`     | `ob-bastion-setup --enable-audit-trace` |
+| `/usr/share/open-bastion/logrotate/` | `config/logrotate/` | copy to `/etc/logrotate.d/` (audit log) |
 
 ## systemd units
 
