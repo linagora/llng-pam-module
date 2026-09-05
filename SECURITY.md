@@ -205,11 +205,16 @@ Required sshd settings (no `AcceptEnv` needed):
 
 ```bash
 # /etc/ssh/sshd_config
-TrustedUserCAKeys /etc/open-bastion/ca.pub
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub
 ExposeAuthInfo yes
-AuthorizedPrincipalsCommand /usr/lib/open-bastion/ob-ssh-principals %u %f %i
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 ```
+
+`ob-ssh-principals` is **generated at setup time** by `ob-backend-setup` (and by
+`ob-bastion-setup`, in its two-token `%u %f` bastion form) into
+`/usr/local/sbin/`. It is not a file shipped by the package, so it will not be
+found under `/usr/lib/open-bastion/` or `/usr/sbin/`.
 
 Direct user SSO certs that do not carry a `bastion=` key-id field are denied before PAM runs
 when an `allowed_bastions` file is present.
@@ -241,10 +246,13 @@ An SSH-only build reads the cache but never populates it.
 Cache entries are always encrypted — there is no plaintext mode:
 
 - **Algorithm**: AES-256-GCM _(authenticated encryption)_
-- **Key Derivation**: PBKDF2-SHA256 with 100,000 iterations
-- **Key Source**: Machine ID (`/etc/machine-id`), or a per-installation
-  `.instance_id` when `/etc/machine-id` is unavailable (containers, chroots),
-  salted with a per-directory `.auth_salt`
+- **Key Derivation**: PBKDF2-HMAC-SHA256, 100,000 iterations, 32-byte key
+- **Key Source**: the machine ID (`/etc/machine-id`), or a per-installation
+  `.instance_id` when `/etc/machine-id` is unavailable (containers, chroots)
+- **Salt**: 16 random bytes from `RAND_bytes()`, generated on first use and
+  persisted next to the cache as `.auth_salt`. The salt is **not** derived from
+  the machine id or the username: a random salt is what stops an attacker
+  precomputing keys for a known machine id.
 - **Authentication**: GCM tag prevents tampering
 
 > **Scope of the key.** The derived key is **per cache directory**, not per
@@ -254,6 +262,10 @@ Cache entries are always encrypted — there is no plaintext mode:
 > from `RAND_bytes()`, generated on first use and persisted next to the cache
 > as `.auth_salt`; it is not derived from the machine id or the username, and
 > its purpose is to stop an attacker precomputing keys for a known machine id.
+>
+> Encryption at rest protects a cache file lifted off the host (a backup, a
+> stolen disk); it is not a separation boundary between users on a live host.
+> That separation comes from the file permissions below.
 
 ```
 File format:
@@ -797,8 +809,8 @@ Look for:
 
 1. **Generate a key file**: Use `ob-desktop-setup --offline` or create manually
    (`dd if=/dev/urandom of=/etc/open-bastion/cache.key bs=32 count=1 &&
-   chown root:root /etc/open-bastion/cache.key &&
-   chmod 600 /etc/open-bastion/cache.key`).
+chown root:root /etc/open-bastion/cache.key &&
+chmod 600 /etc/open-bastion/cache.key`).
    The key file **must** be a root-owned regular file with mode 0600: any other
    owner or permission bit makes it be ignored (the cache key then falls back to
    machine-id derivation, which is weaker).
@@ -880,10 +892,11 @@ To report security vulnerabilities, please email security@linagora.com with:
 
 | Version | Supported |
 | ------- | --------- |
-| 1.x     | Yes       |
-| < 1.0   | No        |
+| 0.6.x   | Yes       |
+| < 0.6   | No        |
 
-Only the latest minor version receives security updates. We recommend always running the latest release.
+Open Bastion has not reached 1.0 yet. Only the latest minor version receives
+security updates. We recommend always running the latest release.
 
 ## Security Disclosure Policy
 

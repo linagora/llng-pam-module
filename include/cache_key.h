@@ -31,7 +31,7 @@ typedef struct {
 /*
  * Derive encryption key from machine-id with salt from given directory
  * cache_dir: Directory containing the salt file
- * salt_filename: Name of the salt file (e.g., ".auth_salt" or ".cache_salt")
+ * salt_filename: Name of the salt file (e.g., ".auth_salt")
  * out: Output parameter for derived key
  * Returns 0 on success, -1 on failure
  *

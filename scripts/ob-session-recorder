@@ -308,12 +308,16 @@ Options:
     -h, --help          Show this help message
     -v, --version       Show version
     -c, --config FILE   Configuration file (default: $CONFIG_FILE)
-    -d, --dir DIR       Sessions directory (default: $SESSIONS_DIR)
-    -f, --format FMT    Recording format: script, asciinema, ttyrec
-                        (default: $FORMAT)
+    -d, --dir DIR       IGNORED (was: $SESSIONS_DIR). The storage path is owned
+                        by ob-record-sink (root); the recorder streams to it
+                        over a socket and never chooses a directory. Still
+                        accepted, and recorded here, for compatibility.
+    -f, --format FMT    Recording format (default: $FORMAT)
+                        v1 supports 'script' only; asciinema and ttyrec are
+                        accepted but fall back to script.
 
 Configuration file format:
-    sessions_dir = /var/lib/open-bastion/sessions
+    sessions_dir = ...      # ignored, see -d above
     format = script
     max_duration = 86400
 
@@ -323,7 +327,7 @@ sshd_config example:
 
 Environment variables:
     OB_RECORDER_CONFIG      Config file path
-    OB_SESSIONS_DIR         Sessions directory
+    OB_SESSIONS_DIR         Ignored (see -d above)
     OB_RECORDER_FORMAT      Recording format
     OB_MAX_SESSION          Max session duration in seconds
 

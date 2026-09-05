@@ -18,8 +18,13 @@ enforce them on every server.
   server; group membership grants or revokes access fleet-wide.
 - **The SSO decides `sudo` too** — no `sudoers` to maintain per host
   _(local/dual management stays possible when you want it)_.
-- **The recorder can't be bypassed** — no escaping the session recorder via
-  port-forwarding, while `~/.ssh/config` keeps access _visually_ direct.
+- **Recordings the user can't touch** — interactive sessions are streamed to a
+  root sink the recorded user cannot read, alter or delete, while `~/.ssh/config`
+  keeps access _visually_ direct. Recording is fail-closed: if the sink is
+  unreachable, the login is refused. Coverage has known edges — a service
+  account's native `ssh -J` forwarded channel is not recorded, and containment
+  hardening is opt-in — see [service accounts](doc/service-accounts.md) and
+  [audit trace](doc/audit.md).
 - **Fleet deployment in one command** — `ob-builder --output-ansible <role>` (or
   a self-extracting shell installer), then roll it out to every host.
 - **A "backup" account with access everywhere** — with or without `sudo` — via
@@ -115,7 +120,9 @@ See [Bastion Architecture](doc/bastion-architecture.md) and the
   - `ob-ssh` / `ob-scp` / `ob-sftp` scripts for seamless bastion connections and file transfers
 - **[Session recording](doc/session-recording.md)** _(optional)_:
   - Record all terminal I/O for audit compliance
-  - Multiple formats: script, asciinema, ttyrec
+  - Written by a root sink the recorded user cannot reach (`.typescript` +
+    `.json`; asciinema and ttyrec are planned, and currently fall back to
+    `script`)
   - Session metadata with unique IDs
 - **[Security hardening](doc/security.md)**:
   - Structured JSON audit logging with correlation IDs
@@ -183,7 +190,7 @@ The full, theme-organized index is in **[doc/README.md](doc/README.md)**. Highli
 - **Recording & audit** — [Session recording](doc/session-recording.md) · [Audit trace](doc/audit.md)
 - **Offline & resilience** — [Offline mode](doc/offline-mode.md) · [Cache administration](doc/offline-cache-admin.md)
 - **Security & hardening** — [Security features](doc/security.md) · [Hardening](doc/hardening.md) · [CrowdSec](doc/crowdsec.md)
-- **Reference** — [Configuration](doc/configuration.md) · [Troubleshooting](doc/troubleshooting.md) · [Desktop SSO](doc/desktop-sso.md) _(experimental/alpha)_ · [Competitors](doc/competitors.md)
+- **Reference** — [Canonical names & paths](doc/reference-paths.md) · [Configuration](doc/configuration.md) · [Troubleshooting](doc/troubleshooting.md) · [Desktop SSO](doc/desktop-sso.md) _(experimental/alpha)_ · [Competitors](doc/competitors.md)
 - **Security analysis (EBIOS)** — [threat model & risk study](doc/security/00-architecture.md)
 
 ## Troubleshooting
@@ -214,7 +221,7 @@ using LightDM.
 
 ```bash
 # Install the greeter package
-sudo apt install lightdm-openbastion-greeter
+sudo apt install open-bastion-desktop
 
 # Run the setup script
 sudo ob-desktop-setup -p https://auth.example.com

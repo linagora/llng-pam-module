@@ -218,8 +218,8 @@ La **seule** propriété de sécurité qui gouverne l'émission d'un certificat 
 
 ```bash
 # /etc/ssh/sshd_config
-TrustedUserCAKeys /etc/ssh/llng_ca.pub          # déjà requis
-AuthorizedPrincipalsCommand /usr/sbin/ob-ssh-principals %u %f %i
+TrustedUserCAKeys /etc/ssh/open-bastion_ca.pub  # déjà requis
+AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i
 AuthorizedPrincipalsCommandUser nobody
 # Supprimer : AcceptEnv LLNG_BASTION_JWT
 ```
@@ -262,11 +262,22 @@ build SSH seul lit le cache mais ne l'alimente jamais.
 Les entrées du cache sont toujours chiffrées — il n'existe pas de mode en clair :
 
 - **Algorithme** : AES-256-GCM _(chiffrement authentifié)_
-- **Dérivation de clé** : PBKDF2-SHA256 avec 100 000 itérations
-- **Source de la clé** : Machine ID (`/etc/machine-id`), ou un `.instance_id`
+- **Dérivation de clé** : PBKDF2-HMAC-SHA256, 100 000 itérations, clé de 32 octets
+- **Source de la clé** : le Machine ID (`/etc/machine-id`), ou un `.instance_id`
   propre à l'installation si `/etc/machine-id` est indisponible (conteneurs,
-  chroots), salé par un `.auth_salt` propre au répertoire
+  chroots)
+- **Sel** : 16 octets aléatoires (`RAND_bytes()`), générés à la première
+  utilisation puis persistés à côté du cache sous `.auth_salt`. Le sel n'est
+  **pas** dérivé du machine-id ni du nom d'utilisateur : c'est précisément ce
+  qui empêche le précalcul des clés pour un machine-id connu.
 - **Authentification** : Le tag GCM empêche la falsification
+
+> **Portée de la clé.** La clé dérivée est **par répertoire de cache**, pas par
+> utilisateur : toutes les entrées d'un même répertoire sont chiffrées avec la
+> même clé. Le chiffrement au repos protège un fichier de cache exfiltré
+> (sauvegarde, disque volé) ; ce n'est pas une frontière d'isolation entre
+> utilisateurs sur un hôte vivant — cette isolation vient des permissions
+> ci-dessous.
 
 ```
 Format du fichier :

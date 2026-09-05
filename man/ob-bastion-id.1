@@ -8,16 +8,32 @@ ob-bastion-id \- Print this bastion's identifier (as seen by backends)
 .B ob-bastion-id
 issues a probe request to the LemonLDAP::NG
 .I /pam/bastion-token
-endpoint using this host's enrolled server token, decodes the returned
-JWT, and prints the
+endpoint using this host's enrolled server token and prints the
 .I bastion_id
-claim assigned by LLNG at enrolment.
+assigned by LLNG at enrolment.
 .PP
-Backends consult this value when their
-.I /etc/open-bastion/openbastion.conf
-sets a
-.B bastion_jwt_allowed_bastions
-whitelist. The administrator running
+The
+.I bastion_id
+is a synthetic
+.B per\-device
+identity, not the OIDC
+.IR client_id ,
+which identifies a project and may enrol many machines. Two bastions sharing a
+.I client_id
+therefore have different
+.IR bastion_id s,
+and re\-enrolling a bastion assigns it a new one.
+.PP
+Backends list these values in
+.IR /etc/open\-bastion/allowed_bastions ,
+normally via
+.BR "ob-backend-setup \-\-allowed\-bastions" .
+.BR ob\-ssh\-principals ,
+run by sshd as
+.BR AuthorizedPrincipalsCommand ,
+checks the certificate key\-id against that file
+.B before
+PAM runs. The administrator running
 .BR ob-builder (1)
 in
 .B \-\-target\-role=backend
