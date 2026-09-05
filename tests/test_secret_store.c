@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -440,6 +441,222 @@ static int test_rotate_key_not_implemented(void)
     return (ret == -1);  /* Should return -1 (not implemented) */
 }
 
+/* Find the single file with the given suffix in dir. Returns 1 on success. */
+static int find_file_with_suffix(const char *dir, const char *suffix,
+                                 char *out, size_t out_size)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int found = 0;
+    struct dirent *e;
+    size_t slen = strlen(suffix);
+    while ((e = readdir(d)) != NULL) {
+        size_t nlen = strlen(e->d_name);
+        if (nlen > slen && strcmp(e->d_name + nlen - slen, suffix) == 0) {
+            snprintf(out, out_size, "%s/%s", dir, e->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * Regression for #197: the atomic-write temp file must be per-process.
+ *
+ * secret_store_put() used to write through a fixed "<path>.tmp" opened with
+ * O_TRUNC, so two concurrent writers interleaved into a single file and
+ * renamed the mixture into place. A sentinel planted at the old fixed name
+ * must now be left strictly untouched — the writer uses "<path>.tmp.<pid>"
+ * created with O_EXCL.
+ */
+static int test_temp_file_is_private(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    char store_dir[] = "/tmp/test_secret_tmpname_XXXXXX";
+    if (mkdtemp(store_dir) == NULL) return 0;
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        remove_directory(store_dir);
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    const char *secret = "first-value";
+    int ok = (secret_store_put(store, "tmpname:key", secret, strlen(secret)) == 0);
+
+    char entry_path[512] = {0};
+    ok = ok && find_file_with_suffix(store_dir, ".enc", entry_path, sizeof(entry_path));
+
+    /* Plant a sentinel at the temp name the pre-#197 code would have reused. */
+    char legacy_tmp[600];
+    const char *sentinel = "SENTINEL-MUST-SURVIVE";
+    if (ok) {
+        snprintf(legacy_tmp, sizeof(legacy_tmp), "%s.tmp", entry_path);
+        int fd = open(legacy_tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        ok = (fd >= 0);
+        if (ok) {
+            ok = (write(fd, sentinel, strlen(sentinel)) == (ssize_t)strlen(sentinel));
+            close(fd);
+        }
+    }
+
+    /* Overwrite the entry: this must not go through the fixed temp name. */
+    const char *second = "second-value-longer";
+    ok = ok && (secret_store_put(store, "tmpname:key", second, strlen(second)) == 0);
+
+    if (ok) {
+        char buf[128] = {0};
+        int fd = open(legacy_tmp, O_RDONLY);
+        ok = (fd >= 0);
+        if (ok) {
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            ok = (n == (ssize_t)strlen(sentinel) && strcmp(buf, sentinel) == 0);
+        }
+    }
+
+    /* And the entry itself must hold the new value. */
+    if (ok) {
+        char got[128] = {0};
+        size_t got_len = 0;
+        ok = (secret_store_get(store, "tmpname:key", got, sizeof(got), &got_len) == 0) &&
+             got_len == strlen(second) && strcmp(got, second) == 0;
+    }
+
+    secret_store_destroy(store);
+    remove_directory(store_dir);
+    return ok;
+}
+
+/*
+ * Concurrency regression for #197: concurrent writers must never publish a
+ * mixture of each other's bytes.
+ *
+ * Each child writes a distinctly sized value for the same key; with the old
+ * shared "<path>.tmp" the interleaved content failed AES-GCM authentication on
+ * read. With a private temp file per process every rename publishes one
+ * writer's complete value, so the final get() always succeeds and always
+ * returns one of the values written.
+ */
+#define SS_CONC_CHILDREN 6
+#define SS_CONC_ROUNDS   10
+
+static int test_concurrent_put(void)
+{
+    if (!machine_id_available || !store_init_works) {
+        printf("SKIP ");
+        return 1;
+    }
+
+    char store_dir[] = "/tmp/test_secret_conc_XXXXXX";
+    if (mkdtemp(store_dir) == NULL) return 0;
+
+    secret_store_config_t config = {
+        .enabled = true,
+        .store_dir = store_dir,
+        .salt = "test-salt"
+    };
+
+    secret_store_t *store = secret_store_init(&config);
+    if (!store) {
+        remove_directory(store_dir);
+        printf("SKIP (init failed) ");
+        return 1;
+    }
+
+    /* Derive the key/salt once up front so the children only race on the write. */
+    if (secret_store_put(store, "conc:key", "seed", 4) != 0) {
+        secret_store_destroy(store);
+        remove_directory(store_dir);
+        return 0;
+    }
+
+    int barrier[2];
+    if (pipe(barrier) != 0) {
+        secret_store_destroy(store);
+        remove_directory(store_dir);
+        return 0;
+    }
+
+    int started = 0;
+    for (int i = 0; i < SS_CONC_CHILDREN; i++) {
+        pid_t pid = fork();
+        if (pid < 0) break;
+        if (pid == 0) {
+            close(barrier[1]);
+            char c;
+            ssize_t r;
+            do {
+                r = read(barrier[0], &c, 1);
+            } while (r < 0 && errno == EINTR);
+            close(barrier[0]);
+
+            /* Distinct length per child so an interleave cannot go unnoticed. */
+            char value[128];
+            int len = snprintf(value, sizeof(value), "child-%d", i);
+            for (int pad = 0; pad < i * 10 && len < (int)sizeof(value) - 1; pad++) {
+                value[len++] = 'x';
+            }
+            value[len] = '\0';
+
+            for (int j = 0; j < SS_CONC_ROUNDS; j++) {
+                secret_store_put(store, "conc:key", value, (size_t)len);
+            }
+            _exit(0);
+        }
+        started++;
+    }
+
+    close(barrier[0]);
+    for (int i = 0; i < started; i++) {
+        if (write(barrier[1], "g", 1) != 1) break;
+    }
+    close(barrier[1]);
+
+    for (int i = 0; i < started; i++) {
+        int status;
+        wait(&status);
+    }
+
+    int ok = (started == SS_CONC_CHILDREN);
+
+    char got[128] = {0};
+    size_t got_len = 0;
+    if (ok && secret_store_get(store, "conc:key", got, sizeof(got), &got_len) != 0) {
+        printf("(entry unreadable after concurrent writes) ");
+        ok = 0;
+    }
+    if (ok && strncmp(got, "child-", 6) != 0) {
+        printf("(entry corrupted: '%s') ", got);
+        ok = 0;
+    }
+
+    /* No fixed-name temp file may be left behind either. */
+    char entry_path[512];
+    if (ok && find_file_with_suffix(store_dir, ".tmp", entry_path, sizeof(entry_path))) {
+        printf("(stale shared temp file %s) ", entry_path);
+        ok = 0;
+    }
+
+    secret_store_destroy(store);
+    remove_directory(store_dir);
+    return ok;
+}
+
 int main(void)
 {
     printf("Running secret store tests...\n\n");
@@ -457,6 +674,8 @@ int main(void)
     TEST(binary_data);
     TEST(error_message);
     TEST(rotate_key_not_implemented);
+    TEST(temp_file_is_private);
+    TEST(concurrent_put);
 
     cleanup();
 
