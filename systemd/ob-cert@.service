@@ -27,4 +27,15 @@ ProtectKernelModules=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Private-by-default modes for anything this instance creates, instead of
+# whatever umask the socket activation happened to inherit. The daemon holds no
+# files of its own, so this is purely belt-and-braces.
+UMask=0077
+# Deny the syscall classes a plain network client never needs (kexec, module
+# loading, raw ptrace, clock setting, ...). @system-service is systemd's broad,
+# well-tested allow set and keeps the AF_UNIX/AF_INET work above intact.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# User=root here is deliberate (it must read the 0600 server token, which it
+# owns), so this sandbox is defence in depth, not the primary control.
 ReadOnlyPaths=/etc/open-bastion /var/lib/open-bastion
