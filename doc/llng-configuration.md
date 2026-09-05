@@ -224,15 +224,40 @@ Server groups allow different authorization rules for different server categorie
 
 In `/etc/lemonldap-ng/lemonldap-ng.ini`, section `[portal]`:
 
+Access **rules** are keyed by server group and hold a Perl expression:
+
 ```ini
 [portal]
-pamAccessServerGroups = { \
+pamAccessSshRules = { \
     production => '$hGroup->{ops}', \
     staging    => '$hGroup->{ops} or $hGroup->{dev}', \
     dev        => '$hGroup->{dev}', \
     default    => '1' \
 }
+pamAccessSudoRules = { \
+    production => '$hGroup->{sre}', \
+    default    => '$hGroup->{ops}' \
+}
 ```
+
+> **`pamAccessServerGroups` is a different setting — do not put rules in it.**
+> It is an optional **authority map**, keyed by OIDC `client_id`, whose value is
+> a **server group name**:
+>
+> ```ini
+> [portal]
+> pamAccessServerGroups = { \
+>     ob-bastion    => 'bastion', \
+>     ob-production => 'production' \
+> }
+> ```
+>
+> When it is non-empty, `/pam/authorize` and `/pam/bastion-token` derive the
+> host's server group from its enrolled `client_id` instead of trusting the
+> group sent in the request. Leave it **empty** for the usual model of one
+> `client_id` per project covering several server groups — an unmapped
+> `client_id` is refused. `/pam/bastion-cert` uses no group at all; it relies
+> solely on the voucher.
 
 ### Configure on Each Server
 

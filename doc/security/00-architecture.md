@@ -241,9 +241,21 @@ AuthorizedPrincipalsCommandUser nobody
 Lorsque `cache_encrypted = true` _(défaut)_, les tokens en cache sont chiffrés en utilisant :
 
 - **Algorithme** : AES-256-GCM _(chiffrement authentifié)_
-- **Dérivation de clé** : PBKDF2-SHA256 avec 100 000 itérations
-- **Source de la clé** : Machine ID (`/etc/machine-id`) + nom d'utilisateur du cache comme sel
+- **Dérivation de clé** : PBKDF2-HMAC-SHA256, 100 000 itérations, clé de 32 octets
+- **Entrée « mot de passe »** : le Machine ID (`/etc/machine-id`), ou un
+  identifiant d'instance aléatoire persisté si `/etc/machine-id` est illisible
+- **Sel** : 16 octets aléatoires (`RAND_bytes()`), générés à la première
+  utilisation puis persistés à côté du cache (`.cache_salt`, `.auth_salt`). Le
+  sel n'est **pas** dérivé du machine-id ni du nom d'utilisateur : c'est
+  précisément ce qui empêche le précalcul des clés pour un machine-id connu.
 - **Authentification** : Le tag GCM empêche la falsification
+
+> **Portée de la clé.** La clé dérivée est **par répertoire de cache**, pas par
+> utilisateur : toutes les entrées d'un même répertoire sont chiffrées avec la
+> même clé. Le chiffrement au repos protège un fichier de cache exfiltré
+> (sauvegarde, disque volé) ; ce n'est pas une frontière d'isolation entre
+> utilisateurs sur un hôte vivant — cette isolation vient des permissions
+> ci-dessous.
 
 ```
 Format du fichier :

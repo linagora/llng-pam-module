@@ -18,8 +18,13 @@ enforce them on every server.
   server; group membership grants or revokes access fleet-wide.
 - **The SSO decides `sudo` too** — no `sudoers` to maintain per host
   _(local/dual management stays possible when you want it)_.
-- **The recorder can't be bypassed** — no escaping the session recorder via
-  port-forwarding, while `~/.ssh/config` keeps access _visually_ direct.
+- **Recordings the user can't touch** — interactive sessions are streamed to a
+  root sink the recorded user cannot read, alter or delete, while `~/.ssh/config`
+  keeps access _visually_ direct. Recording is fail-closed: if the sink is
+  unreachable, the login is refused. Coverage has known edges — a service
+  account's native `ssh -J` forwarded channel is not recorded, and containment
+  hardening is opt-in — see [service accounts](doc/service-accounts.md) and
+  [audit trace](doc/audit.md).
 - **Fleet deployment in one command** — `ob-builder --output-ansible <role>` (or
   a self-extracting shell installer), then roll it out to every host.
 - **A "backup" account with access everywhere** — with or without `sudo` — via
