@@ -89,26 +89,49 @@ PY
     fi
 }
 
-# ── Test 3: no /device rule is anchored with $ ──
-# `^/device$` would not match /device?user_code=..., so the rule would never
-# fire and the enrolment approval would stay open to every SSO user.
-test_device_rule_not_end_anchored() {
+# ── Test 3: the /device rule covers the page, not just the decision ──
+# `grant()` matches against REQUEST_URI, which carries the query string. The
+# approval form posts to PORTAL_URL/device with user_code and action in the
+# BODY (device.tpl), so REQUEST_URI is "/device" there and an end-anchored
+# `^/device$` does match the decision -- the trap is not that the rule never
+# fires. What an anchored rule misses is the page itself
+# (/device?user_code=...) and a crafted POST carrying the same parameters in
+# the query string: both go through ungated.
+#
+# Asserted by compiling the rule and running URIs through it, not by
+# pattern-matching the rule text. The textual heuristic this replaces had two
+# blind spots: it skipped any rule containing "|", so an anchored form hidden
+# in an alternation passed, and it rejected a safe `^/device(\?.*)?$` because
+# that ends with "$".
+test_device_rule_covers_page_and_decision() {
     local bad="" c
     for c in "${ALL_CONFIGS[@]}"; do
-        python3 - "$ROOT_DIR/$c" <<'PY' || bad="$bad $c"
-import json, sys
+        python3 - "$ROOT_DIR/$c" <<'PYEOF' || bad="$bad $c"
+import json, re, sys
+
+MUST_MATCH = [
+    "/device",                                     # the decision POST
+    "/device?user_code=ABCD-EFGH",                 # the page GET
+    "/device?user_code=ABCD-EFGH&action=approve",  # a crafted POST
+]
+
 conf = json.load(open(sys.argv[1]))
-for host_rules in conf.get("locationRules", {}).values():
-    for k in host_rules:
-        if k.startswith("^/device") and k.rstrip().endswith("$") and "|" not in k:
-            sys.exit(1)
+for host, host_rules in conf.get("locationRules", {}).items():
+    for pattern in host_rules:
+        if not pattern.startswith("^/device"):
+            continue
+        rx = re.compile(pattern)
+        for uri in MUST_MATCH:
+            if not rx.search(uri):
+                print(f"{host}: {pattern} fails to match {uri}", file=sys.stderr)
+                sys.exit(1)
 sys.exit(0)
-PY
+PYEOF
     done
     if [ -z "$bad" ]; then
-        pass "no ^/device rule is end-anchored (REQUEST_URI carries the query)"
+        pass "^/device rule matches the page, the decision and a query-string POST"
     else
-        fail "no ^/device rule is end-anchored" "offenders:$bad"
+        fail "^/device rule covers page and decision" "offenders:$bad"
     fi
 }
 
@@ -149,7 +172,11 @@ MUST_NOT   = ["/ssh/revoked",          # public KRL, downloaded by every backend
               "/ssh/ca",               # public CA key
               "/ssh/sign",             # the user's own certificate request
               "/ssh/mycerts", "/ssh/myrevoke",
-              "/ssh"]                  # the signing interface
+              "/ssh",                  # the signing interface
+              # Weakening one alternative must not pass because the others
+              # hold: `^/ssh/(admin\w*|certs|revoke)(\?|/|$)` would restrict a
+              # page served by the `*` leaf and otherwise go green.
+              "/ssh/adminfoo", "/ssh/certsx", "/ssh/revoketoo"]
 
 conf = json.load(open(sys.argv[1]))
 for host, host_rules in conf.get("locationRules", {}).items():
@@ -175,27 +202,83 @@ PY
     fi
 }
 
-# ── Test 6: the documentation ships the same rules ──
-# The production deployment is an operator's own portal, which this repository
-# does not configure; the guide is the deliverable, so it must not drift.
-test_documented() {
-    local doc="$ROOT_DIR/doc/llng-configuration.md" ok=1
-    grep -q '\^/device' "$doc" || { ok=0; echo "    (no ^/device rule documented)"; }
-    grep -q 'admin|certs|revoke' "$doc" || { ok=0; echo "    (no ^/ssh admin rule documented)"; }
-    grep -q '/ssh/revoked' "$doc" || { ok=0; echo "    (the /ssh/revoked trap is not called out)"; }
-    if [ "$ok" -eq 1 ]; then
-        pass "doc/llng-configuration.md documents both rules and the KRL trap"
+# ── Test 6: the shipped configs carry the plugin-side admin rule ──
+# From plugin 0.6.0 the ssh-ca admin routes are fail-closed on
+# `sshCaAdminRule`: unset, /ssh/admin, /ssh/certs and /ssh/revoke answer 403 to
+# everyone, including the users the vhost locationRules would let through. A
+# demo that ships the vhost rule alone stops demonstrating the admin flow the
+# day the portal image moves to 0.6.0, and does so silently.
+test_ssh_admin_plugin_rule_present() {
+    local bad="" c
+    for c in "${SSHCA_CONFIGS[@]}"; do
+        python3 - "$ROOT_DIR/$c" <<'PYEOF' || bad="$bad $c"
+import json, sys
+conf = json.load(open(sys.argv[1]))
+if not conf.get("sshCaActivation"):
+    sys.exit(0)   # plugin off: no admin routes to guard
+rule = (conf.get("sshCaAdminRule") or "").strip()
+sys.exit(0 if rule and rule != "0" else 1)
+PYEOF
+    done
+    if [ -z "$bad" ]; then
+        pass "ssh-ca configs set sshCaAdminRule (fail-closed from plugin 0.6.0)"
     else
-        fail "doc/llng-configuration.md documents both rules"
+        fail "ssh-ca configs set sshCaAdminRule" "missing:$bad"
+    fi
+}
+
+# ── Test 7: the documentation ships the same rules, in every copy ──
+# The production deployment is an operator's own portal, which this repository
+# does not configure; the guide is the deliverable, so it must not drift. The
+# same normative content lives in four places, and checking only one of them
+# lets the other three rot -- an `^/device$` example copied into a security
+# checklist would have gone green.
+test_documented() {
+    local ok=1 f
+    local guide="$ROOT_DIR/doc/llng-configuration.md"
+
+    grep -q '\^/device' "$guide" || { ok=0; echo "    (no ^/device rule documented)"; }
+    grep -q 'admin|certs|revoke' "$guide" || { ok=0; echo "    (no ^/ssh admin rule documented)"; }
+    grep -q '/ssh/revoked' "$guide" || { ok=0; echo "    (the /ssh/revoked trap is not called out)"; }
+    grep -q 'sshCaAdminRule' "$guide" || { ok=0; echo "    (sshCaAdminRule is not documented)"; }
+
+    # No copy may show an end-anchored /device rule as a rule. Matched on the
+    # quoted JSON key form so the prose explaining WHY it is wrong -- which has
+    # to name `^/device$` -- does not trip the check.
+    for f in doc/llng-configuration.md doc/security/01-enrollment.md \
+             doc/security/02-ssh-connection.md CHANGELOG.md; do
+        if grep -qE '"\^/device[^"]*\$"' "$ROOT_DIR/$f"; then
+            ok=0; echo "    ($f shows an end-anchored ^/device rule)"
+        fi
+    done
+
+    # Wherever the ssh admin rule appears, it keeps its (\?|/|$) guard: without
+    # it the rule swallows /ssh/revoked, the public KRL. Two spellings reach
+    # here: the JSON form `(\?|/|$)` and the Markdown table form
+    # `(\?\|/\|$)`, whose pipes are escaped for the cell separator, so the
+    # tail of either is matched as a fixed string.
+    for f in doc/llng-configuration.md doc/security/01-enrollment.md \
+             doc/security/02-ssh-connection.md CHANGELOG.md; do
+        if grep -q 'admin|certs|revoke' "$ROOT_DIR/$f" \
+           && ! grep -qF -e '|/|$)' -e '\|/\|$)' "$ROOT_DIR/$f"; then
+            ok=0; echo "    ($f shows the ssh admin rule without its (\?|/|\$) guard)"
+        fi
+    done
+
+    if [ "$ok" -eq 1 ]; then
+        pass "all four copies document the rules, unanchored and guarded"
+    else
+        fail "documentation copies agree"
     fi
 }
 
 echo "=== LLNG portal locationRules (#195) ==="
 run_test test_configs_are_valid_json
 run_test test_device_rule_present
-run_test test_device_rule_not_end_anchored
+run_test test_device_rule_covers_page_and_decision
 run_test test_ssh_admin_rule_present
 run_test test_ssh_rule_separates_routes
+run_test test_ssh_admin_plugin_rule_present
 run_test test_documented
 
 echo ""

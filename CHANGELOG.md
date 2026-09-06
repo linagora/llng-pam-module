@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The portal `locationRules` that guard `/device` and the SSH CA admin routes
+  are now shipped and documented (#195).** Where the authorization for these
+  routes lives depends on the plugin version, and the two regimes fail in
+  opposite directions, so the guide states both:
+
+  - **Plugins ≤ `v0.5.2`** (every released version): the ssh-ca plugin performs
+    no authorization on `/ssh/admin`, `/ssh/certs` and `/ssh/revoke`. The vhost
+    rule is the only control, and without it any SSO account can list every
+    issued certificate and revoke anyone's — an org-wide SSH outage.
+  - **Plugins ≥ `0.6.0`**: `sshCaAdminRule` is the plugin's own control and it
+    is fail-closed. Unset, the three routes answer 403 to everyone, including
+    the users `locationRules` would let through — so a portal configured with
+    the vhost rule alone loses its admin UI on upgrade, incident handling
+    included. Both `docker-demo-cert` and `docker-demo-maxsec` now set
+    `sshCaAdminRule` alongside the vhost rules, so the demos keep working across
+    the version boundary.
+
+  `/device` is documented as the two layers it actually has:
+  `oidcRPMetaDataOptionsAllowDeviceAuthorization` is a `boolOrExpr` evaluated on
+  the approval **decision** per relying party — `= 1` is an activation flag, not
+  a permission, but any other value is compiled and evaluated against the
+  session — while `locationRules` on `^/device` gates the **page** for every RP
+  at once. The guide previously mentioned only the vhost layer, which is the
+  weaker of the two.
+
+  The two traps the guide calls out are real, but the mechanism given for each
+  was wrong and is corrected here. `^/device$` does **not** fail to fire: the
+  approval form posts to `PORTAL_URL/device` with `user_code` and `action` in
+  the body, so `REQUEST_URI` is `/device` and an anchored rule matches the
+  decision. What it misses is the page (`/device?user_code=...`) and a crafted
+  `POST /device?user_code=…&action=approve`. And restricting `/ssh/revoked` does
+  **not** break fleet-wide revocation propagation: backends fetch the KRL with
+  an anonymous `curl`, and a request with no session never reaches `grant()` —
+  it is served by the plugin's unauthenticated route. The real cost is a 403 on
+  a KRL fetch made with a session, by an administrator in a browser. The
+  `(\?|/|$)` guard is right either way.
+
+  `tests/test_ob_llng_location_rules.sh` pins all of it. The `/device` check now
+  compiles the rule and runs the page, decision and query-string-POST URIs
+  through it, replacing a textual heuristic that both skipped an anchored form
+  hidden inside an alternation and rejected a safe `^/device(\?.*)?$`. The
+  route-separation check gained `/ssh/adminfoo`, `/ssh/certsx` and
+  `/ssh/revoketoo`, so weakening one alternative cannot pass on the strength of
+  the others. A new check requires `sshCaAdminRule` wherever `sshCaActivation`
+  is on. And the drift check covers all four copies of the normative content —
+  the guide, both EBIOS documents and this file — instead of the guide alone.
+
+  The group names in the examples (`ob-approvers`, `ob-ssh-admins`) exist
+  nowhere in the shipped configuration: the guide now says to substitute your
+  own and to check they appear in the session, because a rule naming a group
+  nobody holds returns 403 for everyone and looks exactly like a rule that
+  works. The `lmConf-<n>.json` snippet is shown as a complete object to be
+  merged into the existing `locationRules`, since a second top-level
+  `locationRules` silently replaces the first. And the Manager table warns to
+  copy from the rendered page: pasted from the raw Markdown, the escaped `\|`
+  becomes a literal pipe in the compiled regexp, the key matches nothing,
+  `grant()` falls through to `default: accept`, and the admin routes stay open
+  with no error anywhere.
+
 - **Certificate-mode sshd PAM stacks now refuse password authentication
   (#180).** The `auth` path of the stacks written for the certificate/SSH-key
   modes consisted of a single `auth required pam_permit.so`, so

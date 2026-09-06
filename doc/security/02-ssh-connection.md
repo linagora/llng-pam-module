@@ -1457,13 +1457,26 @@ Contrairement à R-S19 (recorder tué) et R-S20 (action différée), ici le reco
 - [ ] `/etc/open-bastion/allowed_bastions` configuré sur les backends (via `ob-backend-setup --allowed-bastions <client_ids>`)
 - [ ] Plugin `ssh-ca` LLNG actif (`sshCaActivation=1`)
 - [ ] **`locationRules` sur `^/ssh/(admin|certs|revoke)(\?|/|$)` déployée** sur le
-      vhost du portail : le plugin `ssh-ca` n'effectue **aucun** contrôle
-      d'autorisation sur ces routes, donc sans règle tout utilisateur SSO
-      authentifié liste tous les certificats émis et **révoque ceux de
-      n'importe qui** (panne SSH à l'échelle de l'organisation).
+      vhost du portail. Ce que ce contrôle recouvre dépend de la version du
+      plugin, et les deux régimes échouent en sens inverse : - **≤ `v0.5.2`** (versions publiées) : le plugin n'effectue **aucun**
+      contrôle d'autorisation sur ces routes, la règle est le **seul**
+      contrôle, et sans elle tout utilisateur SSO authentifié liste tous les
+      certificats émis et **révoque ceux de n'importe qui** (panne SSH à
+      l'échelle de l'organisation). - **≥ `0.6.0`** : `sshCaAdminRule` est le contrôle intégré, et il est
+      **fail-closed** — non défini, les trois routes répondent 403 y compris
+      aux utilisateurs que la `locationRules` admettrait. Vérifier alors
+      **les deux** : `sshCaAdminRule` renseigné (sinon personne n'administre,
+      pas même en incident), et la `locationRules` conservée en défense en
+      profondeur.
+
       Attention à ne pas écrire `^/ssh/revoke` seul : cela capture aussi
-      `/ssh/revoked`, la KRL **publique** que chaque backend télécharge — la
-      restreindre casserait la propagation des révocations.
+      `/ssh/revoked`, la KRL **publique** que chaque backend télécharge. Cela ne
+      casse pas la propagation des révocations — les backends la tirent en
+      `curl` anonyme, et une requête sans session n'atteint jamais `grant()` :
+      elle est servie par la route non authentifiée du plugin. Ce que cela casse,
+      c'est un téléchargement fait **avec** une session (un administrateur en
+      navigateur), qui reçoit un 403.
+
 - [ ] Socket Unix `/run/open-bastion/cert.sock` servi par `ob-cert-daemon` systemd socket-activated sur le bastion
 - [ ] Restriction réseau : backends accessibles uniquement depuis le bastion
 - [ ] `pamAccessBastionGroups` configuré côté LLNG (groupes autorisés à voucher, défaut : bastion)

@@ -164,6 +164,7 @@
   "pamAccessOfflineTtl": 86400,
 
   "sshCaActivation": 1,
+  "sshCaAdminRule": "$uid eq 'dwho'",
   "sshCaKeyType": "ed25519",
   "sshCaKeyRef": "ssh-ca",
   "sshCaCertDefaultValidity": 60,
