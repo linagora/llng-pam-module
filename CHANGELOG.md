@@ -94,12 +94,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   systemic pattern** (seven read-modify-write races, not seven bugs), and a cheap
   authenticated denial of service on `ssh-ca`.
 
-  Four conditions of use (CE16–CE19) and eleven treatment measures (MT40–MT50)
+  Four conditions of use (CE16–CE19) and twelve treatment measures (MT40–MT51)
   follow, with the upstream ones marked as such — their owner is the plugin
   maintainer, not this repository. Two of the new risks land in the orange zone
   and are carried to the acceptance table: R-P3 and R-P7 both depend on an
-  upstream fix that does not exist yet, so accepting them means accepting a fix
-  delay outside the project's control.
+  upstream fix, so accepting them means accepting a delay outside the project's
+  control.
+
+  Each sheet also records where its upstream fix stands, because the answer
+  moved while the study was being written: six of the nine referenced tickets
+  are now fixed upstream (`#58`, `#59`, `#60`, `#69`, `#72`, `#74`) and three
+  are in review (`#50` → PR `#92`; `#54`/`#66`/`#68` → PRs `#87` and `#88`;
+  `#63` → PR `#90`). **None is released**, so no residual score changes — the
+  matrices still describe what an operator can deploy today. What changes is the
+  nature of the R-P3 and R-P7 acceptance: a publication delay rather than an
+  absent fix. The upgrade that brings those fixes is itself disruptive —
+  `/pam/bastion-token` disappears (MT51, #246), a voucher bound to no
+  fingerprint drops from 12 h to 15 min, and the `ssh-ca` admin routes deny
+  until `sshCaAdminRule` is set — so it needs planning, which is why the sheets
+  say so rather than leaving it to the upgrade night.
 
   One existing claim is corrected: R-S11 said the CA "can reject" weak keys, with
   the PAM check as defence in depth. The CA enforces no key type or size at all —

@@ -59,7 +59,11 @@ de 12 h pour un utilisateur.
   device-id inattendu — c'est la **défense résiduelle** de ce risque, et elle est
   vide par défaut (voir R-S23 et la condition d'emploi CE06)
 - `pamAccessBastionCertPinSourceAddress` épingle l'adresse source du certificat
-  de rebond — **désactivé par défaut**
+  de rebond — **désactivé par défaut**, et jusqu'à
+  `linagora/lemonldap-ng-plugins#56` il était **silencieusement omis** quand
+  l'adresse observée était absente ou hors format (IPv6 avec zone, par
+  exemple) : le certificat partait non épinglé, sans erreur, alors que
+  l'administrateur croyait la propriété en vigueur
 - Le voucher est borné par `pamAccessBastionVoucherTtl` (12 h par défaut)
 
 **Remédiation configuration :**
@@ -70,8 +74,27 @@ server_group`) : le `server_group` cesse alors d'être une donnée d'entrée.
 2. **Renseigner `allowed_bastions`** sur chaque backend (CE06).
 3. **Activer `pamAccessBastionCertPinSourceAddress`**.
 
-**Remédiation plugin (amont) :** liaison d'audience sur les jetons `/pam/*`.
-Suivie dans `linagora/lemonldap-ng-plugins#50`.
+**Remédiation plugin (amont) :** liaison d'audience sur les jetons `/pam/*`
+et refus d'un `server_group` auto-déclaré. Suivie dans
+`linagora/lemonldap-ng-plugins#50` ; **correctif en cours de revue** dans la PR
+amont `#92`, qui associe une allowlist de RP au refus du groupe auto-déclaré,
+une allowlist vide valant « pas de changement » pour ne pas rompre la montée de
+version.
+
+Deux effets de bord de la PR amont `#86` (issues `#55`, `#56`) touchent
+directement cette fiche, sans changer le score :
+
+- un voucher qu'**aucune empreinte** ne lie au certificat SSO de l'utilisateur
+  est désormais plafonné à `pamAccessBastionVoucherUnboundTtl` (900 s) au lieu
+  des 12 h, ce qui réduit d'autant la fenêtre d'un backend qui se déclare
+  bastion **sans** présenter d'empreinte — un attaquant qui fournit l'empreinte
+  publique de sa victime reste, lui, dans le cas lié ;
+- l'émission est refusée (403, audit `PAM_BASTION_CERT_PIN_UNAVAILABLE`) quand
+  le pin est activé et l'adresse inutilisable, ce qui rend la mesure 3 fiable
+  au lieu de silencieusement inopérante.
+
+Aucun de ces correctifs n'est publié à ce jour : le score résiduel ci-dessous
+suppose toujours la configuration côté exploitant (CE03 + CE06).
 
 |                 |                                   Score résiduel                                   |
 | --------------- | :--------------------------------------------------------------------------------: |
@@ -120,8 +143,11 @@ restreindre casserait la propagation des révocations. Voir
 et la condition d'emploi CE02.
 
 **Remédiation plugin (amont) :** contrôle d'autorisation intégré, par défaut
-refus tant qu'une règle dédiée n'est pas configurée.
-Suivie dans `linagora/lemonldap-ng-plugins#58`.
+refus tant qu'une règle dédiée n'est pas configurée. `#58` est **corrigée en
+amont** : `/ssh/admin`, `/ssh/certs` et `/ssh/revoke` répondent 403 tant que
+`sshCaAdminRule` n'est pas renseignée. Le correctif n'est pas encore publié, et
+la `locationRules` reste la mesure applicable en attendant — elle garde par
+ailleurs son intérêt en défense en profondeur.
 
 |                 |                           Score résiduel                           |
 | --------------- | :----------------------------------------------------------------: |
@@ -160,8 +186,10 @@ d'indisponibilité. Recoupe R-S17 (verrouillage total).
   le filet
 
 **Remédiation plugin (amont) :** écriture atomique (fichier temporaire +
-`rename`) et verrou sur la génération de la KRL.
-Suivie dans `linagora/lemonldap-ng-plugins#59`.
+`rename`) et verrou sur la génération de la KRL. `#59` est **corrigée en
+amont**, non publiée à ce jour ; la mesure côté open-bastion ci-dessous reste
+donc la seule effective, et garde de toute façon sa valeur (elle couvre aussi
+une KRL corrompue en transit ou au stockage, hors du périmètre du correctif).
 
 **Remédiation configuration (côté open-bastion) :** durcir le contrôle de
 plausibilité avant déploiement — vérifier que `ssh-keygen -Q -l -f` accepte le
@@ -205,8 +233,10 @@ des certificats pour n'importe quel utilisateur.
 - La CA seule ne suffit pas : `/pam/authorize` autorise séparément
 
 **Remédiation plugin (amont) :** nettoyage du répertoire temporaire en fin de
-signature, ou signature sans passage par le disque.
-Suivie dans `linagora/lemonldap-ng-plugins#60`.
+signature, ou signature sans passage par le disque. `#60` est **corrigée en
+amont**, non publiée à ce jour. Elle ne réduit pas ce risque au-delà de la
+fenêtre d'exposition sur disque : la clé reste en clair dans la configuration
+LLNG, et c'est ce qui fixe l'impact 4.
 
 **Remédiation configuration :** restreindre et tracer l'accès au Manager LLNG et
 à l'hôte du portail (condition d'emploi CE13) ; à terme, HSM ou service de
@@ -251,8 +281,9 @@ Ne pas ancrer la fin (`^/device$`) : `grant()` compare à `REQUEST_URI`, qui por
 la query string. Condition d'emploi CE01.
 
 **Remédiation plugin (amont) :** documenter que `1` signifie « tout utilisateur
-authentifié » et proposer une règle dédiée.
-Suivie dans `linagora/lemonldap-ng-plugins#74`.
+authentifié » et proposer une règle dédiée. `#74` est **corrigée en amont**
+(documentation), non publiée à ce jour. C'est une clarification : elle ne
+substitue pas de contrôle à la `locationRules`, qui reste la mesure.
 
 |                 |                        Score résiduel                         |
 | --------------- | :-----------------------------------------------------------: |
@@ -283,15 +314,22 @@ leur point d'ancrage.
 
 - L'hôte reste authentifié : ce n'est pas un contournement d'authentification
   mais une perte d'attribution
-- `ob-bastion-id` permet de constater l'absence de device-id après enrôlement
+- `ob-bastion-id` permet de constater l'absence de device-id après enrôlement —
+  mais l'endpoint dont il dépend (`/pam/bastion-token`) est supprimé par la PR
+  amont `#86`, et son remplaçant `POST /pam/whoami` arrive dans la PR amont
+  `#94` ; la migration côté open-bastion est suivie dans
+  [#246](https://github.com/linagora/open-bastion/issues/246). Tant qu'elle
+  n'est pas faite, ce facteur atténuant disparaît avec la mise à jour du portail
 
 **Remédiation opérationnelle :** vérifier `ob-bastion-id` après chaque
 enrôlement et refuser un hôte sans device-id ; surveiller les jetons serveur
 dont le sujet est un compte humain.
 
 **Remédiation plugin (amont) :** échec fermé en cas d'échec de la session
-synthétique, et couverture de tests.
-Suivie dans `linagora/lemonldap-ng-plugins#71` et `#72`.
+synthétique, et couverture de tests. `#72` (échec fermé) est **corrigée en
+amont**, non publiée ; `#71` (absence de suite de tests sur le plugin qui porte
+le `_deviceId`) reste **ouverte**, et c'est elle qui maintient la probabilité
+à 2.
 
 |                 |                              Score résiduel                               |
 | --------------- | :-----------------------------------------------------------------------: |
@@ -333,16 +371,21 @@ mécanisme de sécurité. Le bug de rotation de voucher déjà rencontré en pro
 
 **Remédiation plugin (amont) :** verrouillage réel du magasin de sessions, ou
 mises à jour par champ avec comparaison-et-échange. Suivie dans
-`linagora/lemonldap-ng-plugins#54`, `#66`, `#68` et `#69`.
+`linagora/lemonldap-ng-plugins#54`, `#66`, `#68` et `#69`. `#69` est **corrigée
+en amont** ; `#54` et `#66` (une clé de session par enregistrement au lieu d'un
+blob partagé) sont traitées par la PR amont `#87`, `#53` et `#68` (consommation
+réellement atomique des jetons à usage unique) par la PR amont `#88` — les deux
+**en cours de revue**. Le motif de fond, lui, ne disparaît pas : les correctifs
+suppriment des courses identifiées, ils ne rendent pas le magasin atomique.
 
 **Remédiation architecturale :** traiter le motif comme tel — toute nouvelle
 écriture dans la session persistante doit être conçue comme idempotente et
 tolérante à l'écrasement, tant que le magasin ne fournit pas d'atomicité.
 
-|                 |                               Score résiduel                               |
-| --------------- | :------------------------------------------------------------------------: |
-| **Probabilité** |       2 (aucun correctif disponible ; le motif est structurel amont)       |
-| **Impact**      | 3 (un écrasement peut annuler une révocation — fail-open sur une garantie) |
+|                 |                                 Score résiduel                                  |
+| --------------- | :-----------------------------------------------------------------------------: |
+| **Probabilité** | 2 (correctifs amont en cours de revue, non publiés ; le motif reste structurel) |
+| **Impact**      |   3 (un écrasement peut annuler une révocation — fail-open sur une garantie)    |
 
 ---
 
@@ -367,7 +410,9 @@ pour toute l'organisation.
 devant le portail ; surveillance de la taille de la KRL et du temps de signature.
 
 **Remédiation plugin (amont) :** limitation de débit sur `/ssh/sign`, purge des
-entrées de KRL expirées. Suivie dans `linagora/lemonldap-ng-plugins#63`.
+entrées de KRL expirées. Suivie dans `linagora/lemonldap-ng-plugins#63` ;
+**correctif en cours de revue** dans la PR amont `#90` (limitation de débit et
+quota par utilisateur sur `/ssh/sign`).
 
 |                 |                            Score résiduel                            |
 | --------------- | :------------------------------------------------------------------: |
@@ -398,11 +443,28 @@ entrées de KRL expirées. Suivie dans `linagora/lemonldap-ng-plugins#63`.
 
 **Ce que cette matrice dit et que les autres ne disaient pas :** quatre des huit
 risques du portail dépendent d'une **configuration** que le produit ne pose pas
-lui-même (R-P1, R-P2, R-P5 et, pour partie, R-P4). Deux dépendent d'un correctif
-**amont** qui n'existe pas encore et restent en zone orange : R-P3 (corruption de
-la KRL) et R-P7 (concurrence sur le magasin de sessions). Ils sont portés à
-l'acceptation formelle en
-[08, §3.1](08-dossier-homologation.md#31-zone-orange-acceptation-requise).
+lui-même (R-P1, R-P2, R-P5 et, pour partie, R-P4). Deux restent en zone orange
+et sont portés à l'acceptation formelle en
+[08, §3.1](08-dossier-homologation.md#31-zone-orange-acceptation-requise) :
+R-P3 (corruption de la KRL) et R-P7 (concurrence sur le magasin de sessions).
+
+**État des correctifs amont au 6 septembre 2026.** L'analyse a été menée contre
+le code publié ; depuis, l'amont a bougé. Sur les neuf tickets référencés par ces
+fiches, six sont corrigés dans `linagora/lemonldap-ng-plugins` (`#58`, `#59`,
+`#60`, `#69`, `#72`, `#74`) et trois font l'objet de PR en cours de revue (`#50`
+→ PR `#92`, `#54`/`#66`/`#68` → PR `#87` et `#88`, `#63` → PR `#90`). **Aucun
+n'est publié**, donc aucun score de cette matrice ne change : elle décrit ce
+qu'un exploitant peut déployer aujourd'hui. Deux conséquences pratiques :
+
+- l'acceptation de R-P3 et R-P7 porte désormais sur un **délai de publication**,
+  pas sur l'absence de correctif — ce qui est une décision différente, et plus
+  facile à prendre ;
+- la mise à jour du portail qui apportera ces correctifs apporte aussi des
+  **ruptures** : `/pam/bastion-token` disparaît (voir R-P6 et
+  [#246](https://github.com/linagora/open-bastion/issues/246)), un voucher non
+  lié à une empreinte tombe de 12 h à 15 min, et `/ssh/admin`, `/ssh/certs` et
+  `/ssh/revoke` refusent tant que `sshCaAdminRule` n'est pas renseignée. Cette
+  montée de version doit être planifiée, pas subie.
 
 ---
 
