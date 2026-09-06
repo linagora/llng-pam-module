@@ -1377,6 +1377,50 @@ VARSPROMPT
 }
 
 # ─────────────────────────────────────────────────────────────────────────
+# Protecting artefacts that carry the client secret (#203).
+#
+# With client_secret_mode=embedded the OIDC client secret is written in clear
+# text into every artefact: the shell installer (0755 by default) and the
+# Ansible role's defaults/main.yml (0644). Two accidents follow from that, and
+# both were observed on a real build host: any local account could read the
+# secret, and a bundle generated inside a git working tree was one `git add -A`
+# away from being published.
+#
+# These helpers are no-ops for client_secret_mode=prompt/none, where nothing
+# secret is written to disk in the first place.
+# ─────────────────────────────────────────────────────────────────────────
+_tighten_if_embedded() {
+    local path="$1" mode="$2"
+
+    [ "$CLIENT_SECRET_MODE" = "embedded" ] || return 0
+    [ "$DRY_RUN" = "1" ] && return 0
+    [ -e "$path" ] || return 0
+
+    chmod -- "$mode" "$path" \
+        || log_warn "Could not restrict permissions on $path (it holds the client secret)"
+}
+
+_write_bundle_gitignore() {
+    local outpath="$1"
+
+    [ "$CLIENT_SECRET_MODE" = "embedded" ] || return 0
+    [ "$DRY_RUN" = "1" ] && return 0
+
+    atomic_write "$outpath/.gitignore" "0644" \
+"# Written by ob-builder $VERSION.
+#
+# This bundle was built with client_secret_mode=embedded:
+# roles/open-bastion/defaults/main.yml holds the OIDC client secret in clear
+# text, and the inventory names real hosts. Ignoring the whole directory keeps
+# a stray 'git add -A' from publishing it.
+#
+# To version this bundle deliberately: delete this file, hold the secret with
+# 'ansible-vault encrypt_string' and rebuild with client_secret_mode=prompt.
+*
+"
+}
+
+# ─────────────────────────────────────────────────────────────────────────
 # Shell installer rendering.
 # The template installer.sh.in references @@OPENBASTION_CONF_TEMPLATE@@,
 # which must contain the (already-expanded) contents of the conf template
@@ -1415,6 +1459,7 @@ render_shell_installer() {
     ph_set OPENBASTION_CONF_TEMPLATE "$conf_content"
 
     render_template "$installer_tpl" "$outpath" "0755"
+    _tighten_if_embedded "$outpath" "0700"
 
     if [ "$DRY_RUN" != "1" ] && [ -n "$SIGN_WITH" ]; then
         log_step "Signing $outpath with key $SIGN_WITH"
@@ -1551,6 +1596,9 @@ render_ansible_role() {
         atomic_write_from "$files_dir/jwks.json" "0644" "$WORK_DIR/jwks.json"
     fi
 
+    _tighten_if_embedded "$outpath/roles/open-bastion/defaults/main.yml" "0600"
+    _write_bundle_gitignore "$outpath"
+
     log_info "Ansible role written to $outpath"
 }
 
@@ -1606,6 +1654,9 @@ EOF
     if [ -f "$WORK_DIR/jwks.json" ]; then
         atomic_write_from "$files_dir/jwks.json" "0644" "$WORK_DIR/jwks.json"
     fi
+    _tighten_if_embedded "$defaults_dir/main.yml" "0600"
+    _write_bundle_gitignore "$outpath"
+
     log_info "Stub Ansible role written to $outpath"
 }
 

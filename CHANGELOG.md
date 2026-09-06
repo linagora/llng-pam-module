@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`ob-builder` artefacts that carry the client secret are no longer
+  world-readable, and no longer commit themselves (#203).** With
+  `client_secret_mode: embedded` the OIDC client secret is written in clear text
+  into the shell installer (`0755`) and the Ansible role's `defaults/main.yml`
+  (`0644`). Both are now restricted to the building user (`0700` / `0600`), and
+  an embedded bundle gets a `.gitignore` at its root so a `git add -A` in a
+  surrounding working tree cannot publish it. Bundles built with the default
+  `client_secret_mode: prompt` are unchanged — nothing secret reaches the disk,
+  so there is nothing to hide. The repository's own `.gitignore` also covers the
+  bundle directories that were sitting untracked in the working tree.
+
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions
   up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`
