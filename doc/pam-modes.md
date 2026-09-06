@@ -331,19 +331,27 @@ _token_ is useless (single use, short TTL), and a revoked _right_ is enforced
 immediately. What survives inside the window is the operator's own already
 authenticated terminal.
 
-If your policy requires a token prompt for **every** `sudo`, set
-`timestamp_timeout=0`. Put it in its own sudoers drop-in — `ob-bastion-setup`
-and `ob-backend-setup` regenerate `/etc/sudoers.d/open-bastion`, so anything
-written there is lost on the next run:
+If your policy requires a token prompt for **every** `sudo`, pass
+`--enable-sudo-fresh-otp` to `ob-bastion-setup` or `ob-backend-setup`. It scopes
+`timestamp_timeout=0` to the SSO group in `/etc/sudoers.d/open-bastion`, so SSO
+users go through the PAM `auth` phase — and therefore the LLNG token — on every
+elevation, while local break-glass admins keep normal `sudo` behaviour:
 
 ```bash
-cat > /etc/sudoers.d/open-bastion-local << 'EOF'
-# Require a fresh LLNG token for every sudo (no timestamp reuse).
-Defaults:%open-bastion-sudo timestamp_timeout=0
-EOF
-chmod 0440 /etc/sudoers.d/open-bastion-local
-visudo -c
+ob-bastion-setup --portal https://auth.example.com --max-security \
+                 --enable-sudo-fresh-otp
 ```
+
+```
+# /etc/sudoers.d/open-bastion
+Defaults:%open-bastion-sudo timestamp_timeout=0
+%open-bastion-sudo ALL=(ALL) ALL
+```
+
+Both setups validate the drop-in with `visudo -cf` before installing it, and on
+a host that already has the file they only **add** the `Defaults:` line rather
+than rewriting what is there. Run the setup again without the flag and the line
+stays: removing it is a deliberate edit, not a side effect.
 
 This is deliberately **not** the default: with `timestamp_timeout=0` every
 `sudo` in a shell loop or a long maintenance session needs a new token, which

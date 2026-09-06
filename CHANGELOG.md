@@ -51,6 +51,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth required pam_deny.so`. Check with
   `grep '^auth' /etc/pam.d/sshd`.
 
+### Added
+
+- **`--enable-sudo-fresh-otp` on `ob-bastion-setup` and `ob-backend-setup`
+  (#178).** `sudo` keeps its own credential cache (`timestamp_timeout`, 15
+  minutes by default, idle-based and rearmed on each use). While it is valid,
+  `sudo` skips the PAM `auth` phase entirely, so `pam_openbastion` never runs and
+  no LLNG one-time token is asked for — a user who keeps elevating is not
+  prompted again, which is not what "a fresh SSO re-authentication for each
+  `sudo`" suggests.
+
+  What that does **not** weaken: each token is single-use and consumed by the
+  portal, and the `account` phase re-checks authorization live on every `sudo`,
+  so an LLNG-side revocation takes effect at once. What it weakens is the
+  freshness claim itself.
+
+  The new flag writes `Defaults:%open-bastion-sudo timestamp_timeout=0` into
+  `/etc/sudoers.d/open-bastion`, scoped to the SSO group so local break-glass
+  admins keep normal `sudo` behaviour. It stays **opt-in**: enabling it by
+  default would start prompting on every `sudo` across an upgraded fleet,
+  including inside scripts and long maintenance sessions. On a host that already
+  has the drop-in, the flag only *adds* the `Defaults:` line — the rest of the
+  file is left as the operator wrote it — and the result is `visudo -cf`
+  validated before installation, as before. `doc/pam-modes.md` and EBIOS risk
+  R-S16 now describe the trade-off and name the flag.
+
 ### Changed
 
 - **`ob-builder` artefacts that carry the client secret are no longer

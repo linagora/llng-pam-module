@@ -319,13 +319,60 @@ test_portal_url_accepts_normal() {
     fi
 }
 
+# -- The fresh-OTP opt-in (#178) --
+#
+# sudo caches its own credential (timestamp_timeout, 15 min, idle-based and
+# rearmed on each use). While it is valid sudo skips the PAM auth phase
+# entirely, so pam_openbastion never runs and no LLNG one-time token is asked
+# for. --enable-sudo-fresh-otp scopes timestamp_timeout=0 to the SSO group so
+# every elevation goes through PAM. It must stay OFF by default: turning it on
+# changes the prompt cadence for every SSO user on an upgraded fleet.
+test_sudo_fresh_otp_optin() {
+    local off on ok=1
+
+    off=$(
+        source_script "ob-bastion-setup"
+        SUDO_FRESH_OTP=false
+        render_open_bastion_sudoers "# header"
+    )
+    on=$(
+        source_script "ob-bastion-setup"
+        SUDO_FRESH_OTP=true
+        render_open_bastion_sudoers "# header"
+    )
+
+    grep -q '^%open-bastion-sudo ALL=(ALL) ALL$' <<<"$off" \
+        || { ok=0; echo "    (default drop-in lost its sudo rule)"; }
+    grep -q 'timestamp_timeout' <<<"$off" \
+        && { ok=0; echo "    (timestamp_timeout applied without the flag)"; }
+    grep -q '^Defaults:%open-bastion-sudo timestamp_timeout=0$' <<<"$on" \
+        || { ok=0; echo "    (--enable-sudo-fresh-otp did not scope timestamp_timeout=0)"; }
+    grep -q '^%open-bastion-sudo ALL=(ALL) ALL$' <<<"$on" \
+        || { ok=0; echo "    (opt-in drop-in lost its sudo rule)"; }
+    grep -q 'enable-sudo-fresh-otp' <<<"$(bash "$SCRIPT_DIR/ob-bastion-setup" --help 2>&1)" \
+        || { ok=0; echo "    (not documented in --help)"; }
+
+    if command -v visudo >/dev/null 2>&1; then
+        local tmp; tmp=$(mktemp)
+        printf '%s\n' "$on" > "$tmp"
+        visudo -cf "$tmp" >/dev/null 2>&1 \
+            || { ok=0; echo "    (opt-in drop-in fails visudo)"; }
+        rm -f "$tmp"
+    fi
+
+    if [ "$ok" -eq 1 ]; then
+        pass "--enable-sudo-fresh-otp is opt-in, scoped, and documented"
+    else
+        fail "--enable-sudo-fresh-otp is opt-in, scoped, and documented"
+    fi
+}
 # -- Test 19: sudoers drop-in is validated before it is installed --
 # A malformed /etc/sudoers.d/open-bastion breaks sudo host-wide, so the rule is
 # written to a temp file, checked with visudo -cf, and only then installed 0440
 # -- the same sequence ob-backend-setup uses.
 test_sudoers_validated_before_install() {
     local body ok=1
-    body=$(sed -n '/^configure_max_security_sudo()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
+    body=$(sed -n '/^write_open_bastion_sudoers()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
 
     grep -q 'visudo -cf' <<<"$body" || { ok=0; echo "    (no visudo -cf)"; }
     grep -q 'install -m 0440 -o root -g root' <<<"$body" || { ok=0; echo "    (no install -m 0440)"; }
@@ -349,11 +396,12 @@ test_sudoers_rule_is_valid() {
     fi
 
     local body tmp
-    body=$(sed -n '/^configure_max_security_sudo()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
+    body=$(sed -n '/^write_open_bastion_sudoers()/,/^}/p' "$SCRIPT_DIR/ob-bastion-setup")
     tmp=$(mktemp)
-    # Replay exactly the lines the script writes into its temp sudoers file.
-    grep -oE '^[[:space:]]*echo "(#|%)[^"]*"' <<<"$body" \
-        | sed -E 's/^[[:space:]]*echo "//; s/"$//' > "$tmp"
+    # Replay exactly the lines the script writes into its temp sudoers file,
+    # including the opt-in Defaults line so both shapes are checked at once.
+    grep -oE "printf '%s\\\\n' \"(#|%|Defaults)[^\"]*\"" <<<"$body" \
+        | sed -E "s/^printf '%s\\\\n' \"//; s/\"\$//" > "$tmp"
 
     if [ ! -s "$tmp" ]; then
         rm -f "$tmp"
@@ -419,6 +467,7 @@ run_test test_node_role_invalid
 run_test test_node_role_default
 run_test test_portal_url_rejects_metacharacters
 run_test test_portal_url_accepts_normal
+run_test test_sudo_fresh_otp_optin
 run_test test_sudoers_validated_before_install
 run_test test_sudoers_rule_is_valid
 
