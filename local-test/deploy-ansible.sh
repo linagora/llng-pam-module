@@ -65,10 +65,10 @@ cat > "$WORK/role-bastion/deploy.yml" <<'EOF'
   roles: [open-bastion]
   post_tasks:
     # ob-bastion-id needs root to read the server token. In Mode E sudo is locked
-    # to LLNG tokens, so the debian mgmt user cannot become root at all (a become
-    # failure isn't catchable with failed_when), so skip the capture there. The
-    # bastion_id equals the enrolling client_id in this lab, so the caller falls
-    # back to that.
+    # to LLNG tokens, so the mgmt user cannot become root at all and a become
+    # failure isn't catchable with failed_when -- hence the skip. `ob_max_security`
+    # is passed from the harness below; it used to be tested here and set
+    # nowhere, so the guard never fired.
     - name: Capture bastion_id
       ansible.builtin.command: ob-bastion-id
       register: _bid
@@ -81,24 +81,51 @@ cat > "$WORK/role-bastion/deploy.yml" <<'EOF'
       delegate_to: localhost
       become: false
       when: (_bid.rc | default(1)) == 0 and (_bid.stdout | default('') | length) > 0
+    # Ship the verdict out even on failure, so the harness can tell "skipped
+    # because Mode E" from "ran and failed". Without it every non-zero rc --
+    # including the migration failure this whole change is about -- looks
+    # exactly like the Mode E skip, and the run stays green with the hop
+    # allowlist untested.
+    - ansible.builtin.copy:
+        content: "{{ _bid.rc | default('skipped') }}\n{{ _bid.stderr | default('') }}\n"
+        dest: "{{ bid_out }}.status"
+      delegate_to: localhost
+      become: false
 EOF
+_maxsec=false; [ "$SCENARIO" = "max-security" ] && _maxsec=true
 ( cd "$WORK/role-bastion" && ansible-playbook -i inv.yml deploy.yml \
-    --extra-vars "ob_llng_cookie='$COOKIE' bid_out=$WORK/bastion-id.txt" ) >"$WORK/deploy-bastion.log" 2>&1
+    --extra-vars "ob_llng_cookie='$COOKIE' bid_out=$WORK/bastion-id.txt ob_max_security=$_maxsec" ) >"$WORK/deploy-bastion.log" 2>&1
 if grep -q "failed=0" "$WORK/deploy-bastion.log"; then
-    # In Mode E the bastion_id capture is skipped (sudo locked), so fall back to
-    # the enrolling client_id, which is what the bastion_id resolves to here.
     BID="$([ -s "$WORK/bastion-id.txt" ] && cat "$WORK/bastion-id.txt" || true)"
-    BID="${BID:-ob-bastion}"
-    ok "bastion deployed; bastion_id=$BID"
-else bad "bastion deploy failed — see $WORK/deploy-bastion.log"; tail -20 "$WORK/deploy-bastion.log"; BID="ob-bastion"; fi
+    _bid_rc="$(head -1 "$WORK/bastion-id.txt.status" 2>/dev/null || echo skipped)"
+    if [ -n "$BID" ]; then
+        ok "bastion deployed; bastion_id=$BID"
+    elif [ "$_bid_rc" = "skipped" ]; then
+        # Mode E only: the capture task is skipped because sudo is locked to
+        # LLNG tokens and the mgmt user cannot read the server token. A known
+        # condition, so it does not fail the run -- but there is no usable
+        # placeholder either. bastion_id is a portal-assigned device id, not
+        # the client_id, so a literal never matches the hop certificate's
+        # key-id and would refuse every hop. Empty means "accept any vouched
+        # bastion": the allowlist is not exercised, and the run says so.
+        skip "hop allowlist enforcement (Mode E: capture skipped, allowed_bastions left EMPTY)"
+    else
+        # The task ran and ob-bastion-id failed -- exactly the shape of the
+        # portal migration this change is about (endpoint removed, 403, no
+        # identity). That is a real failure and must weigh on the verdict, the
+        # way deploy-shell.sh already treats it.
+        bad "ob-bastion-id failed (rc=$_bid_rc) — allowed_bastions left EMPTY, the hop allowlist is NOT under test in this run"
+        tail -n +2 "$WORK/bastion-id.txt.status" 2>/dev/null | sed 's/^/      /'
+    fi
+else bad "bastion deploy failed — see $WORK/deploy-bastion.log"; tail -20 "$WORK/deploy-bastion.log"; BID=""; fi
 
 # ── Phase 2: generate + deploy the backends with allowed_bastions=bastion_id ─
 phase "Phase 2 — backends (ob-builder + ansible)"
-sed -e "s/^allowed_bastions:.*/allowed_bastions: ${BID:-ob-bastion}/" \
+sed -e "s/^allowed_bastions:.*/allowed_bastions: ${BID}/" \
     -e "s/^scenario:.*/scenario: $SCENARIO/" "$CONFIG_DIR/build-backend.yml" > "$WORK/build-backend.yml"
 rm -rf "$WORK/role-backend"
 obbuild --config "$WORK/build-backend.yml" --output-ansible "$WORK/role-backend" >"$WORK/gen-backend.log" 2>&1 \
-    && ok "generated backend role (allowed_bastions=${BID:-ob-bastion})" || bad "ob-builder backend failed"
+    && ok "generated backend role (allowed_bastions=${BID:-<empty>})" || bad "ob-builder backend failed"
 { echo "all:"; echo "  vars:"; _inv_vars; echo "  children:"; echo "    backends:"; echo "      hosts:"
   echo "        ${BACKEND_VMS[0]}: { ansible_host: ${IP[${BACKEND_VMS[0]}]}, ob_server_group: backend }"
   echo "        ${BACKEND_VMS[1]}: { ansible_host: ${IP[${BACKEND_VMS[1]}]}, ob_server_group: backend }"

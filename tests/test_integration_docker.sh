@@ -1086,9 +1086,10 @@ EOF
     pass "Ansible role passes syntax-check (auto-approve variant)"
 }
 
-# ob-bastion-id runs on a pre-enrolled bastion, requests a bastion JWT from
-# LLNG via /pam/bastion-token, decodes the JWT, and prints the bastion_id
-# claim. The pre-enrolled docker-demo-cert bastion is the perfect target.
+# ob-bastion-id runs on a pre-enrolled bastion, asks LLNG for its own identity
+# via /pam/whoami (falling back to the legacy /pam/bastion-token probe on an
+# older portal), and prints the bastion_id. The pre-enrolled docker-demo-cert
+# bastion is the perfect target.
 test_ob_bastion_id() {
     TESTS_RUN=$((TESTS_RUN + 1))
     log "Testing ob-bastion-id on the pre-enrolled bastion..."
@@ -1099,12 +1100,23 @@ test_ob_bastion_id() {
 
     local id
     if ! id=$(docker exec ob-cert-bastion ob-bastion-id --quiet 2>&1); then
-        # /pam/bastion-token returning 403 means the demo SSO is missing
-        # the bastion-token plugin (or the enrolled token lacks the LLNG
-        # rule) — not an ob-bastion-id bug. Anchor the match on a status
-        # boundary to avoid accidental matches on bodies containing "403".
-        if echo "$id" | grep -qE 'HTTP[/ ]403|HTTP_STATUS__:403|"status"[[:space:]]*:[[:space:]]*403'; then
-            log_warn "/pam/bastion-token returned 403 — endpoint not provisioned in this demo"
+        # Three ways this demo can legitimately have no endpoint to answer:
+        #
+        #  - 403: the endpoint is there but refuses this caller (the enrolled
+        #    token lacks the LLNG rule);
+        #  - 404: neither /pam/whoami nor the legacy /pam/bastion-token exists
+        #    and something answers 404 for them;
+        #  - "implements neither": the same absence in its *usual* shape. LLNG
+        #    has a catch-all that serves the portal's own HTML login page, with
+        #    a 200, for any /pam/* path no plugin registered — so a demo image
+        #    predating the plugin release does not 404, it returns a web page.
+        #    That is what this demo does today, since docker-demo-cert/sso
+        #    derives from the published portal image.
+        #
+        # None is an ob-bastion-id bug. Anchor the status matches on a boundary
+        # so a body containing "403"/"404" cannot trip them.
+        if echo "$id" | grep -qE 'HTTP[/ ]40[34]|HTTP_STATUS__:40[34]|"status"[[:space:]]*:[[:space:]]*40[34]|implements neither'; then
+            log_warn "the portal has no /pam/whoami — endpoint not provisioned in this demo"
             pass "ob-bastion-id test skipped (LLNG endpoint not available in this demo)"
             return 0
         fi

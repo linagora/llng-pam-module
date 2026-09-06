@@ -3,19 +3,24 @@
 # ob-bastion-id - Print this bastion's identifier (as seen by backends)
 #
 # After a bastion has been enrolled (ob-enroll + ob-bastion-setup) it can ask
-# LLNG for its own identity (POST /pam/bastion-token with probe:true). The
-# returned 'bastion_id' is a synthetic per-device identity assigned by the
-# portal at enrolment -- NOT the OIDC client_id, which identifies a project.
-# It is the value backends list in /etc/open-bastion/allowed_bastions, and
-# that ob-ssh-principals checks against the certificate key-id before PAM runs.
+# LLNG for its own identity (POST /pam/whoami). The returned 'bastion_id' is a
+# synthetic per-device identity assigned by the portal at enrolment -- NOT the
+# OIDC client_id, which identifies a project. It is the value backends list in
+# /etc/open-bastion/allowed_bastions, and that ob-ssh-principals checks against
+# the certificate key-id before PAM runs.
 #
-# This utility issues a probe request, decodes the returned JWT, and prints
-# the bastion_id (or the full claims with --verbose). Useful when configuring
-# a new backend that must restrict which bastions can reach it.
+# This utility asks the portal and prints the bastion_id (or the whole response
+# with --verbose). Useful when configuring a new backend that must restrict
+# which bastions can reach it.
+#
+# Portals older than lemonldap-ng-plugins#94 have no /pam/whoami; against those
+# it falls back to the legacy 'POST /pam/bastion-token {"probe":true}', which
+# upstream removed in #86. The fallback exists so a mixed fleet keeps working
+# during the upgrade, and can go once every portal has moved.
 #
 # Usage:
 #   ob-bastion-id                    # prints bastion_id on stdout
-#   ob-bastion-id --verbose          # full JWT claims as JSON
+#   ob-bastion-id --verbose          # full portal response as JSON
 #   ob-bastion-id --json             # bastion_id wrapped in JSON (machine-readable)
 #
 # Copyright (C) 2026 Linagora
@@ -23,7 +28,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.3"
+VERSION="0.3.0"
 PROG_NAME=$(basename "$0")
 
 CONFIG_FILE="/etc/open-bastion/openbastion.conf"
@@ -36,9 +41,19 @@ VERBOSE=false
 JSON_OUT=false
 QUIET=false
 
+# Set by main() once the token file has been read, consumed by pam_post().
+SERVER_TOKEN=""
+CURL_OPTS=()
+# Filled by every pam_post() call.
+HTTP_STATUS=""
+BODY=""
+
 log_info()  { [ "$QUIET" = "true" ] || printf '[INFO] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
-die() { log_error "$*"; exit "${2:-1}"; }
+# $1 is the message, $2 the optional exit code. Only $1 is printed: `$*`
+# joined the code onto the message, so every call that passed one ended
+# its error with a stray digit ("... probe: <html>... 2").
+die() { log_error "$1"; exit "${2:-1}"; }
 
 usage() {
     cat <<EOF
@@ -60,7 +75,7 @@ USAGE:
   $PROG_NAME [OPTIONS]
 
 OPTIONS:
-  -v, --verbose          Print all JWT claims as pretty JSON
+  -v, --verbose          Print the portal's whole response as pretty JSON
   -j, --json             Print {"bastion_id":"..."} for scripting
   -q, --quiet            Suppress informational logs (errors still go to stderr)
   -c, --config FILE      Path to openbastion.conf  (default: $CONFIG_FILE)
@@ -71,8 +86,8 @@ OPTIONS:
 EXIT STATUS:
   0  bastion_id printed successfully
   1  configuration or token missing / unreadable
-  2  /pam/bastion-token request failed
-  3  JWT decoded but bastion_id claim absent
+  2  the portal request failed or was refused
+  3  the portal answered, but with no identity in it
 EOF
     exit 0
 }
@@ -110,6 +125,55 @@ base64url_decode() {
         3) s="${s}===" ;;
     esac
     printf '%s' "$s" | base64 -d 2>/dev/null
+}
+
+# POST a JSON body to a /pam/* endpoint. Sets HTTP_STATUS and BODY; returns
+# non-zero only when the request never got an answer at all (DNS, TLS, timeout).
+#
+# Deliberately no `-f`: this call used to carry one, which made curl exit
+# non-zero on any 4xx *and discard the body*, so the status could not be
+# inspected and every portal-side refusal collapsed into the same opaque
+# "Request failed". Telling 404 (portal upgraded, endpoint gone) from 403
+# (endpoint present, caller refused) is exactly what the fallback below turns
+# on, so the status has to survive.
+pam_post() {
+    local path="$1" payload="$2" response
+    response=$(curl "${CURL_OPTS[@]}" \
+        -X POST \
+        -H "Authorization: Bearer $SERVER_TOKEN" \
+        -H "Content-Type: application/json" \
+        -w '\n__HTTP_STATUS__:%{http_code}' \
+        -d "$payload" \
+        "${PORTAL_URL}${path}" 2>&1) || {
+            log_error "Request to $path failed: $response"
+            return 1
+        }
+    HTTP_STATUS="${response##*__HTTP_STATUS__:}"
+    BODY="${response%$'\n'__HTTP_STATUS__:*}"
+    return 0
+}
+
+# Print the identity carried by a JSON document, then exit 0. Returns non-zero
+# (without exiting) when the document has no identity to print, so the caller
+# decides what that means. --verbose dumps the whole document instead, which is
+# why this is not a jq one-liner at each call site: the endpoints answer three
+# different shapes and each is worth showing as-is.
+emit_id() {
+    local body="$1" filter="$2" id
+    # Identity first, then --verbose: a body with no id in it is not an answer,
+    # and dumping it would present the portal's HTML login page as one.
+    id=$(printf '%s' "$body" | jq -r "$filter" 2>/dev/null) || return 1
+    [ -n "$id" ] || return 1
+    if [ "$VERBOSE" = "true" ]; then
+        printf '%s\n' "$body" | jq .
+        exit 0
+    fi
+    if [ "$JSON_OUT" = "true" ]; then
+        jq -nc --arg id "$id" '{bastion_id: $id}'
+    else
+        printf '%s\n' "$id"
+    fi
+    exit 0
 }
 
 parse_args() {
@@ -166,16 +230,59 @@ main() {
     fi
     [ -n "$server_token" ] || die "Token file is empty or unparseable: $TOKEN_FILE"
 
-    log_info "Probing $PORTAL_URL/pam/bastion-token (group=$SERVER_GROUP)"
+    SERVER_TOKEN="$server_token"
 
-    local curl_opts=( -sS --max-time "$TIMEOUT" -fL )
-    [ "$VERIFY_SSL" = "true" ] || curl_opts+=( --insecure )
+    CURL_OPTS=( -sS --max-time "$TIMEOUT" -L )
+    [ "$VERIFY_SSL" = "true" ] || CURL_OPTS+=( --insecure )
 
-    # Probe payload — "probe":true tells LLNG this is a self-identification
-    # request, not a real vouching: the endpoint returns the bastion_id
-    # directly (no usable JWT) and skips the per-user _pamSeen recency gate,
-    # which would otherwise reject our synthetic probe user. user/target_host
-    # remain as harmless placeholders for older portals that still mint a JWT.
+    # 1. POST /pam/whoami -- what answers this question on a current portal.
+    #
+    # It is a pure read: no JWT signed, no session written, no heartbeat stamp
+    # (running ob-bastion-id must not make a bastion look freshly seen). The
+    # response carries `server_id`, the canonical name, and `bastion_id`, the
+    # name the old probe used, kept as an alias.
+    log_info "Asking $PORTAL_URL/pam/whoami"
+    pam_post /pam/whoami '{}' || exit 2
+
+    if [ "$HTTP_STATUS" = "200" ]; then
+        # A portal that implements /pam/whoami always answers JSON carrying the
+        # id, so a 200 without one means the endpoint is not there and
+        # something else claimed the URL. That is the normal shape of its
+        # absence, not an edge case: LemonLDAP::NG's catch-all serves the
+        # portal's own HTML login page, with a 200, for any /pam/* path no
+        # plugin has registered. Absence is what the fallback is for.
+        emit_id "$BODY" '.bastion_id // .server_id // empty' || true
+        log_info "/pam/whoami answered 200 with no identity in it —" \
+                 "this portal does not implement it"
+    elif [ "$HTTP_STATUS" != "404" ]; then
+        # A real refusal (403 from the caller gate, 5xx, ...) must not be
+        # papered over by trying an endpoint that would answer the same way and
+        # report the wrong URL in the error.
+        log_error "LLNG returned HTTP $HTTP_STATUS on /pam/whoami: $BODY"
+        exit 2
+    fi
+
+    # 2. Legacy fallback: POST /pam/bastion-token with probe:true.
+    #
+    # Removed upstream (lemonldap-ng-plugins#86) because it signed a JWT even
+    # when the user lookup had failed, and /pam/whoami replaces the one part of
+    # it worth keeping. Kept here only so this script still works against a
+    # portal that has not been upgraded yet -- delete it once the fleet has.
+    log_info "Portal has no /pam/whoami; falling back to the legacy" \
+             "/pam/bastion-token probe (group=$SERVER_GROUP)"
+
+    # user/target_host are harmless placeholders: probe mode returns the id
+    # directly and skips the per-user _pamSeen recency gate that would
+    # otherwise reject a synthetic probe user.
+    #
+    # The JWT path below is a legacy of the original script, not a live
+    # population. Upstream only ever minted a JWT for this call up to plugin
+    # v0.1.16; v0.1.17 added the _pamSeen gate, so those versions answer a
+    # synthetic probe user 403 rather than a JWT; probe mode landed before
+    # v0.3.2 and has returned the id as JSON ever since. Keep it -- it costs
+    # nothing and a very old portal is exactly the case this fallback exists
+    # for -- but do not extend it, and do not delete it believing it covers
+    # anything current.
     local payload
     payload=$(jq -n \
         --arg user "ob-bastion-id-probe" \
@@ -184,67 +291,42 @@ main() {
         --arg bastion_group "$SERVER_GROUP" \
         '{user: $user, target_host: $target_host, target_group: $target_group, bastion_group: $bastion_group, probe: true}')
 
-    local response http_status body
-    response=$(curl "${curl_opts[@]}" \
-        -X POST \
-        -H "Authorization: Bearer $server_token" \
-        -H "Content-Type: application/json" \
-        -w '\n__HTTP_STATUS__:%{http_code}' \
-        -d "$payload" \
-        "${PORTAL_URL}/pam/bastion-token" 2>&1) || {
-            log_error "Request failed: $response"
-            exit 2
-        }
-
-    http_status="${response##*__HTTP_STATUS__:}"
-    body="${response%$'\n'__HTTP_STATUS__:*}"
-    if [ "$http_status" != "200" ]; then
-        log_error "LLNG returned HTTP $http_status: $body"
+    pam_post /pam/bastion-token "$payload" || exit 2
+    if [ "$HTTP_STATUS" != "200" ]; then
+        log_error "LLNG returned HTTP $HTTP_STATUS on /pam/bastion-token: $BODY"
         exit 2
     fi
 
-    # Probe response (LLNG with probe mode): bastion_id is returned directly,
-    # with no JWT. Prefer it when present; fall back to JWT decoding for older
-    # portals that answer the probe by minting a placeholder JWT.
-    local direct_id
-    direct_id=$(printf '%s' "$body" | jq -r '.bastion_id // empty' 2>/dev/null)
-    if [ -n "$direct_id" ]; then
-        if [ "$VERBOSE" = "true" ]; then
-            printf '%s\n' "$body" | jq .
-            exit 0
-        fi
-        if [ "$JSON_OUT" = "true" ]; then
-            jq -nc --arg id "$direct_id" '{bastion_id: $id}'
-        else
-            printf '%s\n' "$direct_id"
-        fi
-        exit 0
+    # Probe mode returns bastion_id directly; prefer it when present.
+    if printf '%s' "$BODY" | jq -e '.bastion_id // empty' >/dev/null 2>&1; then
+        emit_id "$BODY" '.bastion_id // empty' \
+            || die "No bastion_id in probe response: $BODY" 3
     fi
 
     local jwt
-    jwt=$(printf '%s' "$body" | jq -r '.bastion_jwt // empty' 2>/dev/null)
-    [ -n "$jwt" ] || die "No bastion_jwt in response: $body" 2
+    # `|| jwt=""` is load-bearing: under `set -e` with `pipefail`, jq exiting
+    # non-zero on a body that is not JSON (the portal's HTML page, exactly the
+    # case below) kills the script before it can say anything useful.
+    jwt=$(printf '%s' "$BODY" | jq -r '.bastion_jwt // empty' 2>/dev/null) || jwt=""
+    # Neither endpoint answered with an identity. Most often both are simply
+    # absent and the catch-all served the portal page twice, which is what a
+    # deployment missing the pam-access plugin looks like from here.
+    # Exit 3, not 2: both endpoints answered 200, they just carried no
+    # identity. 2 is for a request that failed or was refused.
+    [ -n "$jwt" ] || die "this portal implements neither /pam/whoami nor the legacy /pam/bastion-token probe: $BODY" 3
 
-    # JWT is header.payload.signature — decode the middle segment.
+    # JWT is header.payload.signature -- decode the middle segment.
     local b64payload claims
     b64payload="${jwt#*.}"; b64payload="${b64payload%.*}"
-    claims=$(base64url_decode "$b64payload")
+    # `|| claims=""` for the same reason as `jwt=""` above: base64url_decode
+    # ends in a pipe, so under `set -e` with `pipefail` a payload base64 cannot
+    # read kills the script at the assignment and the die below never runs --
+    # the caller got rc=1 and no message at all.
+    claims=$(base64url_decode "$b64payload") || claims=""
     [ -n "$claims" ] || die "Failed to base64url-decode JWT payload" 3
 
-    if [ "$VERBOSE" = "true" ]; then
-        printf '%s\n' "$claims" | jq .
-        exit 0
-    fi
-
-    local bastion_id
-    bastion_id=$(printf '%s' "$claims" | jq -r '.bastion_id // .sub // empty')
-    [ -n "$bastion_id" ] || { log_error "JWT has neither bastion_id nor sub claim"; exit 3; }
-
-    if [ "$JSON_OUT" = "true" ]; then
-        jq -nc --arg id "$bastion_id" '{bastion_id: $id}'
-    else
-        printf '%s\n' "$bastion_id"
-    fi
+    emit_id "$claims" '.bastion_id // .sub // empty' \
+        || die "JWT has neither bastion_id nor sub claim" 3
 }
 
 main "$@"

@@ -3,21 +3,29 @@
 # Guards the portal locationRules that are the ONLY authorization on two sets of
 # routes (#195):
 #
-#   /device                        — approve or refuse a host enrolment.
-#                                    oidcRPMetaDataOptionsAllowDeviceAuthorization=1
-#                                    means "any authenticated user", so the rule
-#                                    is the whole control.
+#   /device                        — approve or refuse a host enrolment. The
+#                                    plugin's own control
+#                                    (oidcRPMetaDataOptionsAllowDeviceAuthorization)
+#                                    is an activation flag when set to 1, so the
+#                                    vhost rule is then the whole control.
 #   /ssh/admin, /ssh/certs,        — list every issued certificate and revoke
-#   /ssh/revoke                      anyone's. The ssh-ca plugin performs no
-#                                    authorization on them at all.
+#   /ssh/revoke                      anyone's. Up to plugin v0.5.2 the ssh-ca
+#                                    plugin performs no authorization on them at
+#                                    all; from 0.6.0 `sshCaAdminRule` is the
+#                                    fail-closed control and the vhost rule is
+#                                    defence in depth.
 #
 # Two ways to get these rules wrong are load-bearing, and both are silent:
 #
-#   - `^/device$` never matches, because LLNG's grant() matches REQUEST_URI,
-#     which carries the query string (`/device?user_code=...`).
-#   - `^/ssh/revoke` also matches `/ssh/revoked`, the PUBLIC KRL every backend
-#     downloads on a timer. Restricting that route breaks revocation propagation
-#     fleet-wide while looking like a hardening step.
+#   - `^/device$` does NOT fail to fire: the approval form posts to
+#     PORTAL_URL/device with user_code and action in the body, so REQUEST_URI is
+#     "/device" and an anchored rule matches the decision. What it misses is the
+#     page (`/device?user_code=...`) and a crafted POST carrying the same
+#     parameters in the query string, both of which go through ungated.
+#   - `^/ssh/revoke` also matches `/ssh/revoked`, the PUBLIC KRL. That does not
+#     break fleet-wide propagation — backends fetch it with an anonymous curl,
+#     and a request with no session never reaches grant() — but it does 403 a
+#     KRL fetch made with a session.
 #
 # So this test checks the shipped configurations carry the rules, and replays
 # the regexes against the real route list to prove they separate admin routes
