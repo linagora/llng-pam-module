@@ -70,14 +70,24 @@ Who can do what, where — and which knob lives on the SSO vs the server.
 | [Desktop SSO](desktop-sso.md)                   | LightDM greeter + LLNG login **(experimental / alpha)** |
 | [Competitors](competitors.md)                   | Comparison with other solutions                         |
 
-## Security analysis (EBIOS)
+## Security analysis (EBIOS Risk Manager)
 
-Detailed threat model and risk study, for audits and compliance (French).
+Full risk study following the ANSSI EBIOS RM method, for audits and compliance
+(French). Start at **[security/README.md](security/README.md)**, which maps each
+document to its workshop.
 
-| Document                                        | Description                      |
-| ----------------------------------------------- | -------------------------------- |
-| [Architecture](security/00-architecture.md)     | Security architecture overview   |
-| [Enrollment](security/01-enrollment.md)         | Server enrollment security       |
-| [SSH connection](security/02-ssh-connection.md) | SSH authentication flow security |
-| [Offboarding](security/03-offboarding.md)       | User and server offboarding      |
-| [Risk reduction](security/99-risk-reduce.md)    | Residual risks and mitigations   |
+| Workshop                    | Document                                                                                           | Description                                                     |
+| --------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| —                           | [Architecture](security/00-architecture.md)                                                        | Security target and architecture overview                       |
+| **1** Scope and baseline    | [Atelier 1](security/04-atelier1-cadrage-socle.md)                                                 | Perimeter, business values, **scales**, feared events, baseline |
+| **2** Risk origins          | [Atelier 2](security/05-atelier2-sources-de-risque.md)                                             | Risk sources, target objectives, retained pairs                 |
+| **3** Strategic scenarios   | [Atelier 3](security/06-atelier3-scenarios-strategiques.md)                                        | Ecosystem mapping and seven strategic scenarios                 |
+| **4** Operational scenarios | [Enrollment](security/01-enrollment.md) · [SSH](security/02-ssh-connection.md)                     | 39 risk sheets with initial and residual scores                 |
+| **5** Treatment             | [Treatment plan](security/07-plan-de-traitement.md) · [Risk reduction](security/99-risk-reduce.md) | Dated, owned plan; consolidated residual matrix                 |
+| Decision                    | [Homologation dossier](security/08-dossier-homologation.md)                                        | Perimeter, **conditions of use**, residual risk acceptance      |
+| Operational                 | [Offboarding](security/03-offboarding.md)                                                          | User and server offboarding procedure                           |
+
+> Deploying? The fifteen **conditions of use** in
+> [the homologation dossier](security/08-dossier-homologation.md#2-conditions-demploi)
+> are the assumptions the residual scores depend on — and that the product does
+> not all enforce for you.

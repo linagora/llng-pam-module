@@ -53,3 +53,7 @@ local-test/vm/
 build-verify/
 build-asan/
 bv/
+
+# Python bytecode from the EBIOS consistency checker
+__pycache__/
+*.pyc

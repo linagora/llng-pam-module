@@ -1,0 +1,102 @@
+# Atelier 5 — Plan de traitement du risque
+
+> **Méthode :** EBIOS Risk Manager (ANSSI, 2018), atelier 5. Ce document est le
+> plan de traitement : une mesure par ligne, avec le risque qu'elle réduit, sa
+> nature, sa priorité, son porteur, son échéance et son état. Il remplace la
+> liste de « pistes » en texte libre de [99-risk-reduce.md](99-risk-reduce.md),
+> qui reste le lieu de l'**argumentaire** technique de chaque mesure.
+>
+> **Ce document n'est pas complet tant que les colonnes _Porteur_ et _Échéance_
+> portent la mention `À COMPLÉTER`.** Ces valeurs relèvent d'une décision
+> projet, pas d'une analyse ; elles sont laissées vides plutôt qu'inventées.
+
+## 5.1 Convention
+
+| Colonne      | Valeurs                                                                                                                    |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| **Priorité** | **P0** = requis avant mise en production · **P1** = requis dans le cycle courant · **P2** = amélioration planifiée         |
+| **Nature**   | **Produit** = code ou paquet Open Bastion · **Déploiement** = configuration à la pose · **Exploitation** = geste récurrent |
+| **Porteur**  | Rôle responsable de la réalisation. `À COMPLÉTER` = à nommer par le projet                                                 |
+| **Échéance** | Date cible. `À COMPLÉTER` = à fixer par le projet                                                                          |
+| **État**     | **Livré** (avec la référence de PR ou d'issue) · **Ouvert** · **Écarté** (avec le motif)                                   |
+
+Une mesure `Livré` reste dans le plan : elle documente que le risque associé est
+traité, et par quoi. C'est ce qui manquait au backlog précédent, où deux mesures
+déjà livrées étaient encore proposées comme travaux futurs (voir #215).
+
+## 5.2 Mesures requises avant mise en production (P0)
+
+Ce sont les **conditions d'emploi** : sans elles, les scores résiduels de
+l'atelier 4 ne sont pas atteints. Elles sont reprises, avec leur preuve de mise
+en œuvre attendue, en [08-dossier-homologation.md](08-dossier-homologation.md).
+
+| Id       | Mesure                                                                                            | Risques  | Nature       | Priorité | Porteur             | Échéance      | État                                     |
+| -------- | ------------------------------------------------------------------------------------------------- | -------- | ------------ | :------: | ------------------- | ------------- | ---------------------------------------- |
+| **MT01** | `locationRules` sur `^/device` restreignant l'approbation d'enrôlement à un groupe d'approbateurs | R0, R7   | Déploiement  |    P0    | Administrateur LLNG | `À COMPLÉTER` | **Livré** (doc + démos, #195)            |
+| **MT02** | `locationRules` sur `^/ssh/(admin\|certs\|revoke)` restreignant l'administration ssh-ca           | R-S4     | Déploiement  |    P0    | Administrateur LLNG | `À COMPLÉTER` | **Livré** (doc + démos, #195)            |
+| **MT03** | `allowed_bastions` renseigné sur chaque backend avec les device-ids réellement attendus           | R-S23    | Déploiement  |    P0    | Équipe Open Bastion | `À COMPLÉTER` | **Livré** (invite + alerte, #182)        |
+| **MT04** | `RequirePKCE = 1` sur le client OIDC d'enrôlement                                                 | R13      | Déploiement  |    P0    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert** — à vérifier sur cible        |
+| **MT05** | Compte de service de secours + accès console hors-bande documenté et testé                        | R-S17    | Déploiement  |    P0    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                               |
+| **MT06** | KRL déployée sur tous les serveurs, rafraîchie ≤ 30 min, avec alerte de fraîcheur                 | R-S15    | Exploitation |    P0    | Équipe exploitation | `À COMPLÉTER` | Partiel — cron livré, alerte **ouverte** |
+| **MT07** | Clé privée de la CA SSH protégée : accès Manager LLNG restreint et tracé                          | R5, R-S4 | Exploitation |    P0    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert**                               |
+
+## 5.3 Mesures du cycle courant (P1)
+
+| Id       | Mesure                                                                                              | Risques      | Nature       | Priorité | Porteur             | Échéance      | État                                                  |
+| -------- | --------------------------------------------------------------------------------------------------- | ------------ | ------------ | :------: | ------------------- | ------------- | ----------------------------------------------------- |
+| **MT10** | Enregistrement de session écrit par un puits root, inaccessible à l'utilisateur enregistré          | R-S18, R-S19 | Produit      |    P1    | Équipe Open Bastion | —             | **Livré** (#157, `ob-record-sink`)                    |
+| **MT11** | Enregistrement fail-closed : la session est refusée si le puits est injoignable                     | R-S18        | Produit      |    P1    | Équipe Open Bastion | —             | **Livré** — actif par défaut                          |
+| **MT12** | Confinement de session (`KillUserProcesses`, `at`/`cron` en allow-list, refus du `linger`)          | R-S19, R-S20 | Déploiement  |    P1    | Équipe exploitation | `À COMPLÉTER` | **Livré** en opt-in (`--enable-hardening`, #112)      |
+| **MT13** | Trace auditd de niveau syscall (`execve`, watches, `connect`)                                       | R-S21        | Déploiement  |    P1    | Équipe exploitation | `À COMPLÉTER` | **Livré** en opt-in (`--enable-audit-trace`, #113)    |
+| **MT14** | Export des journaux auditd et des enregistrements vers un collecteur distant (WORM ou SIEM)         | R-S18, R-S21 | Exploitation |    P1    | Équipe exploitation | `À COMPLÉTER` | **Ouvert** — recommandation prioritaire               |
+| **MT15** | Liaison de l'empreinte de clé SSH à la session SSO, exigible (`fingerprint_required`)               | R-S3, R-S15  | Produit      |    P1    | Équipe Open Bastion | —             | **Livré** (#192)                                      |
+| **MT16** | Token LLNG frais à chaque `sudo` (`timestamp_timeout=0` cadré sur le groupe SSO)                    | R-S16        | Déploiement  |    P1    | Équipe exploitation | `À COMPLÉTER` | **Livré** en opt-in (`--enable-sudo-fresh-otp`, #178) |
+| **MT17** | Vérification de `target=` par `ob-ssh-principals` contre le FQDN local                              | R-S22        | Produit      |    P1    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                                            |
+| **MT18** | Mode strict de vouching : l'absence d'`allowed_bastions` refuse au lieu du mode hérité              | R-S23        | Produit      |    P1    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                                            |
+| **MT19** | Alerte sur échec de `ob-heartbeat.service` et sur l'âge du token serveur                            | R-S17, R10   | Exploitation |    P1    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                                            |
+| **MT20** | Rotation et inventaire des clés de comptes de service ; `sudo_allowed` accordé au strict nécessaire | R-S24, R-SA1 | Exploitation |    P1    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                                            |
+| **MT21** | `AllowTcpForwarding no` sur le bastion, ou comptes de service non déclarés sur le bastion           | R-S25        | Déploiement  |    P1    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                                            |
+| **MT22** | Test de recouvrement annuel : simulation de panne LLNG, validation console + compte de secours      | R-S17        | Exploitation |    P1    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                                            |
+
+## 5.4 Améliorations planifiées (P2)
+
+| Id       | Mesure                                                                                             | Risques               | Nature      | Priorité | Porteur             | Échéance      | État                             |
+| -------- | -------------------------------------------------------------------------------------------------- | --------------------- | ----------- | :------: | ------------------- | ------------- | -------------------------------- |
+| **MT30** | `client_id` distincts par zone de sécurité (isolation des credentials d'enrôlement)                | R0, R4, R7, R11, R-S6 | Déploiement |    P2    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert** — arbitrage documenté |
+| **MT31** | Réduction de `pamAccessBastionVoucherTtl` sous 12 h                                                | R-S6                  | Déploiement |    P2    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert**                       |
+| **MT32** | Réduction de `pamAccessBastionCertTtl` (120 s → 30–60 s) sur les zones sensibles                   | R-S9                  | Déploiement |    P2    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert**                       |
+| **MT33** | Signature cryptographique des enregistrements à la clôture (clé hors bastion)                      | R-S18                 | Produit     |    P2    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                       |
+| **MT34** | Détection d'un enregistreur tué en cours de session (`killed_prematurely`)                         | R-S19                 | Produit     |    P2    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert** — reliquat de MT10    |
+| **MT35** | Webhook de révocation LLNG → fermeture des sessions ouvertes                                       | R-S8                  | Produit     |    P2    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                       |
+| **MT36** | Notification de rotation de CA vers les backends (`TrustedUserCAKeys`) et monitoring de divergence | R-S10                 | Produit     |    P2    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                       |
+| **MT37** | Purge des crontabs pré-existants à l'activation du durcissement                                    | R-S20                 | Produit     |    P2    | Équipe Open Bastion | `À COMPLÉTER` | **Ouvert**                       |
+| **MT38** | Épinglage de certificat TLS rendu obligatoire vers le portail                                      | R5                    | Déploiement |    P2    | Équipe exploitation | `À COMPLÉTER` | **Ouvert**                       |
+| **MT39** | Second facteur exigé pour l'obtention du token `sudo`                                              | R-S16                 | Déploiement |    P2    | Administrateur LLNG | `À COMPLÉTER` | **Ouvert**                       |
+
+## 5.5 Mesures écartées
+
+Une mesure écartée reste tracée : elle a été examinée, et le motif du refus fait
+partie de l'analyse.
+
+| Mesure envisagée                                                           | Risques | Motif de l'écart                                                                                                                                   |
+| -------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Profil MAC (AppArmor/SELinux) interdisant `setsid` aux shells utilisateurs | R-S19   | Coût de rédaction et de maintenance par distribution jugé supérieur au gain, `KillUserProcesses` couvrant le canal principal                       |
+| `KillUserProcesses=yes` imposé par le postinst                             | R-S19   | Modification système globale silencieuse, contraire à la politique Debian. Réexaminable sous forme d'un paquet `open-bastion-strict` dédié         |
+| Épinglage de `target=` côté LLNG via `source-address`                      | R-S22   | Techniquement impossible : `source-address` épingle l'origine, pas la destination. Le contrôle doit être porté par `ob-ssh-principals` (voir MT17) |
+| Traitement du risque « administrateur du portail LLNG » (SR7)              | tous    | Hors de portée du produit : c'est l'autorité dont dépend le modèle. Traité comme **hypothèse de confiance** en [08](08-dossier-homologation.md)    |
+
+## 5.6 Suivi
+
+| Question                                          | Réponse                                                                                                      |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Qui tient ce plan à jour ?                        | `À COMPLÉTER`                                                                                                |
+| À quelle fréquence est-il revu ?                  | `À COMPLÉTER` (recommandation : à chaque version mineure, et après tout incident)                            |
+| Comment une mesure livrée est-elle vérifiée ?     | Par la référence de PR portée en colonne État, et par les tests cités dans la fiche de risque correspondante |
+| Comment une nouvelle fiche entre-t-elle au plan ? | `tests/ebios_matrix_check.py` échoue si une fiche n'est rattachée à aucun événement redouté (atelier 1)      |
+
+---
+
+Atelier précédent : Atelier 4 — [enrôlement](01-enrollment.md) et
+[connexion SSH](02-ssh-connection.md) · Argumentaire technique des mesures :
+[99-risk-reduce.md](99-risk-reduce.md) · Décisions :
+[08-dossier-homologation.md](08-dossier-homologation.md)
