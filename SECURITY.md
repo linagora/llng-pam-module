@@ -430,9 +430,16 @@ For real-time security monitoring:
 
 ### Secrets Management
 
-| Setting             | Default | Description             |
-| ------------------- | ------- | ----------------------- |
-| `secrets_encrypted` | true    | Encrypt secrets at rest |
+Secrets in `openbastion.conf` — `client_secret`, `notify_secret`,
+`crowdsec_password` — are **not** encrypted at rest. They are protected by file
+permissions alone: the module refuses to read the file unless it is a regular
+file owned by root with no group or other access (`0600`). Keep it that way,
+and prefer a deployment that never writes the secret to disk on the host at all
+(`client_secret_mode: prompt` in an `ob-builder` bundle, or an
+`ansible-vault`-held value).
+
+The `secrets_encrypted` setting documented here until 0.6.2 never did anything:
+it fed a `secret_store` module that had no callers. Both were removed.
 
 ### File Permissions
 

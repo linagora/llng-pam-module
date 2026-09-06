@@ -59,9 +59,6 @@ typedef struct {
     bool token_check_revocation;    /* Check token revocation on each request (default: false) */
     bool token_rotate_refresh;      /* Rotate refresh_token on each refresh (default: true) */
 
-    /* Secret storage */
-    bool secrets_encrypted;         /* Encrypt secrets at rest (default: true) */
-
     /* Webhook notifications */
     bool notify_enabled;            /* Enable webhook notifications (default: false) */
     char *notify_url;               /* Webhook URL for security events */

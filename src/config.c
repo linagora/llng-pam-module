@@ -102,9 +102,6 @@ void config_init(pam_openbastion_config_t *config)
     config->token_check_revocation = false;
     config->token_rotate_refresh = true;
 
-    /* Secret storage - secure defaults */
-    config->secrets_encrypted = true;
-
     /* Webhooks - disabled by default */
     config->notify_enabled = false;
 
@@ -588,10 +585,6 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "token_rotate_refresh") == 0 || strcmp(key, "rotate_refresh") == 0) {
         SET_BOOL_FIELD(config->token_rotate_refresh, value, key);
     }
-    /* Secret storage settings */
-    else if (strcmp(key, "secrets_encrypted") == 0) {
-        SET_BOOL_FIELD(config->secrets_encrypted, value, key);
-    }
     /* Webhook settings */
     else if (strcmp(key, "notify_enabled") == 0 || strcmp(key, "notify") == 0) {
         SET_BOOL_FIELD(config->notify_enabled, value, key);
@@ -922,10 +915,6 @@ int config_parse_args(int argc, const char **argv, pam_openbastion_config_t *con
         }
         else if (strcmp(arg, "no_rotate_refresh") == 0) {
             config->token_rotate_refresh = false;
-        }
-        /* Secret storage flags */
-        else if (strcmp(arg, "no_encrypt_secrets") == 0) {
-            config->secrets_encrypted = false;
         }
         /* User creation flags */
         else if (strcmp(arg, "create_user") == 0) {
