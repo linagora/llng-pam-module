@@ -1,5 +1,13 @@
 # Pistes d'Amélioration - Mode E (Sécurité Maximale)
 
+> **Ce document porte l'argumentaire technique des mesures, pas le plan.** Le
+> plan de traitement — une mesure par ligne, avec porteur, priorité, échéance et
+> état — est en [07-plan-de-traitement.md](07-plan-de-traitement.md), et les
+> décisions (périmètre, conditions d'emploi, acceptation des résiduels) en
+> [08-dossier-homologation.md](08-dossier-homologation.md). Les sections
+> « Pistes » ci-dessous expliquent **pourquoi** une mesure réduit un risque et ce
+> qu'elle coûte ; le plan dit **qui** la porte et **quand**.
+
 ## Matrice des Risques Résiduels (Mode E)
 
 | Impact ↓ / Probabilité → | 1 - Très improbable                                                                    | 2 - Peu probable | 3 - Probable | 4 - Très probable |
@@ -22,11 +30,16 @@
 > identifiant y figure sans fiche. R-S1 et R-S2 sont éliminés par la cible Mode E
 > et n'ont donc pas de fiche.
 
-**Zones de risque** (score = P × I) **:**
+**Zones de risque** — définition unique en
+[atelier 1, §1.5.1](04-atelier1-cadrage-socle.md#151-zones-de-risque)
+(score = Vraisemblance × Gravité) **:**
 
-- Score ≥ 6 : Zone rouge → aucun risque dans cette zone en Mode E avec PR1 + PR2 activées
-- Score 4-5 : Zone jaune → R4, R5, R-S4, R-SA2 (P=1, I=4) ; R-S6 et R-SA1 (P=2, I=3) ; R-S8 (P=2, I=2)
-- Score ≤ 3 : Zone verte → tous les autres, y compris R6 et R-S3 (P=2, I=1 = score 2)
+- **Rouge** (score ≥ 9) : aucun risque, en Mode E avec PR1 + PR2 activées
+- **Orange** (score 6–8) : R1, R-S6, R-SA1 (P=2, I=3 = 6) — les trois seuls à
+  requérir une acceptation formelle, portée par
+  [08-dossier-homologation.md](08-dossier-homologation.md)
+- **Jaune** (score 4–5) : R4, R5, R-S4, R-SA2 (P=1, I=4) et R-S8 (P=2, I=2)
+- **Verte** (score ≤ 3) : les 31 autres, dont R6 et R-S3 (P=2, I=1 = 2)
 
 **Risques éliminés ou ramenés en zone verte par le Mode E (avec PR1 et PR2 activées) :**
 

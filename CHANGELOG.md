@@ -76,6 +76,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated before installation, as before. `doc/pam-modes.md` and EBIOS risk
   R-S16 now describe the trade-off and name the flag.
 
+- **The missing EBIOS RM workshops, treatment plan and homologation dossier
+  (#212, #216, #217).** `doc/security/` was presented as an EBIOS RM study while
+  containing only workshop 4: the word "EBIOS" appeared nowhere inside it, there
+  were no essential assets, no risk sources, no strategic scenarios, and no
+  explicit likelihood or severity scales — the matrices assumed scales that were
+  never written down. There was also no treatment plan (25 free-text "pistes"
+  with no owner, priority, due date or status) and no decision artefact at all:
+  no perimeter of homologation, no conditions of use, no residual-risk
+  acceptance.
+
+  Five documents are added:
+
+  - `04-atelier1-cadrage-socle.md` — perimeter, business values, supporting
+    assets, the **severity and likelihood scales** the matrices were using
+    implicitly, the risk-zone definition, seven feared events, and the security
+    baseline with its gaps. Every one of the 39 risk sheets is attached to
+    exactly one feared event.
+  - `05-atelier2-sources-de-risque.md` — seven risk sources, six target
+    objectives, the SR/OV relevance grid, and why the discarded pairs were
+    discarded — including the LLNG portal administrator, who is not a risk the
+    product can reduce and is stated as a trust assumption instead.
+  - `06-atelier3-scenarios-strategiques.md` — ecosystem mapping with threat
+    levels, and seven strategic scenarios, each saying what the architecture
+    opposes **and what it does not**.
+  - `07-plan-de-traitement.md` — the treatment plan: 29 measures with the risk
+    they reduce, nature, priority, owner, due date and state, plus four measures
+    explicitly discarded with their reason. Delivered measures stay in the plan
+    with their PR reference — that is what was missing when two shipped measures
+    were still listed as future work.
+  - `08-dossier-homologation.md` — the decision artefacts: dossier front matter,
+    the homologation perimeter (**the LLNG portal and its four plugins are
+    inside it**), what is explicitly out with what is expected of the operator,
+    four trust assumptions, **fifteen conditions of use** with how to verify each
+    on target, and the residual-risk acceptance table.
+
+  Plus `doc/security/README.md`, which maps each document to its workshop.
+
+  Owner names, dates, product version and acceptance decisions are left as
+  `À COMPLÉTER`: they belong to the homologation authority, not to the analysis.
+  The dossier says so rather than inventing them.
+
+  The risk-zone definition is also unified: `01-enrollment.md` used thresholds on
+  (P, I) and `99-risk-reduce.md` used a score, with listings that did not match
+  either. There is now one definition (score = likelihood × severity) in
+  workshop 1, and the checker fails if a zone listing does not follow from it.
+
 ### Changed
 
 - **`ob-builder` artefacts that carry the client secret are no longer
