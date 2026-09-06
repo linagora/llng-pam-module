@@ -338,6 +338,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth required pam_deny.so`. Check with
   `grep '^auth' /etc/pam.d/sshd`.
 
+- **The fingerprint spool is harder to forge, and what it is worth is now
+  written down (#235 review).** The spool's trust root is the `nobody` account:
+  `sshd` requires a non-privileged `AuthorizedPrincipalsCommandUser`, so the
+  helper that writes the drops runs as `nobody` and the directory must be
+  writable by it. Code execution as `nobody` can therefore read the deposited
+  fingerprints and write false ones, and none of the module's existing checks
+  (`O_NOFOLLOW`, `nlink == 1`, mode `0600`, drop owner == directory owner) is
+  designed against an attacker who is already inside that perimeter. Three
+  changes narrow it without changing its nature:
+
+  - The anchor `/proc/<pid>` must be a live process owned by **root**. The
+    anchor is chosen by process *name*, and `prctl(PR_SET_NAME)` accepts fifteen
+    characters while `sshd-session` is twelve — so a local user could put a
+    process by that name in the ancestry of their own `sudo` and choose which
+    drop was read. That half of the forge needed no privilege at all.
+  - A drop older than its anchor process is refused. Nothing removes a drop when
+    a session ends and the principals helper does not run for password logins,
+    so once a PID was recycled the new session inherited the previous
+    occupant's binding, with every ownership and mode check passing. On Linux
+    the mtime of `/proc/<pid>` is the process start time, which makes the
+    comparison exact.
+  - A service-account authentication resting on a spool-derived fingerprint,
+    rather than on `sshd`'s own `SSH_USER_AUTH`, is logged at WARN and recorded
+    in the audit trail. It is a root grant whose integrity rests on `nobody`,
+    and the trail should be able to say so afterwards.
+
+  The real fix — a socket-activated root daemon identifying its caller with
+  `SO_PEERCRED`, the pattern `ob-cert-daemon` already uses — is tracked in
+  [#249](https://github.com/linagora/open-bastion/issues/249).
+  `doc/security/99-risk-reduce.md` states the residual plainly, next to the
+  R-S3 / R-S15 reduction it underwrites.
+
+- **`fingerprint_required` now covers service accounts too, and their SSH check
+  actually runs.** The service-account branch of `pam_sm_acct_mgmt` returned
+  `PAM_SUCCESS` before the enforcement block, so the setting documented as
+  covering "every SSH login" skipped them. Worse, their account-phase check read
+  `SSH_USER_AUTH` alone — which a modern OpenSSH does not set for a plain public
+  key — and for a public-key login that is the *only* check that runs, since
+  `sshd` never calls `pam_authenticate()` on that path. It resolves through the
+  spool now, like the `sudo` path, and `fingerprint_required` is enforced before
+  the early return.
+
+- **A missing `.key` drop is no longer reported as a missing key binding.**
+  `read_spool_drop()` is shared between the `.fp` and `.key` suffixes and warned
+  identically for both. The `.key` drop only exists when `sshd` passes `%t` to
+  the helper; a host configured from the shorter `%u %f` form still shown in
+  places has none, and its absence is a missing capability the caller handles by
+  falling back, not a missing security binding. WARN for `.fp`, DEBUG for the
+  rest.
+
 - **Service-account `sudo` with `sudo_nopasswd = false` now works at all
   (#194).** The fingerprint check read `SSH_USER_AUTH` only. That variable does
   not exist in a `sudo` PAM handle, so the check could never succeed and the

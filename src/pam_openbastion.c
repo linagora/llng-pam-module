@@ -1867,6 +1867,33 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
     }
 
     /*
+     * The anchor is chosen by process NAME (/proc/<pid>/comm), and a process
+     * can set its own name: prctl(PR_SET_NAME) takes 15 characters and
+     * "sshd-session" is twelve. So a local user can put a process called
+     * sshd-session in the ancestry of their own sudo and choose which drop
+     * this code reads. Require the anchor to be a live process owned by root,
+     * which sshd's per-connection monitor is and a user's own process is not.
+     *
+     * This does not make the spool trustworthy on its own -- see the comment
+     * on the directory ownership below -- but it removes the half of the forge
+     * that needs no privilege at all.
+     */
+    char anchor_path[64];
+    snprintf(anchor_path, sizeof(anchor_path), "/proc/%d", (int)anchor);
+    struct stat anchor_st;
+    if (stat(anchor_path, &anchor_st) != 0) {
+        OB_LOG_DEBUG(pamh, "SSH fp spool: anchor %d is gone", (int)anchor);
+        return NULL;
+    }
+    if (anchor_st.st_uid != 0) {
+        OB_LOG_ERR(pamh,
+                   "SSH fp spool: anchor %d is owned by uid %u, not root — "
+                   "refusing to read a drop keyed on it",
+                   (int)anchor, (unsigned)anchor_st.st_uid);
+        return NULL;
+    }
+
+    /*
      * Reject the spool directory itself if it is world/group-writable or
      * not owned by the expected principals helper user. We derive the
      * trusted uid from the directory's st_uid: the deployment scripts
@@ -1905,9 +1932,23 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
          * A password/keyboard-interactive login on a cert-aware host lands
          * here too, which is equally worth knowing.
          */
-        OB_LOG_WARN(pamh,
-                    "No SSH fingerprint drop at %s (errno=%d): this session "
-                    "carries no key binding", path, errno);
+        if (strcmp(suffix, "fp") == 0) {
+            OB_LOG_WARN(pamh,
+                        "No SSH fingerprint drop at %s (errno=%d): this session "
+                        "carries no key binding", path, errno);
+        } else {
+            /*
+             * The .key drop is written only when sshd passes %t (and %k) to
+             * the principals helper. The current setup scripts do; hosts
+             * configured from the shorter `%u %f` form still documented in
+             * places do not, and there the absence is a missing capability,
+             * not a missing security binding. WARNing on it would put a line
+             * in syslog on every login of those hosts, for something the
+             * caller handles by falling back.
+             */
+            OB_LOG_DEBUG(pamh,
+                         "No SSH %s drop at %s (errno=%d)", suffix, path, errno);
+        }
         return NULL;
     }
 
@@ -1931,6 +1972,30 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
                    "(uid=%u expected=%u, mode=%o, nlink=%lu) — refusing",
                    path, (unsigned)st.st_uid, (unsigned)dir_st.st_uid,
                    st.st_mode & 07777, (unsigned long)st.st_nlink);
+        close(fd);
+        unlink(path);
+        return NULL;
+    }
+
+    /*
+     * The drop must be younger than the process it is keyed on. Nothing
+     * removes a drop when its session ends, and the principals helper only
+     * runs for public-key authentication -- so once a PID is reused by a
+     * password or keyboard-interactive login, the previous occupant's
+     * fingerprint would be read as that session's binding, with every
+     * ownership and mode check passing.
+     *
+     * On Linux the mtime of /proc/<pid> is the process start time, so a drop
+     * older than the anchor belongs to a PID that has since been recycled.
+     * Equal seconds are fine: the helper writes the drop during the anchor's
+     * lifetime, and st_mtime truncates rather than rounds.
+     */
+    if (st.st_mtime < anchor_st.st_mtime) {
+        OB_LOG_ERR(pamh,
+                   "SSH spool file %s predates its anchor process %d "
+                   "(drop=%ld, anchor started %ld) — stale drop from a recycled "
+                   "PID, refusing",
+                   path, (int)anchor, (long)st.st_mtime, (long)anchor_st.st_mtime);
         close(fd);
         unlink(path);
         return NULL;
@@ -2255,8 +2320,10 @@ static char *extract_ssh_key_fingerprint(pam_handle_t *pamh)
  * Returns an allocated string (caller frees), or NULL when neither source has
  * one.
  */
-static char *resolve_ssh_key_fingerprint(pam_handle_t *pamh)
+static char *resolve_ssh_key_fingerprint(pam_handle_t *pamh, bool *from_spool)
 {
+    if (from_spool) *from_spool = false;
+
     char *fp = extract_ssh_key_fingerprint(pamh);
     if (fp) {
         return fp;
@@ -2264,6 +2331,7 @@ static char *resolve_ssh_key_fingerprint(pam_handle_t *pamh)
 
     fp = read_ssh_fp_from_spool(pamh);
     if (fp) {
+        if (from_spool) *from_spool = true;
         OB_LOG_DEBUG(pamh, "SSH fingerprint recovered from the spool: %s", fp);
     }
     return fp;
@@ -2806,7 +2874,8 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
              * Extract the fingerprint from SSH_USER_AUTH and compare with configured value.
              * This requires ExposeAuthInfo=yes in sshd_config.
              */
-            char *ssh_fingerprint = resolve_ssh_key_fingerprint(pamh);
+            bool fp_from_spool = false;
+            char *ssh_fingerprint = resolve_ssh_key_fingerprint(pamh, &fp_from_spool);
             if (!ssh_fingerprint) {
                 OB_LOG_ERR(pamh, "Service account %s: cannot determine the SSH key "
                         "fingerprint -- neither SSH_USER_AUTH nor the principals "
@@ -2842,8 +2911,30 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
                 return PAM_AUTH_ERR;
             }
 
-            OB_LOG_INFO(pamh, "Service account %s authenticated with fingerprint %s",
-                    user, ssh_fingerprint);
+            /*
+             * Say where the proof came from. SSH_USER_AUTH is asserted by sshd
+             * itself; a spool drop is asserted by whatever owns
+             * /run/open-bastion/ssh-fp, which sshd forces to be a non-root user
+             * (AuthorizedPrincipalsCommandUser, nobody in every shipped setup).
+             * A service account elevating on the strength of the second is a
+             * root grant whose integrity rests on that account, and the audit
+             * trail should be able to say so after the fact.
+             */
+            if (fp_from_spool) {
+                OB_LOG_WARN(pamh,
+                            "Service account %s authenticated with fingerprint %s "
+                            "taken from the principals spool, not from sshd: the "
+                            "binding is only as trustworthy as the spool owner",
+                            user, ssh_fingerprint);
+                if (audit_initialized) {
+                    audit_event.reason =
+                        "Service account: fingerprint from principals spool";
+                    audit_log_event(data->audit, &audit_event);
+                }
+            } else {
+                OB_LOG_INFO(pamh, "Service account %s authenticated with fingerprint %s",
+                        user, ssh_fingerprint);
+            }
             free(ssh_fingerprint);
         }
 
@@ -3641,16 +3732,45 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         }
 
         /*
-         * Defense-in-depth fingerprint check for SSH sessions. sshd's
-         * AuthorizedKeysCommand already ensured the presented key matches
-         * what we published for this service account, but we re-verify
-         * the SHA256 fingerprint from SSH_USER_AUTH (ExposeAuthInfo yes)
-         * against the canonical value in service-accounts.conf. We do NOT
-         * fail closed when SSH_USER_AUTH is absent: the PAM `sudo` service
-         * never has it, and some OpenSSH builds omit it for non-cert keys.
+         * Fingerprint check for SSH sessions, and for a public-key login it is
+         * the ONLY one that runs: sshd does not call pam_authenticate() on that
+         * path, so the check in pam_sm_authenticate() never fires there.
+         *
+         * It resolves through the spool as well as SSH_USER_AUTH. Reading only
+         * SSH_USER_AUTH meant that on a modern OpenSSH, which does not set it
+         * for a plain public key, this check silently did nothing at all.
+         *
+         * Absence is still not fatal by default -- some OpenSSH builds omit
+         * SSH_USER_AUTH and some hosts have no principals helper -- but
+         * `fingerprint_required` now makes it fatal here too, which is what
+         * that setting says it does. Enforced before the PAM_SUCCESS below,
+         * because that early return used to skip the enforcement block at the
+         * end of this function entirely.
          */
         if (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0) {
-            char *ssh_fp = extract_ssh_key_fingerprint(pamh);
+            bool sa_fp_from_spool = false;
+            char *ssh_fp = resolve_ssh_key_fingerprint(pamh, &sa_fp_from_spool);
+            if (!ssh_fp && data->config.fingerprint_required) {
+                OB_LOG_ERR(pamh,
+                           "Service account %s: no SSH key fingerprint and "
+                           "fingerprint_required is set: refusing. Check that "
+                           "the AuthorizedPrincipalsCommand helper runs and that "
+                           "/run/open-bastion/ssh-fp exists.", user);
+                if (audit_initialized) {
+                    audit_event.event_type = AUDIT_AUTHZ_DENIED;
+                    audit_event.result_code = PAM_PERM_DENIED;
+                    audit_event.reason =
+                        "Service account: fingerprint_required with no binding";
+                    audit_event_set_end_time(&audit_event);
+                    audit_log_event(data->audit, &audit_event);
+                }
+                return PAM_PERM_DENIED;
+            }
+            if (ssh_fp && sa_fp_from_spool) {
+                OB_LOG_WARN(pamh,
+                            "Service account %s: SSH fingerprint taken from the "
+                            "principals spool, not from sshd", user);
+            }
             if (ssh_fp) {
                 int fp_result = service_accounts_validate_key(
                     &data->service_accounts, user, ssh_fp);

@@ -46,6 +46,36 @@
 > manifestera comme une panne. `fingerprint_required = true` fait échouer la
 > connexion au bon endroit (à l'ouverture de session, avec un motif audité)
 > plutôt que quinze minutes plus tard sur un rebond.
+>
+> **Ce que vaut le spool comme racine de confiance.** Le répertoire
+> `/run/open-bastion/ssh-fp` appartient à `nobody`, et ce n'est pas un choix :
+> `sshd` exige un utilisateur non privilégié pour
+> `AuthorizedPrincipalsCommandUser`, donc le helper qui écrit les drops tourne
+> sous ce compte et le répertoire doit lui appartenir. Il en découle qu'une
+> **exécution de code sous `nobody` permet de lire les empreintes déposées et
+> d'en écrire de fausses**. Les contrôles du module (`O_NOFOLLOW`, `nlink == 1`,
+> mode `0600`, propriétaire du drop = propriétaire du répertoire) protègent
+> contre un attaquant extérieur au périmètre de confiance, pas contre un
+> attaquant qui est `nobody`.
+>
+> Deux durcissements réduisent la surface sans changer cette nature : l'ancre
+> `/proc/<pid>` doit être un processus vivant appartenant à **root** (l'ancre
+> est choisie par nom de processus, et `prctl(PR_SET_NAME)` accepte quinze
+> caractères — « sshd-session » en fait douze, donc un utilisateur local pouvait
+> sinon choisir quel drop serait lu), et un drop plus ancien que son processus
+> ancre est refusé (rien ne supprime un drop en fin de session, et le helper ne
+> tourne pas pour une connexion par mot de passe : une réutilisation de PID
+> faisait sinon hériter le binding de l'occupant précédent). Enfin, toute
+> authentification de compte de service fondée sur une empreinte venue du spool
+> plutôt que de `sshd` est journalisée en **WARN** et tracée dans l'audit.
+>
+> La correction de fond est un démon root activé par socket qui reçoit les
+> empreintes et vérifie l'appelant par `SO_PEERCRED`, sur le modèle
+> d'`ob-cert-daemon` — le répertoire redevient alors `0700 root`. Suivie dans
+> [#249](https://github.com/linagora/open-bastion/issues/249). **Tant qu'elle
+> n'est pas faite, `sudo_allowed` sur un compte de service est un octroi de root
+> dont l'intégrité repose sur le compte `nobody` de l'hôte** : le minimiser
+> (piste 1 plus bas) n'est pas une recommandation de style.
 
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
@@ -238,7 +268,7 @@ consommé côté portail, et la phase `account` — donc la vérification
 d'autorisation — s'exécute en direct à **chaque** `sudo`, si bien qu'une
 révocation LLNG prend effet immédiatement. Ce que cela affaiblit : la
 revendication « chaque élévation est adossée à une authentification SSO
-*fraîche* ». L'option `--enable-sudo-fresh-otp` d'`ob-bastion-setup` /
+_fraîche_ ». L'option `--enable-sudo-fresh-otp` d'`ob-bastion-setup` /
 `ob-backend-setup` écrit `Defaults:%open-bastion-sudo timestamp_timeout=0` et
 rétablit la revendication littérale ; elle reste **opt-in** parce qu'elle change
 la cadence des invites pour tous les utilisateurs SSO. Voir
