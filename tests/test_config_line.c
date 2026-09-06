@@ -41,7 +41,7 @@ static void feed(pam_openbastion_config_t *config, const char *raw)
 {
     char line[1024];
     snprintf(line, sizeof(line), "%s", raw);
-    parse_config_file_line(line, config);
+    parse_config_file_line(line, config, "test.conf");
 }
 
 static void with_config(const char *raw,
@@ -242,6 +242,24 @@ static void test_unknown_keys(void)
     CHECK(classify("offline_cache_ttl = 86400") == PARSE_LINE_UNKNOWN_KEY,
           "offline_cache_ttl             -> reported unknown (core build)");
 #endif
+
+    /*
+     * Every key this project's own tooling writes into openbastion.conf must
+     * be accepted. config_load() runs once per PAM process, so a key that
+     * ob-bastion-setup or ob-backend-setup emits and this parser rejects costs
+     * a syslog warning on every single login of every deployed host -- which
+     * would bury the one typo the whole change exists to surface.
+     */
+    CHECK(classify("cache_enabled = true") == 0,
+          "cache_enabled                 -> accepted (written by both setups)");
+    CHECK(classify("cache_dir = /var/cache/open-bastion") == 0,
+          "cache_dir                     -> accepted (written by both setups)");
+    CHECK(classify("cache_ttl = 300") == 0,
+          "cache_ttl                     -> accepted (both setups; live in NSS conf)");
+    CHECK(classify("create_home = true") == 0,
+          "create_home                   -> accepted (written by ob-backend-setup)");
+    CHECK(classify("default_shell = /bin/bash") == 0,
+          "default_shell                 -> accepted (backend setup; live in NSS conf)");
 
     /* openbastion.conf is shared with ob-heartbeat(8): its keys are not typos. */
     CHECK(classify("node_role = bastion") == 0,

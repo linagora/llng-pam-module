@@ -569,7 +569,7 @@ pamAccessOfflineTtl = 86400   # 24h d'autonomie si le portail est indisponible
 ```
 
 > **Ne pas confondre :** `offline_cache_ttl` d'`openbastion.conf` ne concerne que
-> le cache de *credentials* du SSO Desktop (LightDM), pas le cache d'autorisation
+> le cache de _credentials_ du SSO Desktop (LightDM), pas le cache d'autorisation
 > SSH/sudo décrit ici.
 
 **Remédiation infrastructure :**
@@ -1091,11 +1091,11 @@ L'enregistrement de session est streamé vers le puits root `ob-record-sink` (so
 
 **Remédiation opérationnelle :**
 
-| Mesure                           | Description                                                                                                                                                                                                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Compte de service de secours** | Le paquet bootstrap `open-bastion-linagora` pré-configure un compte `linagora` dans `service-accounts.conf` avec clé RSA et `sudo_allowed = true`, stockée en coffre-fort                                  |
-| **Accès console via ttyS0**      | Le paquet bootstrap configure `/etc/securetty` avec `ttyS0` pour l'accès root via la console OVH/hors-bande. `PermitRootLogin no` dans sshd bloque l'accès root SSH, la console reste le filet de sécurité |
-| **Cache offline suffisant**      | Configurer `pamAccessOfflineTtl` (côté LLNG) à une valeur couvrant la durée maximale d'indisponibilité tolérée, et activer `auth_cache = true` sur les hôtes. Sans valeur renvoyée par le portail, le module applique 24 h                                                                                                 |
+| Mesure                           | Description                                                                                                                                                                                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Compte de service de secours** | Le paquet bootstrap `open-bastion-linagora` pré-configure un compte `linagora` dans `service-accounts.conf` avec clé RSA et `sudo_allowed = true`, stockée en coffre-fort                                                  |
+| **Accès console via ttyS0**      | Le paquet bootstrap configure `/etc/securetty` avec `ttyS0` pour l'accès root via la console OVH/hors-bande. `PermitRootLogin no` dans sshd bloque l'accès root SSH, la console reste le filet de sécurité                 |
+| **Cache offline suffisant**      | Configurer `pamAccessOfflineTtl` (côté LLNG) à une valeur couvrant la durée maximale d'indisponibilité tolérée, et activer `auth_cache = true` sur les hôtes. Sans valeur renvoyée par le portail, le module applique 24 h |
 
 > **Automatisation bootstrap :** Le paquet `open-bastion-linagora` prend en charge la configuration initiale de `securetty`, du compte de service `linagora` et de `PermitRootLogin no`. Ces éléments n'ont pas besoin d'être configurés manuellement sur les déploiements utilisant ce paquet.
 

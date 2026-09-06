@@ -455,18 +455,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which the module has ever parsed, so an operator sizing the offline
   authorization window for a planned LLNG outage got no error and no effect.
   Unknown keys are still ignored — no host can be locked out by this — but each
-  one now produces `open-bastion: unknown configuration key '<key>' in
-  openbastion.conf, ignored` in syslog. The key alone is logged, never the
-  value. Keys that `openbastion.conf` carries for `ob-heartbeat(8)`
-  (`node_role`, `report_sessions`, `max_reported_sessions`) are recognised as
-  legitimate and stay silent. PAM module arguments are unaffected.
+  one now produces `open-bastion: unknown configuration key '<key>' in <file>,
+  ignored` in syslog. The key alone is logged, never the value; the file is the
+  one actually parsed, since the PAM `conf=` argument can point elsewhere. PAM
+  module arguments are unaffected.
+
+  The report is only useful while it means something, so every key the project
+  itself writes into `openbastion.conf` is recognised and stays silent: the
+  three `ob-heartbeat(8)` ones (`node_role`, `report_sessions`,
+  `max_reported_sessions`), and the five that `ob-bastion-setup`,
+  `ob-backend-setup` and the `ob-builder` templates emit but nothing reads back
+  (`cache_enabled`, `cache_dir`, `cache_ttl`, `create_home`, `default_shell`).
+  Without them `config_load()` — which runs once per PAM process — would have
+  put three to five warnings in syslog on every login of every deployed host,
+  burying the one typo this exists to surface.
+  `tests/test_ob_config_keys.sh` now reads the generators and the shipped
+  example and fails if either emits a key the parser does not know.
 
   The documentation is corrected with it: the PAM authorization cache has **no**
   local TTL setting — the portal supplies it in the `/pam/authorize` response
   from LLNG's `pamAccessOfflineTtl`, and the module falls back to 24 h when the
   portal sends none. `openbastion.conf`'s `offline_cache_ttl` governs the
-  desktop-SSO credential cache only, and `cache_ttl` exists only in
-  `nss_openbastion.conf`.
+  desktop-SSO credential cache only. `cache_ttl` appears in `openbastion.conf`
+  because the setup scripts write it there, but it is read only from
+  `nss_openbastion.conf`, by the NSS module.
 
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions

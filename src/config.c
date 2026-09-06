@@ -773,6 +773,28 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
              strcmp(key, "max_reported_sessions") == 0) {
         /* consumed by ob-heartbeat(8) */
     }
+    /*
+     * Keys this project's own tooling writes into openbastion.conf and that
+     * nothing reads back from it: ob-bastion-setup emits the three cache_*
+     * ones, ob-backend-setup those plus create_home and default_shell, and so
+     * do the ob-builder templates and the shipped example. cache_ttl and
+     * default_shell are live settings -- but of the NSS module, read from
+     * nss_openbastion.conf, its own file.
+     *
+     * Reporting them would have made this change worse than the silence it
+     * replaces: config_load() runs once per PAM process, so every login on
+     * every officially deployed host would emit three to five syslog warnings,
+     * drowning the real typo this is meant to surface. Removing them from the
+     * generators is a separate change; recognising them here is what keeps the
+     * signal usable today.
+     */
+    else if (strcmp(key, "cache_enabled") == 0 ||
+             strcmp(key, "cache_dir") == 0 ||
+             strcmp(key, "cache_ttl") == 0 ||
+             strcmp(key, "create_home") == 0 ||
+             strcmp(key, "default_shell") == 0) {
+        /* written by ob-bastion-setup / ob-backend-setup / ob-builder */
+    }
     else {
         return PARSE_LINE_UNKNOWN_KEY;
     }
@@ -785,7 +807,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
  * Split out of config_load() so the line syntax (comments, quotes, inline
  * comments) can be tested without a root-owned file on disk.
  */
-static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
+static void parse_config_file_line(char *line, pam_openbastion_config_t *config,
+                                   const char *filename)
 {
     char *trimmed = trim(line);
 
@@ -826,8 +849,8 @@ static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
          * offline_cache_ttl (#229).
          */
         syslog(LOG_WARNING,
-               "open-bastion: unknown configuration key '%s' in openbastion.conf, ignored",
-               key);
+               "open-bastion: unknown configuration key '%s' in %s, ignored",
+               key, filename ? filename : "openbastion.conf");
     }
 }
 
@@ -868,7 +891,7 @@ int config_load(const char *filename, pam_openbastion_config_t *config)
     char line[1024];
 
     while (fgets(line, sizeof(line), f)) {
-        parse_config_file_line(line, config);
+        parse_config_file_line(line, config, filename);
     }
 
     fclose(f);
