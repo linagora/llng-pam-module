@@ -2861,6 +2861,15 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
          */
         bool skip_fp_check =
             (strcmp(service, "sudo") == 0) && sa->sudo_nopasswd;
+        /*
+         * Hoisted so the single success event below can say where the proof
+         * came from. It used to be emitted as an extra audit_log_event() from
+         * inside the block, which inherited event_type AUDIT_AUTH_FAILURE from
+         * audit_event_init() and never set result_code or end_time: a malformed
+         * failure record for a successful authentication, whose reason the real
+         * success event then overwrote anyway.
+         */
+        bool fp_from_spool = false;
 
         if (skip_fp_check) {
             OB_LOG_INFO(pamh,
@@ -2874,7 +2883,6 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
              * Extract the fingerprint from SSH_USER_AUTH and compare with configured value.
              * This requires ExposeAuthInfo=yes in sshd_config.
              */
-            bool fp_from_spool = false;
             char *ssh_fingerprint = resolve_ssh_key_fingerprint(pamh, &fp_from_spool);
             if (!ssh_fingerprint) {
                 OB_LOG_ERR(pamh, "Service account %s: cannot determine the SSH key "
@@ -2926,11 +2934,6 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
                             "taken from the principals spool, not from sshd: the "
                             "binding is only as trustworthy as the spool owner",
                             user, ssh_fingerprint);
-                if (audit_initialized) {
-                    audit_event.reason =
-                        "Service account: fingerprint from principals spool";
-                    audit_log_event(data->audit, &audit_event);
-                }
             } else {
                 OB_LOG_INFO(pamh, "Service account %s authenticated with fingerprint %s",
                         user, ssh_fingerprint);
@@ -2967,7 +2970,10 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
             audit_event.result_code = PAM_SUCCESS;
             audit_event.reason = skip_fp_check
                 ? "Service account (sudo_nopasswd, fingerprint check skipped)"
-                : "Service account (SSH key validated)";
+                : (fp_from_spool
+                   ? "Service account (SSH key validated from the principals "
+                     "spool, not from sshd)"
+                   : "Service account (SSH key validated)");
             audit_event_set_end_time(&audit_event);
             audit_log_event(data->audit, &audit_event);
         }

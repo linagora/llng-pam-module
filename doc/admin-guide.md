@@ -1105,7 +1105,37 @@ ssh_key_min_rsa_bits = 3072
 
 # Minimum ECDSA key size in bits (default: 256)
 ssh_key_min_ecdsa_bits = 256
+
+# Refuse an SSH session that carries no key fingerprint at all
+# (alias: ssh_fingerprint_required). Default: false.
+fingerprint_required = true
 ```
+
+### Requiring a fingerprint at all
+
+`fingerprint_required` is separate from the policy above: the policy says which
+keys are acceptable, this says whether a session without any identified key may
+proceed. It defaults to `false`, and `ssh_fingerprint_required` is accepted as
+an alias.
+
+Set it to `true` on hosts in a certificate or SSH-key mode, and leave it off on
+token modes, where there is never a fingerprint to find.
+
+It matters more than a hardening knob usually would. The fingerprint reaches
+LemonLDAP::NG through the spool the `ob-ssh-principals` helper writes; if that
+spool disappears — a `tmpfiles.d` entry lost across an upgrade, a helper that
+stopped running — the module calls `/pam/authorize` with no `fingerprint` field,
+the plugin treats it as optional, and the binding silently stops existing. The
+residual scores of R-S3 and R-S15 in `doc/security/` assume it does exist, which
+is why the homologation dossier carries it as condition of use **CE09**
+([08-dossier-homologation.md](security/08-dossier-homologation.md)).
+
+With `fingerprint_required = true` the session is refused at login, with an
+audited reason, instead of proceeding unbound. From plugin 0.6.0 the portal
+gains the matching half (`pamAccessRequireFingerprint`, and a 15-minute cap on
+unbound vouchers), which turns the same drift into onward-hop failures a quarter
+of an hour into a session — visible, but much further from the cause. See
+[UPGRADE-NOTES.md](../UPGRADE-NOTES.md).
 
 ### Key Type Aliases
 

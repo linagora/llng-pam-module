@@ -360,15 +360,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the mtime of `/proc/<pid>` is the process start time, which makes the
     comparison exact.
   - A service-account authentication resting on a spool-derived fingerprint,
-    rather than on `sshd`'s own `SSH_USER_AUTH`, is logged at WARN and recorded
-    in the audit trail. It is a root grant whose integrity rests on `nobody`,
-    and the trail should be able to say so afterwards.
+    rather than on `sshd`'s own `SSH_USER_AUTH`, is logged at WARN and the
+    provenance is carried in the reason of the single audit success event. It is
+    a root grant whose integrity rests on `nobody`, and the trail should be able
+    to say so afterwards.
 
   The real fix — a socket-activated root daemon identifying its caller with
   `SO_PEERCRED`, the pattern `ob-cert-daemon` already uses — is tracked in
   [#249](https://github.com/linagora/open-bastion/issues/249).
   `doc/security/99-risk-reduce.md` states the residual plainly, next to the
   R-S3 / R-S15 reduction it underwrites.
+
+- **`fingerprint_required` is documented where an operator looks for it.** It is
+  condition of use **CE09** of the homologation dossier and the assumption
+  behind the R-S3 / R-S15 residual scores, but `doc/admin-guide.md`'s "SSH Key
+  Policy" section did not mention it, and the accepted alias
+  `ssh_fingerprint_required` appeared in no document at all.
 
 - **`fingerprint_required` now covers service accounts too, and their SSH check
   actually runs.** The service-account branch of `pam_sm_acct_mgmt` returned
