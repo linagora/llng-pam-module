@@ -76,10 +76,13 @@ server_group`) : le `server_group` cesse alors d'être une donnée d'entrée.
 
 **Remédiation plugin (amont) :** liaison d'audience sur les jetons `/pam/*`
 et refus d'un `server_group` auto-déclaré. Suivie dans
-`linagora/lemonldap-ng-plugins#50` ; **correctif en cours de revue** dans la PR
-amont `#92`, qui associe une allowlist de RP au refus du groupe auto-déclaré,
-une allowlist vide valant « pas de changement » pour ne pas rompre la montée de
-version.
+`linagora/lemonldap-ng-plugins#50` ; **corrigée en amont**, non publiée à ce
+jour, par la PR amont `#92`, qui associe une allowlist de RP (`pamAccessAllowedRps`)
+au refus du groupe auto-déclaré, une allowlist vide valant « pas de changement »
+pour ne pas rompre la montée de version. Le correctif n'agit donc que si
+l'exploitant renseigne cette allowlist, ce qui suppose d'enrôler les bastions
+sous un `client_id` distinct de celui du projet — la mesure reste une
+**configuration**, pas un acquis de la mise à jour.
 
 Deux effets de bord de la PR amont `#86` (issues `#55`, `#56`) touchent
 directement cette fiche, sans changer le score :
@@ -316,10 +319,13 @@ leur point d'ancrage.
   mais une perte d'attribution
 - `ob-bastion-id` permet de constater l'absence de device-id après enrôlement —
   mais l'endpoint dont il dépend (`/pam/bastion-token`) est supprimé par la PR
-  amont `#86`, et son remplaçant `POST /pam/whoami` arrive dans la PR amont
-  `#94` ; la migration côté open-bastion est suivie dans
-  [#246](https://github.com/linagora/open-bastion/issues/246). Tant qu'elle
-  n'est pas faite, ce facteur atténuant disparaît avec la mise à jour du portail
+  amont `#86`, **mergée**, et son remplaçant `POST /pam/whoami` l'est aussi
+  (PR amont `#94`) ; la migration côté open-bastion est faite dans
+  [#248](https://github.com/linagora/open-bastion/pull/248), qui bascule
+  `ob-bastion-id` sur le nouvel endpoint avec repli sur l'ancien tant que le
+  portail n'a pas migré. Ce facteur atténuant survit donc à la mise à jour du
+  portail, à condition de déployer cette version d'`ob-bastion-id` **avant** de
+  mettre le portail à jour (voir `UPGRADE-NOTES.md`)
 
 **Remédiation opérationnelle :** vérifier `ob-bastion-id` après chaque
 enrôlement et refuser un hôte sans device-id ; surveiller les jetons serveur
@@ -374,18 +380,20 @@ mises à jour par champ avec comparaison-et-échange. Suivie dans
 `linagora/lemonldap-ng-plugins#54`, `#66`, `#68` et `#69`. `#69` est **corrigée
 en amont** ; `#54` et `#66` (une clé de session par enregistrement au lieu d'un
 blob partagé) sont traitées par la PR amont `#87`, `#53` et `#68` (consommation
-réellement atomique des jetons à usage unique) par la PR amont `#88` — les deux
-**en cours de revue**. Le motif de fond, lui, ne disparaît pas : les correctifs
+réellement atomique des jetons à usage unique) par la PR amont `#88`, et la PR
+amont `#95` va plus loin en donnant à chaque voucher son propre enregistrement
+de session plutôt qu'une clé dans un blob réécrit en entier — les trois
+**mergées, non publiées**. Le motif de fond, lui, ne disparaît pas : les correctifs
 suppriment des courses identifiées, ils ne rendent pas le magasin atomique.
 
 **Remédiation architecturale :** traiter le motif comme tel — toute nouvelle
 écriture dans la session persistante doit être conçue comme idempotente et
 tolérante à l'écrasement, tant que le magasin ne fournit pas d'atomicité.
 
-|                 |                                 Score résiduel                                  |
-| --------------- | :-----------------------------------------------------------------------------: |
-| **Probabilité** | 2 (correctifs amont en cours de revue, non publiés ; le motif reste structurel) |
-| **Impact**      |   3 (un écrasement peut annuler une révocation — fail-open sur une garantie)    |
+|                 |                               Score résiduel                               |
+| --------------- | :------------------------------------------------------------------------: |
+| **Probabilité** |    2 (correctifs amont mergés, non publiés ; le motif reste structurel)    |
+| **Impact**      | 3 (un écrasement peut annuler une révocation — fail-open sur une garantie) |
 
 ---
 
@@ -411,7 +419,7 @@ devant le portail ; surveillance de la taille de la KRL et du temps de signature
 
 **Remédiation plugin (amont) :** limitation de débit sur `/ssh/sign`, purge des
 entrées de KRL expirées. Suivie dans `linagora/lemonldap-ng-plugins#63` ;
-**correctif en cours de revue** dans la PR amont `#90` (limitation de débit et
+**corrigée en amont**, non publiée à ce jour, par la PR amont `#90` (limitation de débit et
 quota par utilisateur sur `/ssh/sign`).
 
 |                 |                            Score résiduel                            |
@@ -449,22 +457,37 @@ et sont portés à l'acceptation formelle en
 R-P3 (corruption de la KRL) et R-P7 (concurrence sur le magasin de sessions).
 
 **État des correctifs amont au 6 septembre 2026.** L'analyse a été menée contre
-le code publié ; depuis, l'amont a bougé. Sur les neuf tickets référencés par ces
-fiches, six sont corrigés dans `linagora/lemonldap-ng-plugins` (`#58`, `#59`,
-`#60`, `#69`, `#72`, `#74`) et trois font l'objet de PR en cours de revue (`#50`
-→ PR `#92`, `#54`/`#66`/`#68` → PR `#87` et `#88`, `#63` → PR `#90`). **Aucun
-n'est publié**, donc aucun score de cette matrice ne change : elle décrit ce
-qu'un exploitant peut déployer aujourd'hui. Deux conséquences pratiques :
+le code publié ; depuis, l'amont a bougé, et il a fini de bouger. Les **neuf**
+tickets référencés par ces fiches sont **tous corrigés et mergés** dans
+`linagora/lemonldap-ng-plugins` : `#58`, `#59`, `#60`, `#69`, `#72`, `#74`
+l'étaient déjà, et les trois derniers l'ont été le 6 septembre (`#50` → PR
+`#92`, `#54`/`#66`/`#68` → PR `#87` et `#88`, `#63` → PR `#90`). Le tour
+d'audit complet couvre les PR `#76` à `#95`.
+
+**Aucun n'est publié** — la dernière version étiquetée est `v0.5.2`, ces
+correctifs sortiront en `0.6.0` — donc **aucun score de cette matrice ne
+change** : elle décrit ce qu'un exploitant peut déployer aujourd'hui. Trois
+conséquences pratiques :
 
 - l'acceptation de R-P3 et R-P7 porte désormais sur un **délai de publication**,
   pas sur l'absence de correctif — ce qui est une décision différente, et plus
   facile à prendre ;
 - la mise à jour du portail qui apportera ces correctifs apporte aussi des
-  **ruptures** : `/pam/bastion-token` disparaît (voir R-P6 et
-  [#246](https://github.com/linagora/open-bastion/issues/246)), un voucher non
-  lié à une empreinte tombe de 12 h à 15 min, et `/ssh/admin`, `/ssh/certs` et
-  `/ssh/revoke` refusent tant que `sshCaAdminRule` n'est pas renseignée. Cette
-  montée de version doit être planifiée, pas subie.
+  **ruptures** : `/pam/bastion-token` disparaît (voir R-P6, traité par
+  [#248](https://github.com/linagora/open-bastion/pull/248)), un voucher non
+  lié à une empreinte tombe de 12 h à 15 min, le scope PAM est désormais
+  comparé à l'identique (un RP portant `pam-prod` perd `/pam/*`), et
+  `/ssh/admin`, `/ssh/certs` et `/ssh/revoke` refusent tant que
+  `sshCaAdminRule` n'est pas renseignée. Cette montée de version doit être
+  planifiée, pas subie : la marche à suivre est dans `UPGRADE-NOTES.md` ;
+- deux correctifs amont **ouvrent des mesures que le produit ne prend pas
+  encore**. `pamAccessAllowedRps` (`#92`) ne mord que si l'exploitant le
+  renseigne, ce qui suppose un `client_id` propre aux bastions ; et la
+  vérification de signature de requête (`#93`) ne peut pas être portée à
+  `required`, parce que le client ne signe que deux des six endpoints `/pam/*`
+  — `/pam/heartbeat` en particulier, ce qui ferait tomber la flotte entière
+  quelques heures après le basculement, à l'expiration des jetons en main.
+  Suivi dans [#247](https://github.com/linagora/open-bastion/issues/247).
 
 ---
 

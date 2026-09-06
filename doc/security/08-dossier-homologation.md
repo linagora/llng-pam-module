@@ -121,21 +121,23 @@ information ; les 35 risques en zone verte relèvent de la surveillance ordinair
 
 Deux des cinq — R-P3 et R-P7 — dépendent d'un correctif **amont** : les
 accepter, c'est accepter un délai hors du contrôle direct du projet. Ce délai
-n'est plus indéterminé : au 6 septembre 2026 le correctif de R-P3 est écrit et
-mergé en amont, et ceux de R-P7 sont en revue (voir
-[09, matrice](09-portail-llng.md#matrice-des-risques-du-portail)). Aucun n'est
-**publié**, donc le résiduel ne change pas — mais l'acceptation porte sur un
-délai de publication, pas sur une absence de solution.
+n'est plus indéterminé : au 6 septembre 2026 les correctifs de R-P3 **et** de
+R-P7 sont écrits et mergés en amont — les neuf tickets du périmètre le sont
+(voir [09, matrice](09-portail-llng.md#matrice-des-risques-du-portail)). Aucun
+n'est **publié** : la dernière version étiquetée est `v0.5.2` et ils sortiront
+en `0.6.0`. Le résiduel ne change donc pas — mais l'acceptation porte désormais
+sur un **délai de publication seul**, sans travail restant en amont, ce qui est
+la version la plus faible de cette acceptation et la plus facile à assumer.
 
 ### 3.1 Zone orange — acceptation requise
 
-| Risque    | Libellé                                      | Résiduel | Justification du maintien                                                                                                                  | Décision      | Approbateur   | Date          |
-| --------- | -------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | ------------- | ------------- |
-| **R1**    | Interception du `user_code` en transmission  | P=2, I=3 | Le canal de transmission du `user_code` à l'opérateur est hors du produit ; l'approbation humaine sur `/device` reste requise (CE01)       | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
-| **R-S6**  | Compromission du bastion                     | P=2, I=3 | Réductible à I=2 par des `client_id` distincts par zone (MT30) — arbitrage entre isolation et nombre de RP à gérer                         | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
-| **R-SA1** | Vol de clé de compte de service              | P=2, I=3 | Une clé de service n'est pas gouvernée par LLNG : sa révocation est un geste d'exploitation sur chaque serveur (MT20)                      | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
-| **R-P3**  | Corruption de la KRL, indisponibilité flotte | P=2, I=3 | Le correctif est **amont** (écriture atomique de la KRL) : mergé, non publié ; CE18 durcit le contrôle côté client sans supprimer la cause | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
-| **R-P7**  | Concurrence sur le magasin de sessions       | P=2, I=3 | Défaut **systémique** amont (ni verrou ni comparaison-et-échange) : sept courses identifiées, correctifs partiels en revue, aucun publié   | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
+| Risque    | Libellé                                      | Résiduel | Justification du maintien                                                                                                                                    | Décision      | Approbateur   | Date          |
+| --------- | -------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | ------------- | ------------- |
+| **R1**    | Interception du `user_code` en transmission  | P=2, I=3 | Le canal de transmission du `user_code` à l'opérateur est hors du produit ; l'approbation humaine sur `/device` reste requise (CE01)                         | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
+| **R-S6**  | Compromission du bastion                     | P=2, I=3 | Réductible à I=2 par des `client_id` distincts par zone (MT30) — arbitrage entre isolation et nombre de RP à gérer                                           | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
+| **R-SA1** | Vol de clé de compte de service              | P=2, I=3 | Une clé de service n'est pas gouvernée par LLNG : sa révocation est un geste d'exploitation sur chaque serveur (MT20)                                        | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
+| **R-P3**  | Corruption de la KRL, indisponibilité flotte | P=2, I=3 | Le correctif est **amont** (écriture atomique de la KRL) : mergé, non publié ; CE18 durcit le contrôle côté client sans supprimer la cause                   | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
+| **R-P7**  | Concurrence sur le magasin de sessions       | P=2, I=3 | Défaut **systémique** amont (ni verrou ni comparaison-et-échange) : sept courses identifiées, correctifs partiels mergés (`#87`, `#88`, `#95`), aucun publié | `À COMPLÉTER` | `À COMPLÉTER` | `À COMPLÉTER` |
 
 ### 3.2 Zone jaune — pour information
 
