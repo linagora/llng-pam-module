@@ -18,6 +18,11 @@ jobs:
       contents: read
 
     strategy:
+      # A ctest failure on one leg must not cancel the other: a cancelled step
+      # never runs `if: failure()`, so the sibling's LastTest.log would be
+      # dropped — and for a timing-sensitive flake (#244) a second sample from
+      # a different runner is the most useful evidence there is.
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
 
@@ -39,7 +44,7 @@ jobs:
           jq
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_LIBSODIUM=ON
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_LIBSODIUM=ON -DINSTALL_DESKTOP=ON
 
     - name: Build
       run: cmake --build build --parallel
@@ -48,6 +53,18 @@ jobs:
       run: |
         cd build
         ctest --output-on-failure
+
+    # ctest writes the failing test's own stdout to LastTest.log. Keep it:
+    # re-running a failed job replaces the workflow log, and with it the only
+    # record of which sub-test failed and on which assertion (#244).
+    - name: Upload ctest logs on failure
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-${{ matrix.os }}-${{ github.run_attempt }}
+        path: build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
 
     - name: Check PAM module symbols
       run: |
@@ -95,6 +112,7 @@ jobs:
         cmake -B build \
           -DCMAKE_BUILD_TYPE=Debug \
           -DUSE_LIBSODIUM=ON \
+          -DINSTALL_DESKTOP=ON \
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
 
     - name: Build
@@ -106,6 +124,15 @@ jobs:
       run: |
         cd build
         ctest --output-on-failure
+
+    - name: Upload ctest logs on failure
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-sanitizers-${{ github.run_attempt }}
+        path: build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
 
   package-deb:
     name: Build Debian Package
@@ -155,6 +182,8 @@ jobs:
     container: rockylinux:${{ matrix.version }}
 
     strategy:
+      # Same reason as the build matrix: keep every leg's ctest log (#244).
+      fail-fast: false
       matrix:
         version: [9]
 
@@ -186,6 +215,17 @@ jobs:
           --transform "s,^,open-bastion-${VERSION}/," \
           --exclude='.git' .
         rpmbuild -ba rpm/open-bastion.spec
+
+    # The %check section runs ctest inside the rpmbuild tree, so its
+    # LastTest.log lives there and is lost with the job log on a re-run (#244).
+    - name: Upload ctest logs on failure
+      if: failure() || cancelled()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-rocky${{ matrix.version }}-${{ github.run_attempt }}
+        path: ~/rpmbuild/BUILD/open-bastion-*/redhat-linux-build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
 
     - name: Upload RPM package
       uses: actions/upload-artifact@v7

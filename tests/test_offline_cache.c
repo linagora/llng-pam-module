@@ -569,14 +569,21 @@ static int test_concurrent_failed_attempts(void)
 
     int barrier[2];
     if (pipe(barrier) != 0) {
+        printf("(pipe failed: %s) ", strerror(errno));
         offline_cache_destroy(cache);
         return 0;
     }
 
     int started = 0;
+    int ok = 1;
     for (int i = 0; i < OC_CONC_CHILDREN; i++) {
         pid_t pid = fork();
-        if (pid < 0) break;
+        if (pid < 0) {
+            printf("(fork %d/%d failed: %s) ",
+                   i + 1, OC_CONC_CHILDREN, strerror(errno));
+            ok = 0;
+            break;
+        }
         if (pid == 0) {
             close(barrier[1]);
             /* Block until the parent releases every child at once. */
@@ -587,34 +594,85 @@ static int test_concurrent_failed_attempts(void)
             } while (r < 0 && errno == EINTR);
             close(barrier[0]);
 
-            offline_cache_verify(cache, "concurrent_user", "wrong_pass", NULL);
-            _exit(0);
+            /* The exit status carries the verdict, encoded so the parent can
+             * name it: 0 for the expected wrong-password result, the negated
+             * error code (1..8) for anything else, 127 for the one case that
+             * must never be mistaken for success — a wrong password that
+             * verified.
+             *
+             * This channel does NOT cover the lost-increment mode of #186:
+             * there the write is what is lost (lock_cache_entry() fails and
+             * the read-modify-write runs unlocked, or update_cache_entry()'s
+             * return is discarded at offline_cache.c:1268), while verify()
+             * still returns ERR_PASSWORD, so every child exits 0. That mode
+             * is caught by the exact-N counter assertion below, and shows up
+             * exactly as the bare "(failed_attempts=5 expected=6)" it always
+             * did. What this adds is a name for the *other* failures: a child
+             * that errored out early, or one that was killed. */
+            int cret = offline_cache_verify(cache, "concurrent_user",
+                                            "wrong_pass", NULL);
+            int code;
+            if (cret == OFFLINE_CACHE_ERR_PASSWORD)      code = 0;
+            else if (cret < 0 && cret >= -8)             code = -cret;
+            else                                          code = 127;
+            _exit(code);
         }
         started++;
     }
 
     close(barrier[0]);
     for (int i = 0; i < started; i++) {
-        if (write(barrier[1], "g", 1) != 1) break;
+        if (write(barrier[1], "g", 1) != 1) {
+            printf("(barrier write %d/%d failed: %s) ",
+                   i + 1, started, strerror(errno));
+            ok = 0;
+            break;
+        }
     }
     close(barrier[1]);
 
     for (int i = 0; i < started; i++) {
         int status;
-        wait(&status);
+        if (wait(&status) < 0) {
+            printf("(wait failed: %s) ", strerror(errno));
+            ok = 0;
+            continue;
+        }
+        if (!WIFEXITED(status)) {
+            printf("(child killed by signal %d) ",
+                   WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+            ok = 0;
+        } else if (WEXITSTATUS(status) != 0) {
+            int code = WEXITSTATUS(status);
+            if (code == 127)
+                printf("(a child's verify ACCEPTED the wrong password) ");
+            else
+                printf("(a child's verify returned %s) ",
+                       offline_cache_strerror(-code));
+            ok = 0;
+        }
     }
 
-    int ok = (started == OC_CONC_CHILDREN);
+    if (started != OC_CONC_CHILDREN) {
+        printf("(started=%d expected=%d) ", started, OC_CONC_CHILDREN);
+        ok = 0;
+    }
 
     offline_cache_entry_t entry;
-    if (ok && offline_cache_get_entry(cache, "concurrent_user", &entry) == OFFLINE_CACHE_OK) {
-        if (entry.failed_attempts != OC_CONC_CHILDREN) {
+    int gret = offline_cache_get_entry(cache, "concurrent_user", &entry);
+    if (gret == OFFLINE_CACHE_OK) {
+        /* Against `started`, not OC_CONC_CHILDREN: when a fork failed, the
+         * children that did run each incremented correctly, and comparing to
+         * the full count would print a second, false layer of failure that
+         * reads as a cache-integrity regression on top of the fork error. */
+        if (entry.failed_attempts != started) {
             printf("(failed_attempts=%d expected=%d) ",
-                   entry.failed_attempts, OC_CONC_CHILDREN);
+                   entry.failed_attempts, started);
             ok = 0;
         }
         offline_cache_entry_free(&entry);
     } else {
+        printf("(get_entry failed: %s) ", offline_cache_strerror(gret));
         ok = 0;
     }
 
