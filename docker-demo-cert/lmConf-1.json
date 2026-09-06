@@ -40,14 +40,17 @@
   "locationRules": {
     "auth.example.com": {
       "^/device": "$uid eq 'dwho'",
+      "^/ssh/(admin|certs|revoke)(\\?|/|$)": "$uid eq 'dwho'",
       "default": "accept"
     },
     "localhost": {
       "^/device": "$uid eq 'dwho'",
+      "^/ssh/(admin|certs|revoke)(\\?|/|$)": "$uid eq 'dwho'",
       "default": "accept"
     },
     "sso": {
       "^/device": "$uid eq 'dwho'",
+      "^/ssh/(admin|certs|revoke)(\\?|/|$)": "$uid eq 'dwho'",
       "default": "accept"
     }
   },

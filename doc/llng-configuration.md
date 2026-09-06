@@ -147,6 +147,56 @@ device-authorization tuning, and SSH CA — are listed in a separate reference
 page: **[LemonLDAP::NG Plugin Parameters](llng-plugin-parameters.md)**. The
 defaults are fine for a standard setup.
 
+## Step 3b: Restrict `/device` and the SSH CA admin routes (REQUIRED)
+
+Two sets of portal routes are protected by **`locationRules` on the portal
+vhost** and by nothing else. Neither plugin enforces authorization on them, so a
+portal without these rules lets **any authenticated SSO user** use them.
+
+| Route                                    | Without a rule, any SSO user can…                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| `/device`                                | approve or refuse a pending host enrolment — the "administrator approval" step      |
+| `/ssh/admin`, `/ssh/certs`, `/ssh/revoke` | list every issued certificate, and **revoke anyone's** — an org-wide SSH outage     |
+
+`oidcRPMetaDataOptionsAllowDeviceAuthorization = 1` means "any authenticated
+user may approve"; the value is not a permission in itself. The ssh-ca plugin
+performs no check at all on its admin routes and says so in a source comment.
+
+In the Manager, under **Virtual Hosts → your portal host → Rules**, add:
+
+| Regexp                             | Rule                                     |
+| ---------------------------------- | ---------------------------------------- |
+| `^/device`                         | `$groups =~ /\bob-approvers\b/`          |
+| `^/ssh/(admin\|certs\|revoke)(\?\|/\|$)` | `$groups =~ /\bob-ssh-admins\b/`         |
+
+Or, in `lmConf-<n>.json`:
+
+```json
+"locationRules": {
+  "auth.example.com": {
+    "^/device": "$groups =~ /\\bob-approvers\\b/",
+    "^/ssh/(admin|certs|revoke)(\\?|/|$)": "$groups =~ /\\bob-ssh-admins\\b/",
+    "default": "accept"
+  }
+}
+```
+
+Three details that are easy to get wrong:
+
+- **Do not anchor `/device` with `$`.** `grant()` matches against
+  `REQUEST_URI`, which carries the query string, so `^/device$` would not match
+  `/device?user_code=ABCD-EFGH` and the rule would never fire.
+- **Do not write `^/ssh/revoke` on its own.** It also matches `/ssh/revoked`,
+  the **public KRL** every backend downloads on a timer. Restricting that route
+  breaks revocation propagation fleet-wide. The `(\?|/|$)` group above is what
+  keeps them apart.
+- **Leave the user routes alone.** `/ssh/sign`, `/ssh/mycerts`, `/ssh/myrevoke`
+  and `/ssh` are the ordinary user's own certificate operations, and `/ssh/ca`
+  and `/ssh/revoked` are public by design.
+
+The shipped `docker-demo-cert` and `docker-demo-maxsec` configurations carry
+both rules (scoped to the demo user `dwho`) as a working example.
+
 ## Step 4: Generate and Import the SSH CA Key (optional)
 
 If you're using the SSH CA plugin for key-based authentication, you need to generate a CA key pair and import it into LemonLDAP::NG.

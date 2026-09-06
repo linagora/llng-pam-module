@@ -1456,6 +1456,14 @@ Contrairement à R-S19 (recorder tué) et R-S20 (action différée), ici le reco
 - [ ] `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i` dans sshd_config des backends
 - [ ] `/etc/open-bastion/allowed_bastions` configuré sur les backends (via `ob-backend-setup --allowed-bastions <client_ids>`)
 - [ ] Plugin `ssh-ca` LLNG actif (`sshCaActivation=1`)
+- [ ] **`locationRules` sur `^/ssh/(admin|certs|revoke)(\?|/|$)` déployée** sur le
+      vhost du portail : le plugin `ssh-ca` n'effectue **aucun** contrôle
+      d'autorisation sur ces routes, donc sans règle tout utilisateur SSO
+      authentifié liste tous les certificats émis et **révoque ceux de
+      n'importe qui** (panne SSH à l'échelle de l'organisation).
+      Attention à ne pas écrire `^/ssh/revoke` seul : cela capture aussi
+      `/ssh/revoked`, la KRL **publique** que chaque backend télécharge — la
+      restreindre casserait la propagation des révocations.
 - [ ] Socket Unix `/run/open-bastion/cert.sock` servi par `ob-cert-daemon` systemd socket-activated sur le bastion
 - [ ] Restriction réseau : backends accessibles uniquement depuis le bastion
 - [ ] `pamAccessBastionGroups` configuré côté LLNG (groupes autorisés à voucher, défaut : bastion)
