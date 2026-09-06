@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/pam/bastion-token` — it signed a JWT even when the user lookup had failed —
   and replaces its `probe: true` self-identification mode with `POST
   /pam/whoami`, which returns the same portal-assigned device id under the same
-  `bastion_id` field. The command falls back to the legacy probe when, and only
-  when, a portal answers 404, so it works against 0.5.x and 0.6.0 alike and can
-  be deployed before the portal is upgraded. The value is unchanged across the
+  `bastion_id` field. The command falls back to the legacy probe when
+  `/pam/whoami` answers 404, or answers 200 with no identity in it — which is
+  the usual shape of its absence, see below — so it works against 0.5.x and
+  0.6.0 alike and can be deployed before the portal is upgraded. The value is unchanged across the
   upgrade: `allowed_bastions` files need no rewriting and no bastion needs
   re-enrolling.
 
@@ -55,120 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revoke anyone's certificate" into "nobody can revoke anything" at the moment
   the portal restarts), and why `pamAccessRequestSigningMode = required` must
   not be turned on yet (#247).
-
-### Fixed
-
-- **`ob-bastion-id` no longer prints its exit code as part of the error.**
-  `die()` logged `$*`, which joins the message with the exit code passed as the
-  second argument, so every call that set one ended its message with a stray
-  digit — `this portal implements neither /pam/whoami nor the legacy
-  /pam/bastion-token probe: <!DOCTYPE html>… 2`. Pre-existing, but this release
-  adds two more such call sites and redefines what 2 and 3 mean.
-
-### Security
-
-- **The portal `locationRules` that guard `/device` and the SSH CA admin routes
-  are now shipped and documented (#195).** Where the authorization for these
-  routes lives depends on the plugin version, and the two regimes fail in
-  opposite directions, so the guide states both:
-
-  - **Plugins ≤ `v0.5.2`** (every released version): the ssh-ca plugin performs
-    no authorization on `/ssh/admin`, `/ssh/certs` and `/ssh/revoke`. The vhost
-    rule is the only control, and without it any SSO account can list every
-    issued certificate and revoke anyone's — an org-wide SSH outage.
-  - **Plugins ≥ `0.6.0`**: `sshCaAdminRule` is the plugin's own control and it
-    is fail-closed. Unset, the three routes answer 403 to everyone, including
-    the users `locationRules` would let through — so a portal configured with
-    the vhost rule alone loses its admin UI on upgrade, incident handling
-    included. Both `docker-demo-cert` and `docker-demo-maxsec` now set
-    `sshCaAdminRule` alongside the vhost rules, so the demos keep working across
-    the version boundary.
-
-  `/device` is documented as the two layers it actually has:
-  `oidcRPMetaDataOptionsAllowDeviceAuthorization` is a `boolOrExpr` evaluated on
-  the approval **decision** per relying party — `= 1` is an activation flag, not
-  a permission, but any other value is compiled and evaluated against the
-  session — while `locationRules` on `^/device` gates the **page** for every RP
-  at once. The guide previously mentioned only the vhost layer, which is the
-  weaker of the two.
-
-  The two traps the guide calls out are real, but the mechanism given for each
-  was wrong and is corrected here. `^/device$` does **not** fail to fire: the
-  approval form posts to `PORTAL_URL/device` with `user_code` and `action` in
-  the body, so `REQUEST_URI` is `/device` and an anchored rule matches the
-  decision. What it misses is the page (`/device?user_code=...`) and a crafted
-  `POST /device?user_code=…&action=approve`. And restricting `/ssh/revoked` does
-  **not** break fleet-wide revocation propagation: backends fetch the KRL with
-  an anonymous `curl`, and a request with no session never reaches `grant()` —
-  it is served by the plugin's unauthenticated route. The real cost is a 403 on
-  a KRL fetch made with a session, by an administrator in a browser. The
-  `(\?|/|$)` guard is right either way.
-
-  `tests/test_ob_llng_location_rules.sh` pins all of it. The `/device` check now
-  compiles the rule and runs the page, decision and query-string-POST URIs
-  through it, replacing a textual heuristic that both skipped an anchored form
-  hidden inside an alternation and rejected a safe `^/device(\?.*)?$`. The
-  route-separation check gained `/ssh/adminfoo`, `/ssh/certsx` and
-  `/ssh/revoketoo`, so weakening one alternative cannot pass on the strength of
-  the others. A new check requires `sshCaAdminRule` wherever `sshCaActivation`
-  is on. And the drift check covers all four copies of the normative content —
-  the guide, both EBIOS documents and this file — instead of the guide alone.
-
-  The group names in the examples (`ob-approvers`, `ob-ssh-admins`) exist
-  nowhere in the shipped configuration: the guide now says to substitute your
-  own and to check they appear in the session, because a rule naming a group
-  nobody holds returns 403 for everyone and looks exactly like a rule that
-  works. The `lmConf-<n>.json` snippet is shown as a complete object to be
-  merged into the existing `locationRules`, since a second top-level
-  `locationRules` silently replaces the first. And the Manager table warns to
-  copy from the rendered page: pasted from the raw Markdown, the escaped `\|`
-  becomes a literal pipe in the compiled regexp, the key matches nothing,
-  `grant()` falls through to `default: accept`, and the admin routes stay open
-  with no error anywhere.
-
-- **Certificate-mode sshd PAM stacks now refuse password authentication
-  (#180).** The `auth` path of the stacks written for the certificate/SSH-key
-  modes consisted of a single `auth required pam_permit.so`, so
-  `pam_authenticate()` returned success unconditionally. The certificate path
-  never calls `pam_authenticate()` (sshd only runs `pam_acct_mgmt()` for a
-  pubkey/certificate login), but sshd _does_ call it for password and
-  keyboard-interactive authentication: on a host where those are still enabled
-  — which is what `apt install open-bastion` leaves behind, since the postinst
-  writes the PAM stack but never touches `sshd_config` — any password
-  authenticated any account the `account` phase approved.
-
-  Every generated `/etc/pam.d/sshd` for those modes (Debian postinst `mode-c`,
-  `ob-bastion-setup`, `ob-backend-setup`, the `docker-demo-cert` and
-  `docker-demo-maxsec` images) and every stack documented for copy-paste now
-  has a single `auth required pam_deny.so`: an explicit, unconditional refusal
-  that returns `PAM_AUTH_ERR`. Certificate logins are unaffected. Setting
-  `PasswordAuthentication no` / `KbdInteractiveAuthentication no` in
-  `sshd_config` — written by both setup scripts, but _not_ by the package
-  postinst — is still recommended so sshd never prompts at all.
-
-  The `mode-c` `/etc/pam.d/sudo` stack keeps permitting, because `mode-c` is
-  the "SSH keys, sudo without a password" scenario. It now uses the canonical
-  fail-closed permit — `auth [success=1 default=ignore] pam_permit.so`, then
-  `auth required pam_deny.so`, then `auth required pam_permit.so` — which
-  succeeds on the intended path but refuses if `pam_permit` is missing or
-  errors. The trailing `pam_permit` is required: without it the jump lands past
-  the end of the stack with no positive result recorded and PAM returns
-  `PAM_PERM_DENIED`, which would have broken sudo outright.
-
-  `tests/test_ob_pam_runtime.sh` (new) now calls `pam_authenticate()` on each
-  generated stack and asserts the verdict, instead of only checking the text.
-
-  **Upgrading:** the postinst only rewrites `/etc/pam.d/sshd` and
-  `/etc/pam.d/sudo` when the `open-bastion/pam-mode` debconf answer is not
-  `none`. The recommended install path (`apt install` then `ob-bastion-setup` /
-  `ob-backend-setup`) leaves it at `none`, so `apt upgrade` will _not_ replace
-  the stack those scripts wrote. On such a host, re-run `ob-bastion-setup` or
-  `ob-backend-setup` (they back the old files up first), or edit
-  `/etc/pam.d/sshd` by hand and replace `auth required pam_permit.so` with
-  `auth required pam_deny.so`. Check with
-  `grep '^auth' /etc/pam.d/sshd`.
-
-### Added
+- **`tests/test_ob_bastion_id.sh`.** Replays `ob-bastion-id` against a mock
+  portal in every shape it has to survive: `/pam/whoami` answering with an
+  identity, the legacy probe answering an id, the legacy probe answering a JWT,
+  LemonLDAP::NG's catch-all HTML on one endpoint or both, a 403, a 404 on both,
+  and a JWT whose payload is not decodable. The migration itself had no
+  coverage at all — the docker integration test only reaches whichever path the
+  published demo image happens to take, which today is the legacy fallback,
+  and the day that image moves to 0.6.0 the fallback loses its only exercise
+  too.
 
 - **`--enable-sudo-fresh-otp` on `ob-bastion-setup` and `ob-backend-setup`
   (#178).** `sudo` keeps its own credential cache (`timestamp_timeout`, 15
@@ -297,6 +193,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (P, I) and `99-risk-reduce.md` used a score, with listings that did not match
   either. There is now one definition (score = likelihood × severity) in
   workshop 1, and the checker fails if a zone listing does not follow from it.
+
+### Fixed
+
+- **Three defects in `ob-bastion-id`'s own error paths.**
+
+  `die()` logged `$*`, which joins the message with the exit code passed as its
+  second argument, so every call that set one ended its message with a stray
+  digit — `…/pam/bastion-token probe: <!DOCTYPE html>… 2`. Pre-existing, but
+  this release adds call sites that pass a code and redefines what 2 and 3
+  mean.
+
+  A portal answering 200 on both endpoints without an identity exited **2**
+  ("the request failed or was refused") where the contract says **3** ("the
+  portal answered, but with no identity in it"). Nothing failed or was refused
+  there — both endpoints answered 200. Its three sibling errors already used 3.
+
+  A JWT whose payload is not base64url killed the script at the assignment,
+  under `set -e` with `pipefail`, before its own `die` could run: the caller got
+  rc=1 and no message, and the man page described a diagnostic that could not
+  happen.
+
+### Security
+
+- **The portal `locationRules` that guard `/device` and the SSH CA admin routes
+  are now shipped and documented (#195).** Where the authorization for these
+  routes lives depends on the plugin version, and the two regimes fail in
+  opposite directions, so the guide states both:
+
+  - **Plugins ≤ `v0.5.2`** (every released version): the ssh-ca plugin performs
+    no authorization on `/ssh/admin`, `/ssh/certs` and `/ssh/revoke`. The vhost
+    rule is the only control, and without it any SSO account can list every
+    issued certificate and revoke anyone's — an org-wide SSH outage.
+  - **Plugins ≥ `0.6.0`**: `sshCaAdminRule` is the plugin's own control and it
+    is fail-closed. Unset, the three routes answer 403 to everyone, including
+    the users `locationRules` would let through — so a portal configured with
+    the vhost rule alone loses its admin UI on upgrade, incident handling
+    included. Both `docker-demo-cert` and `docker-demo-maxsec` now set
+    `sshCaAdminRule` alongside the vhost rules, so the demos keep working across
+    the version boundary.
+
+  `/device` is documented as the two layers it actually has:
+  `oidcRPMetaDataOptionsAllowDeviceAuthorization` is a `boolOrExpr` evaluated on
+  the approval **decision** per relying party — `= 1` is an activation flag, not
+  a permission, but any other value is compiled and evaluated against the
+  session — while `locationRules` on `^/device` gates the **page** for every RP
+  at once. The guide previously mentioned only the vhost layer, which is the
+  weaker of the two.
+
+  The two traps the guide calls out are real, but the mechanism given for each
+  was wrong and is corrected here. `^/device$` does **not** fail to fire: the
+  approval form posts to `PORTAL_URL/device` with `user_code` and `action` in
+  the body, so `REQUEST_URI` is `/device` and an anchored rule matches the
+  decision. What it misses is the page (`/device?user_code=...`) and a crafted
+  `POST /device?user_code=…&action=approve`. And restricting `/ssh/revoked` does
+  **not** break fleet-wide revocation propagation: backends fetch the KRL with
+  an anonymous `curl`, and a request with no session never reaches `grant()` —
+  it is served by the plugin's unauthenticated route. The real cost is a 403 on
+  a KRL fetch made with a session, by an administrator in a browser. The
+  `(\?|/|$)` guard is right either way.
+
+  `tests/test_ob_llng_location_rules.sh` pins all of it. The `/device` check now
+  compiles the rule and runs the page, decision and query-string-POST URIs
+  through it, replacing a textual heuristic that both skipped an anchored form
+  hidden inside an alternation and rejected a safe `^/device(\?.*)?$`. The
+  route-separation check gained `/ssh/adminfoo`, `/ssh/certsx` and
+  `/ssh/revoketoo`, so weakening one alternative cannot pass on the strength of
+  the others. A new check requires `sshCaAdminRule` wherever `sshCaActivation`
+  is on. And the drift check covers all four copies of the normative content —
+  the guide, both EBIOS documents and this file — instead of the guide alone.
+
+  The group names in the examples (`ob-approvers`, `ob-ssh-admins`) exist
+  nowhere in the shipped configuration: the guide now says to substitute your
+  own and to check they appear in the session, because a rule naming a group
+  nobody holds returns 403 for everyone and looks exactly like a rule that
+  works. The `lmConf-<n>.json` snippet is shown as a complete object to be
+  merged into the existing `locationRules`, since a second top-level
+  `locationRules` silently replaces the first. And the Manager table warns to
+  copy from the rendered page: pasted from the raw Markdown, the escaped `\|`
+  becomes a literal pipe in the compiled regexp, the key matches nothing,
+  `grant()` falls through to `default: accept`, and the admin routes stay open
+  with no error anywhere.
+
+- **Certificate-mode sshd PAM stacks now refuse password authentication
+  (#180).** The `auth` path of the stacks written for the certificate/SSH-key
+  modes consisted of a single `auth required pam_permit.so`, so
+  `pam_authenticate()` returned success unconditionally. The certificate path
+  never calls `pam_authenticate()` (sshd only runs `pam_acct_mgmt()` for a
+  pubkey/certificate login), but sshd _does_ call it for password and
+  keyboard-interactive authentication: on a host where those are still enabled
+  — which is what `apt install open-bastion` leaves behind, since the postinst
+  writes the PAM stack but never touches `sshd_config` — any password
+  authenticated any account the `account` phase approved.
+
+  Every generated `/etc/pam.d/sshd` for those modes (Debian postinst `mode-c`,
+  `ob-bastion-setup`, `ob-backend-setup`, the `docker-demo-cert` and
+  `docker-demo-maxsec` images) and every stack documented for copy-paste now
+  has a single `auth required pam_deny.so`: an explicit, unconditional refusal
+  that returns `PAM_AUTH_ERR`. Certificate logins are unaffected. Setting
+  `PasswordAuthentication no` / `KbdInteractiveAuthentication no` in
+  `sshd_config` — written by both setup scripts, but _not_ by the package
+  postinst — is still recommended so sshd never prompts at all.
+
+  The `mode-c` `/etc/pam.d/sudo` stack keeps permitting, because `mode-c` is
+  the "SSH keys, sudo without a password" scenario. It now uses the canonical
+  fail-closed permit — `auth [success=1 default=ignore] pam_permit.so`, then
+  `auth required pam_deny.so`, then `auth required pam_permit.so` — which
+  succeeds on the intended path but refuses if `pam_permit` is missing or
+  errors. The trailing `pam_permit` is required: without it the jump lands past
+  the end of the stack with no positive result recorded and PAM returns
+  `PAM_PERM_DENIED`, which would have broken sudo outright.
+
+  `tests/test_ob_pam_runtime.sh` (new) now calls `pam_authenticate()` on each
+  generated stack and asserts the verdict, instead of only checking the text.
+
+  **Upgrading:** the postinst only rewrites `/etc/pam.d/sshd` and
+  `/etc/pam.d/sudo` when the `open-bastion/pam-mode` debconf answer is not
+  `none`. The recommended install path (`apt install` then `ob-bastion-setup` /
+  `ob-backend-setup`) leaves it at `none`, so `apt upgrade` will _not_ replace
+  the stack those scripts wrote. On such a host, re-run `ob-bastion-setup` or
+  `ob-backend-setup` (they back the old files up first), or edit
+  `/etc/pam.d/sshd` by hand and replace `auth required pam_permit.so` with
+  `auth required pam_deny.so`. Check with
+  `grep '^auth' /etc/pam.d/sshd`.
 
 ### Changed
 

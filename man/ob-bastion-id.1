@@ -14,11 +14,16 @@ assigned by LLNG at enrolment.
 .PP
 Portals running plugins older than 0.6.0 have no
 .IR /pam/whoami .
-Against those, and only when they answer 404, the command falls back to the
-legacy
+Against those the command falls back to the legacy
 .I /pam/bastion-token
-probe that upstream removed in 0.6.0. The value is the same either way. Any
-other status \(em notably 403 \(em is reported, not worked around.
+probe that upstream removed in 0.6.0. The value is the same either way.
+.PP
+The fallback triggers on two shapes, because absence rarely looks like a 404:
+a 404, and a 200 carrying no identity. LemonLDAP::NG has a catch\-all that
+serves the portal's own HTML login page, with a 200, for any
+.I /pam/*
+path no plugin registered, so that second shape is the usual one. Any other
+status, 403 in particular, is reported rather than worked around.
 .PP
 The
 .I bastion_id

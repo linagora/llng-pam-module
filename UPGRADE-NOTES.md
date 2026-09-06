@@ -32,7 +32,9 @@ matches a hop certificate's key-id and refuses every hop with an error that
 points at certificates rather than at the allowlist.
 
 `ob-bastion-id` 0.3.0 asks `POST /pam/whoami` and falls back to the legacy
-probe when the portal answers 404, so it works against 0.5.x and 0.6.0 alike.
+probe when that answers 404 — or answers 200 with no identity in it, which is
+what LemonLDAP::NG's catch-all actually does for an unregistered `/pam/*` path
+— so it works against 0.5.x and 0.6.0 alike.
 Deploy it everywhere **before** upgrading the portal and the order stops
 mattering.
 
@@ -57,8 +59,11 @@ start failing about fifteen minutes into a session with `reason:
 voucher_expired`, instead of silently running unbound for half a day.
 
 This is a **visible outage where there used to be a silent weakening**, and it
-is the intended behaviour. Check the spool is being written before upgrading —
-see [doc/security/99-risk-reduce.md](doc/security/99-risk-reduce.md).
+is the intended behaviour. Check the spool is being written before upgrading:
+the mechanism and the file layout are in
+[doc/pam-modes.md](doc/pam-modes.md) (§ the fingerprint spool), and the
+security rationale in
+[doc/security/02-ssh-connection.md](doc/security/02-ssh-connection.md).
 
 ### 3. Do not set `pamAccessRequestSigningMode = required`
 

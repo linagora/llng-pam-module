@@ -273,8 +273,16 @@ main() {
 
     # user/target_host are harmless placeholders: probe mode returns the id
     # directly and skips the per-user _pamSeen recency gate that would
-    # otherwise reject a synthetic probe user. Older portals answer a probe by
-    # minting a placeholder JWT instead, which is why the JWT path survives.
+    # otherwise reject a synthetic probe user.
+    #
+    # The JWT path below is a legacy of the original script, not a live
+    # population. Upstream only ever minted a JWT for this call up to plugin
+    # v0.1.16; v0.1.17 added the _pamSeen gate, so those versions answer a
+    # synthetic probe user 403 rather than a JWT; probe mode landed before
+    # v0.3.2 and has returned the id as JSON ever since. Keep it -- it costs
+    # nothing and a very old portal is exactly the case this fallback exists
+    # for -- but do not extend it, and do not delete it believing it covers
+    # anything current.
     local payload
     payload=$(jq -n \
         --arg user "ob-bastion-id-probe" \
@@ -303,12 +311,18 @@ main() {
     # Neither endpoint answered with an identity. Most often both are simply
     # absent and the catch-all served the portal page twice, which is what a
     # deployment missing the pam-access plugin looks like from here.
-    [ -n "$jwt" ] || die "this portal implements neither /pam/whoami nor the legacy /pam/bastion-token probe: $BODY" 2
+    # Exit 3, not 2: both endpoints answered 200, they just carried no
+    # identity. 2 is for a request that failed or was refused.
+    [ -n "$jwt" ] || die "this portal implements neither /pam/whoami nor the legacy /pam/bastion-token probe: $BODY" 3
 
     # JWT is header.payload.signature -- decode the middle segment.
     local b64payload claims
     b64payload="${jwt#*.}"; b64payload="${b64payload%.*}"
-    claims=$(base64url_decode "$b64payload")
+    # `|| claims=""` for the same reason as `jwt=""` above: base64url_decode
+    # ends in a pipe, so under `set -e` with `pipefail` a payload base64 cannot
+    # read kills the script at the assignment and the die below never runs --
+    # the caller got rc=1 and no message at all.
+    claims=$(base64url_decode "$b64payload") || claims=""
     [ -n "$claims" ] || die "Failed to base64url-decode JWT payload" 3
 
     emit_id "$claims" '.bastion_id // .sub // empty' \
