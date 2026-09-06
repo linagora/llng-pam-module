@@ -1174,12 +1174,10 @@ R5 (usurpation du serveur LLNG) restent en impact 4 ; avec des `client_id`
 distincts par zone, seul R5 y reste — c'est le point unique de défaillance
 irréductible, le seul que la segmentation ne borne pas.
 
-**Légende :**
-
-- Zone verte (P≤1, I≤2) : Risque acceptable
-- Zone jaune (P≤2, I≤3) : Risque à surveiller
-- Zone orange (P≤2, I=4 ou P=3, I=3) : Risque à traiter
-- Zone rouge (P≥3, I≥3) : Risque critique
+**Légende :** les échelles de vraisemblance et de gravité, et les zones de
+risque (score = Vraisemblance × Gravité), sont définies une fois pour toute
+l'étude en
+[atelier 1, §1.4 à §1.5.1](04-atelier1-cadrage-socle.md#14-échelle-de-gravité).
 
 ---
 

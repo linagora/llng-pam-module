@@ -191,7 +191,7 @@ The full, theme-organized index is in **[doc/README.md](doc/README.md)**. Highli
 - **Offline & resilience** — [Offline mode](doc/offline-mode.md) · [Cache administration](doc/offline-cache-admin.md)
 - **Security & hardening** — [Security features](doc/security.md) · [Hardening](doc/hardening.md) · [CrowdSec](doc/crowdsec.md)
 - **Reference** — [Canonical names & paths](doc/reference-paths.md) · [Configuration](doc/configuration.md) · [Troubleshooting](doc/troubleshooting.md) · [Desktop SSO](doc/desktop-sso.md) _(experimental/alpha)_ · [Competitors](doc/competitors.md)
-- **Security analysis (EBIOS)** — [threat model & risk study](doc/security/00-architecture.md)
+- **Security analysis (EBIOS RM)** — [full risk study](doc/security/README.md) _(French)_ · [conditions of use before deploying](doc/security/08-dossier-homologation.md#2-conditions-demploi)
 
 ## Troubleshooting
 

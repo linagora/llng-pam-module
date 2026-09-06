@@ -26,6 +26,7 @@ DOC = Path(__file__).resolve().parent.parent / "doc" / "security"
 ENROLLMENT = DOC / "01-enrollment.md"
 SSH = DOC / "02-ssh-connection.md"
 CONSOLIDATED = DOC / "99-risk-reduce.md"
+WORKSHOP1 = DOC / "04-atelier1-cadrage-socle.md"
 
 RISK_ID = r"R-?S?A?\d+"
 HEADING = re.compile(rf"^#{{3,4}}\s+({RISK_ID})\s*[-–—]\s", re.M)
@@ -187,6 +188,54 @@ def main():
             line = text[:m.start()].count("\n") + 1
             errors.append(f"99-risk-reduce heading (line {line}): {rid} says P={p}, I={i} "
                           f"but its sheet says P={want[0]}, I={want[1]}")
+
+    # Atelier 1 attaches every risk sheet to exactly one feared event. That table
+    # is the bridge between the workshops and the sheets: if a sheet is added and
+    # not attached, the study silently stops covering it.
+    if WORKSHOP1.exists():
+        w1 = WORKSHOP1.read_text(encoding="utf-8")
+        attached = {}
+        for m in re.finditer(r"^\|\s*(ER[0-9]+)\s*\|([^|]*)\|", w1, re.M):
+            er = m.group(1)
+            for rid in re.findall(rf"\b{RISK_ID}\b", m.group(2)):
+                if rid in attached:
+                    errors.append(f"04-atelier1: {rid} is attached to both "
+                                  f"{attached[rid]} and {er}")
+                attached[rid] = er
+        if not attached:
+            errors.append("04-atelier1: no feared-event/risk-sheet mapping found")
+        else:
+            for rid in sorted(all_residual):
+                if rid not in attached:
+                    errors.append(f"04-atelier1: {rid} has a risk sheet but is attached "
+                                  f"to no feared event")
+            for rid in sorted(attached):
+                if rid not in all_residual:
+                    errors.append(f"04-atelier1: {rid} is attached to {attached[rid]} "
+                                  f"but has no risk sheet")
+
+    # The zone listing in 99-risk-reduce.md must follow from the same scores.
+    # It used to list R-S6 and R-SA1 as "jaune" while stating score = P x I,
+    # which puts them at 6.
+    zones = {"rouge": (9, 99), "orange": (6, 8), "jaune": (4, 5), "verte": (0, 3)}
+    computed = {z: set() for z in zones}
+    for rid, (p, i) in all_residual.items():
+        score = p * i
+        for z, (lo, hi) in zones.items():
+            if lo <= score <= hi:
+                computed[z].add(rid)
+    text = CONSOLIDATED.read_text(encoding="utf-8")
+    for z in ("rouge", "orange", "jaune"):
+        m = re.search(rf"^- \*\*{z.capitalize()}\*\* \(score[^)]*\)\s*:(.*)$", text, re.M)
+        if not m:
+            errors.append(f"99-risk-reduce: no '{z}' zone listing found")
+            continue
+        listed = set(re.findall(rf"\b{RISK_ID}\b", m.group(1)))
+        if listed != computed[z]:
+            missing = sorted(computed[z] - listed)
+            extra = sorted(listed - computed[z])
+            errors.append(f"99-risk-reduce zone {z}: "
+                          f"missing {missing or '-'}, unexpected {extra or '-'}")
 
     if errors:
         print(f"{len(errors)} matrix/sheet disagreement(s):\n")

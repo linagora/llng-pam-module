@@ -78,3 +78,7 @@ bv/
 /pam_*.debian.tar.*
 /pam_*.dsc
 /pam-[0-9]*/
+
+# Python bytecode from the EBIOS consistency checker
+__pycache__/
+*.pyc
