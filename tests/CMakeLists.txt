@@ -31,15 +31,6 @@ target_include_directories(test_audit_log PRIVATE
 target_link_libraries(test_audit_log pthread ${JSON_C_LIBRARIES} ${OPENSSL_LIBRARIES})
 add_test(NAME test_audit_log COMMAND test_audit_log)
 
-# Test secret store
-add_executable(test_secret_store test_secret_store.c ../src/secret_store.c)
-target_include_directories(test_secret_store PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${OPENSSL_INCLUDE_DIRS}
-)
-target_link_libraries(test_secret_store ${OPENSSL_LIBRARIES})
-add_test(NAME test_secret_store COMMAND test_secret_store)
-
 # Test NSS module helper functions
 add_executable(test_nss_openbastion test_nss_openbastion.c)
 target_include_directories(test_nss_openbastion PRIVATE ${CMAKE_SOURCE_DIR}/include)

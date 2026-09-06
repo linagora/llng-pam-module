@@ -455,9 +455,17 @@ Pour la surveillance de sécurité en temps réel :
 
 ### Gestion des Secrets
 
-| Paramètre           | Défaut | Description                   |
-| ------------------- | ------ | ----------------------------- |
-| `secrets_encrypted` | true   | Chiffrer les secrets au repos |
+Les secrets d'`openbastion.conf` — `client_secret`, `notify_secret`,
+`crowdsec_password` — ne sont **pas** chiffrés au repos. Leur seule protection
+est la permission du fichier : le module refuse de lire `openbastion.conf` s'il
+n'est pas un fichier régulier appartenant à root et interdit au groupe comme aux
+autres (`0600`). La mesure complémentaire est de ne pas écrire le secret sur
+l'hôte (`client_secret_mode: prompt` dans un bundle `ob-builder`, ou valeur
+détenue par `ansible-vault`).
+
+Le paramètre `secrets_encrypted` documenté ici jusqu'à la 0.6.2 n'avait aucun
+effet : il alimentait un module `secret_store` dépourvu d'appelant. Les deux ont
+été supprimés.
 
 ### Permissions des Fichiers
 

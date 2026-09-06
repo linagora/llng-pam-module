@@ -37,7 +37,6 @@ set(PAM_MODULE_SOURCES
     src/token_manager.c
     src/jwt_utils.c
     src/notify.c
-    src/secret_store.c
     src/auth_cache.c
     src/cache_key.c
     src/crowdsec.c

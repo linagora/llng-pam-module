@@ -115,6 +115,32 @@ COMPONENT` line and interpolated verbatim into the generated installer, which
 
 ### Removed
 
+- **`secret_store`, the last dead cryptographic module (#225).** Same shape as
+  the token cache above: `src/secret_store.c` was compiled into the PAM module
+  and every entry point — `secret_store_init`, `_get`, `_put`, `_delete`,
+  `_rotate_key` — was reachable only from its own unit test. Nothing in the
+  authentication path ever stored or read a secret through it. Removed with its
+  header, its test, and the `secrets_encrypted` setting (plus the
+  `no_encrypt_secrets` module argument) that was parsed, defaulted and validated
+  without ever reaching a store.
+
+  This removes AES-GCM code and file writes under `/etc/open-bastion` from a
+  root PAM module that had no use for them, and it settles two findings that
+  landed inside the dead module: #187 (missing size check in `secret_store_get`,
+  fixed in #222 and now moot) and #184 (machine-id-only key derivation, no
+  key-file support — the honest fix being to stop claiming the capability).
+
+  `SECURITY.md` and `doc/security/00-architecture.md` advertised
+  `secrets_encrypted = true`, "encrypt secrets at rest". They now state the
+  truth: secrets in `openbastion.conf` are protected by file permissions only
+  (root-owned `0600`, enforced by the module, which refuses to read the file
+  otherwise), and the way to avoid a secret on disk is not to write one
+  (`client_secret_mode: prompt`, or `ansible-vault`).
+
+  **Not** removed: `src/cache_key.c` and `src/offline_cache.c`, which do the
+  machine-id/key-file derivation for the offline credential cache and are
+  genuinely used.
+
 - **Dead token cache, `client_context`, and kernel-keyring settings.** Three
   things `SECURITY.md` documented as active features were never wired into the
   PAM chain, so this is a documentation-accuracy fix as much as a cleanup:
