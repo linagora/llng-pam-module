@@ -50,7 +50,10 @@ BODY=""
 
 log_info()  { [ "$QUIET" = "true" ] || printf '[INFO] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
-die() { log_error "$*"; exit "${2:-1}"; }
+# $1 is the message, $2 the optional exit code. Only $1 is printed: `$*`
+# joined the code onto the message, so every call that passed one ended
+# its error with a stray digit ("... probe: <html>... 2").
+die() { log_error "$1"; exit "${2:-1}"; }
 
 usage() {
     cat <<EOF

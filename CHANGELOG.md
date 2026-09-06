@@ -50,8 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`UPGRADE-NOTES.md`.** What has to be done, or checked, before deploying a
   release — starting with the `lemonldap-ng-plugins` 0.6.0 upgrade: the
   `/pam/whoami` migration above, unbound vouchers dropping from 12 h to 15 min,
-  the exact-match PAM scope, and why `pamAccessRequestSigningMode = required`
-  must not be turned on yet (#247).
+  the exact-match PAM scope, setting `sshCaAdminRule` (unset, the three SSH CA
+  admin routes answer 403 to everyone from 0.6.0, which turns "anyone can
+  revoke anyone's certificate" into "nobody can revoke anything" at the moment
+  the portal restarts), and why `pamAccessRequestSigningMode = required` must
+  not be turned on yet (#247).
+
+### Fixed
+
+- **`ob-bastion-id` no longer prints its exit code as part of the error.**
+  `die()` logged `$*`, which joins the message with the exit code passed as the
+  second argument, so every call that set one ended its message with a stray
+  digit — `this portal implements neither /pam/whoami nor the legacy
+  /pam/bastion-token probe: <!DOCTYPE html>… 2`. Pre-existing, but this release
+  adds two more such call sites and redefines what 2 and 3 mean.
 
 ### Security
 

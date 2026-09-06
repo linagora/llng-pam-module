@@ -80,11 +80,27 @@ The plugin now matches the PAM scope exactly (`pam`, `pam:server`). A relying
 party granted something like `pam-prod` or `x-pam` in `oidcRPMetaDataScopeRules`
 loses `/pam/*` on upgrade. Check the RP the bastions and backends enrol against.
 
-### 5. Optional, and worth doing
+### 5. Set `sshCaAdminRule`, or nobody administers the SSH CA
 
-- **`sshCaAdminRule`** must be set or `/ssh/admin`, `/ssh/certs` and
-  `/ssh/revoke` answer 403. See
-  [doc/llng-configuration.md](doc/llng-configuration.md).
+Plugin 0.6.0 makes `/ssh/admin`, `/ssh/certs` and `/ssh/revoke` fail closed on
+`sshCaAdminRule`. Unset, all three answer **403 to everyone** — including the
+users your portal's `locationRules` admits, and including whoever is handling
+an incident. On 0.5.x the same routes had no check at all, so an upgrade that
+leaves this unset swaps "anyone can revoke anyone's certificate" for "nobody
+can revoke anything", silently, at the moment you restart the portal.
+
+Set it alongside the vhost rule rather than instead of it:
+
+```json
+"sshCaAdminRule": "$groups =~ /\\bob-ssh-admins\\b/"
+```
+
+The plugin logs a warning at init when the rule is unset. See
+[Step 3b of doc/llng-configuration.md](doc/llng-configuration.md) for the two
+regimes and the vhost rule that goes with it.
+
+### 6. Optional, and worth doing
+
 - **`pamAccessAllowedRps`** binds `/pam/*` to your PAM relying parties and
   stops an ordinary enrolled host from declaring itself a bastion. Empty by
   default. Turning it on requires the bastions to have a `client_id` the
