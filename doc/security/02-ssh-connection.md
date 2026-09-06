@@ -1358,23 +1358,23 @@ Contrairement à R-S19 (recorder tué) et R-S20 (action différée), ici le reco
 
 ### Avant remédiation
 
-| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable                                          | 3 - Probable | 4 - Très probable |
-| ------------------------ | ------------------- | --------------------------------------------------------- | ------------ | ----------------- |
-| **4 - Critique**         | R-S4                | R-S6 R-S17                                                |              |                   |
-| **3 - Important**        |                     | R-S3 R-S7 R-S11 R-S15 R-S13 R-S14 R-S18 R-S20 R-S21 R-S23 | R-S19        |                   |
-| **2 - Limité**           | R-S16 R-S22         | R-S9 R-S10 R-S12                                          | R-S8         |                   |
-| **1 - Négligeable**      |                     |                                                           |              |                   |
+| Impact ↓ / Probabilité → | 1 - Très improbable    | 2 - Peu probable                              | 3 - Probable | 4 - Très probable |
+| ------------------------ | ---------------------- | --------------------------------------------- | ------------ | ----------------- |
+| **4 - Critique**         | R-S4 R-S24 R-SA2       | R-S6 R-S17 R-SA1                              |              |                   |
+| **3 - Important**        | R-S5 R-S23 R-S25       | R-S3 R-S7 R-S13 R-S14 R-S15 R-S18 R-S20 R-S21 | R-S11 R-S19  |                   |
+| **2 - Limité**           | R-S9 R-S10 R-S16 R-S22 | R-S12                                         | R-S8         |                   |
+| **1 - Négligeable**      |                        |                                               |              |                   |
 
-> **Note :** R-S1 (brute-force mot de passe) et R-S2 (vol de clé SSH simple) sont **éliminés** par la cible de sécurité maximale (`AuthorizedKeysFile none` + certificat CA requis). R-S5 démarre à P=1 grâce aux certificats CA obligatoires. R-S18 est ici à P=2 (et non P=3) car le wrapper setgid empêche l'accès aux recordings d'autres utilisateurs, ce qui réduit la probabilité d'un effacement « croisé » même avant remédiation complète ; l'effacement de ses propres recordings reste possible (cf. fiche R-S18).
+> **Note :** R-S1 (brute-force mot de passe) et R-S2 (vol de clé SSH simple) sont **éliminés** par la cible de sécurité maximale (`AuthorizedKeysFile none` + certificat CA requis) : ils n'ont pas de fiche et n'apparaissent donc dans aucune matrice. R-S5 démarre à P=1 grâce aux certificats CA obligatoires. R-S18 est ici à P=2 (et non P=3) car le wrapper setgid empêche l'accès aux recordings d'autres utilisateurs, ce qui réduit la probabilité d'un effacement « croisé » même avant remédiation complète ; l'effacement de ses propres recordings reste possible (cf. fiche R-S18). Les risques de comptes de service (R-SA1, R-SA2, R-S24, R-S25) sont analysés en section 6 et figurent ici avec les autres, pour que la matrice couvre l'intégralité de l'étude.
 
 ### Après remédiation complète
 
-| Impact ↓ / Probabilité → | 1 - Très improbable                                                   | 2 - Peu probable | 3 - Probable | 4 - Très probable |
-| ------------------------ | --------------------------------------------------------------------- | ---------------- | ------------ | ----------------- |
-| **4 - Critique**         | R-S4                                                                  |                  |              |                   |
-| **3 - Important**        | R-S5 R-S23                                                            | R-S6             |              |                   |
-| **2 - Limité**           | R-S7 R-S9 R-S10 R-S11 R-S12 R-S13 R-S14 R-S16 R-S17 R-S20 R-S21 R-S22 | R-S8             |              |                   |
-| **1 - Négligeable**      | R-S15 R-S19                                                           | R-S3 R-S18       |              |                   |
+| Impact ↓ / Probabilité → | 1 - Très improbable                                             | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+| ------------------------ | --------------------------------------------------------------- | ---------------- | ------------ | ----------------- |
+| **4 - Critique**         | R-S4 R-SA2                                                      |                  |              |                   |
+| **3 - Important**        | R-S5 R-S11 R-S23 R-S24                                          | R-S6 R-SA1       |              |                   |
+| **2 - Limité**           | R-S7 R-S9 R-S12 R-S13 R-S14 R-S16 R-S17 R-S20 R-S21 R-S22 R-S25 | R-S8             |              |                   |
+| **1 - Négligeable**      | R-S10 R-S15 R-S18 R-S19                                         | R-S3             |              |                   |
 
 **Profil de risque de la cible maximale :**
 
@@ -1385,12 +1385,20 @@ Contrairement à R-S19 (recorder tué) et R-S20 (action différée), ici le reco
 - R-S15 (KRL stale) : **I=1** grâce au binding fingerprint sur `/pam/authorize` : une révocation LLNG interdit l'ouverture d'une session SSH à chaque nouvelle connexion, indépendamment de la fraîcheur de la KRL
 - R-S16 (escalade sudo) : **contrôlé par réauthentification SSO obligatoire**
 - R-S17 (lockout) : **contrôlé par compte de service secours** + procédure console documentée
-- R-S18 (effacement sessions) : **traçable mais reste effaçable techniquement** ; l'imputation tient grâce à syslog `auth.info` (start/end de session) et, si PR2 (#113) est activée, grâce au watch auditd `-w /var/lib/open-bastion/sessions/` qui trace l'événement d'effacement lui-même
+- R-S18 (effacement sessions) : **P=1, I=1 depuis la PR #157** — les enregistrements sont écrits par le puits root `ob-record-sink` dans une arborescence `root:ob-sessions 0750`, à laquelle l'utilisateur enregistré n'a aucun accès : l'effacement n'est plus techniquement possible pour lui, seul root du bastion le peut. L'imputation tient en outre grâce à syslog `auth.info` (start/end de session) et, si PR2 (#113) est activée, au watch auditd `-w /var/lib/open-bastion/sessions/`
 - R-S19 (évasion containment via `setsid`/`nohup`), R-S20 (action différée via `at`/`cron`/`systemd-run`), R-S21 (action non capturée par le pty) : **nouvellement identifiés** et mitigés par PR1 (#112) et PR2 (#113) sous condition d'activation opt-in
 - **Conditions d'activation :** ces nouveaux risques (R-S19, R-S20, R-S21) ne sont mitigés à leur niveau résiduel **que si** le hardening (PR1) ET la trace auditd (PR2) sont activés via `ob-bastion-setup --enable-hardening --enable-audit-trace`. En l'absence d'activation, ces risques restent en zone jaune (P=3, I=3 pour R-S19 ; P=2, I=3 pour R-S20 et R-S21). Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 - R-S22 (certificat vouché réutilisé vers un autre backend) : **P=1, I=2** — `target=` non vérifié par `ob-ssh-principals`, mais `source-address` impose le contrôle du bastion et l'allowlist par backend cloisonne les zones (piste : vérifier `target=` contre le FQDN local)
 - R-S23 (backend en mode hérité, `allowed_bastions` absent) : **P=1, I=3** — `ob-backend-setup` écrit toujours le fichier et `ob-ssh-principals` est fail-closed si illisible ; le risque résiduel ne concerne qu'un backend jamais configuré par le setup (piste : postinst écrivant un fichier vide par défaut)
-- Seuls risques résiduels significatifs en zone jaune (PR1 et PR2 activées) : R-S4 (CA compromise) et R-S6 (bastion compromis)
+- R-S24 (sudo de compte de service hors token SSO) : **P=1, I=3** — le droit vient de `service-accounts.conf` seul, sans appel LLNG ; `sudo_nopasswd = false` reste la configuration recommandée (l'empreinte de la clé y est revérifiée à chaque `sudo`)
+- R-S25 (hop de compte de service via ProxyJump) : **P=1, I=2** — non enregistré par le `ForceCommand` (canal `direct-tcpip`) ; à traiter par `AllowTcpForwarding no` ou par un accès direct aux cibles
+- Risques résiduels en zone jaune (PR1 et PR2 activées) : R-S4 et R-SA2 (P=1, I=4), R-SA1 (P=2, I=3), R-S6 (P=2, I=3), R-S8 (P=2, I=2)
+
+> **Comment lire ces matrices.** Chaque case reprend le score écrit dans la fiche
+> du risque, sans réévaluation locale : une case et une fiche ne peuvent pas
+> diverger. `tests/ebios_matrix_check.py` le vérifie mécaniquement sur les cinq
+> matrices de l'étude et échoue si l'une d'elles s'écarte de ses fiches, ou si un
+> risque analysé n'y figure pas.
 
 ---
 
@@ -1657,6 +1665,70 @@ sequenceDiagram
 | --------------- | :------------: |
 | **Probabilité** |       1        |
 | **Impact**      |       4        |
+
+#### R-S24 - Sudo de compte de service hors token SSO
+
+|                 | Score |
+| --------------- | :---: |
+| **Probabilité** |   1   |
+| **Impact**      |   4   |
+
+**Description :** Le droit sudo d'un compte de service provient **uniquement** de `service-accounts.conf` (`sudo_allowed` / `sudo_nopasswd`) : `pam_openbastion` l'accorde localement et renvoie un succès **sans aucun appel LLNG**, **y compris en Mode E** où un humain doit présenter un token LLNG frais. Une clé de service avec `sudo_allowed` est donc un privilège local permanent qui échappe à la porte sudo gouvernée par le SSO.
+
+**Vecteurs d'attaque :**
+
+- Vol de la clé privée d'un compte de service disposant de `sudo_allowed`
+- Réutilisation d'une clé d'automatisation exposée dans un dépôt, un artefact CI ou une sauvegarde
+- Prestataire ou outil sorti du périmètre sans retrait de sa clé du fichier
+
+**Facteurs atténuants structurels :**
+
+- Le fichier est local à chaque serveur : la portée d'une clé est bornée aux serveurs qui la déclarent
+- `service-accounts.conf` est root:root 0600, refusé s'il est un lien symbolique (`O_NOFOLLOW`)
+- PAM n'autorise que la **tentative** : `sudoers` décide encore _quelles_ commandes
+- Avec `sudo_nopasswd = false`, l'empreinte de la clé SSH est revérifiée à chaque `sudo` (voir #194) — le compte doit prouver la clé qui a ouvert la session
+
+**Remédiation :**
+
+1. **Minimiser** : n'accorder `sudo_allowed` qu'aux comptes qui en ont réellement besoin ; préférer `sudo_nopasswd = false` et des règles `sudoers` restreintes à des commandes précises
+2. **Inventaire et rotation** : traiter chaque clé de service comme un secret de longue durée (coffre-fort, rotation périodique, révocation à la sortie d'un prestataire)
+3. **Audit dédié** : journaliser et alerter sur l'usage sudo des comptes de service (clé auditd `-k` distincte), puisqu'il n'apparaît pas dans les logs d'autorisation LLNG
+
+|                 |                                Score résiduel                                 |
+| --------------- | :---------------------------------------------------------------------------: |
+| **Probabilité** |        1 (clé en coffre-fort, périmètre borné aux serveurs déclarants)        |
+| **Impact**      | 3 (root sur les serveurs déclarant la clé, sans passer par la porte sudo SSO) |
+
+#### R-S25 - Hop de compte de service via ProxyJump non enregistré
+
+|                 | Score |
+| --------------- | :---: |
+| **Probabilité** |   1   |
+| **Impact**      |   3   |
+
+**Description :** Un compte de service ne peut pas utiliser `ob-ssh` (pas de voucher SSO), mais un `ssh -J bastion compte@backend` natif fonctionne s'il est configuré des deux côtés et que le bastion autorise le forwarding TCP. Or le `ForceCommand` (enregistreur de session) **ne couvre pas le canal `direct-tcpip`** : un tel hop **n'est pas enregistré** sur le bastion.
+
+**Vecteurs d'attaque :**
+
+- Compte de service déclaré à la fois sur le bastion et sur un backend, avec `AllowTcpForwarding` laissé à `yes`
+- Usage légitime détourné : l'automatisation traverse le bastion sans laisser de trace de session
+
+**Facteurs atténuants structurels :**
+
+- Le hop reste tracé par `sshd` des deux côtés (ouverture de canal, authentification par clé, empreinte)
+- Les logs d'audit du backend (auditd, `journald`) s'appliquent normalement à la session résultante
+- La clé doit être déclarée **explicitement** sur les deux hôtes
+
+**Remédiation :**
+
+1. **Accès direct** : faire pointer les comptes de service directement sur les serveurs cibles plutôt que de les relayer par le bastion — la traçabilité repose alors sur les logs de la cible
+2. **`AllowTcpForwarding no` sur le bastion** : interdire explicitement le canal `direct-tcpip` quand aucun usage légitime ne l'exige
+3. **Inventaire** : recenser les comptes de service déclarés simultanément sur bastion et backend, qui sont les seuls à pouvoir emprunter ce chemin
+
+|                 |                              Score résiduel                               |
+| --------------- | :-----------------------------------------------------------------------: |
+| **Probabilité** |   1 (nécessite la clé déclarée des deux côtés et le forwarding ouvert)    |
+| **Impact**      | 2 (pas d'enregistrement de session ; sshd et l'audit de la cible tracent) |
 
 ### Recommandations
 

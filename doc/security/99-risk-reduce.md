@@ -2,22 +2,31 @@
 
 ## Matrice des Risques Résiduels (Mode E)
 
-| Impact ↓ / Probabilité → | 1 - Très improbable                                                | 2 - Peu probable | 3 - Probable | 4 - Très probable |
-| ------------------------ | ------------------------------------------------------------------ | ---------------- | ------------ | ----------------- |
-| **4 - Critique**         | R-S4, R-SA2                                                        | R-SA1            |              |                   |
-| **3 - Important**        | R5, R-S5, R-S11, R-S23, R-S24                                      | R-S6             |              |                   |
-| **2 - Limité**           | R-S7, R-S9, R-S10, R-S12, R-S16, R-S17, R-S20, R-S21, R-S22, R-S25 | R6, R-S8         |              |                   |
-| **1 - Négligeable**      | R0, R13, R-S14, R-S15, R-S19                                       | R-S3, R-S18      |              |                   |
+| Impact ↓ / Probabilité → | 1 - Très improbable                                                                    | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+| ------------------------ | -------------------------------------------------------------------------------------- | ---------------- | ------------ | ----------------- |
+| **4 - Critique**         | R4, R5, R-S4, R-SA2                                                                    |                  |              |                   |
+| **3 - Important**        | R2, R3, R7, R8, R11, R12, R-S5, R-S11, R-S23, R-S24                                    | R1, R-S6, R-SA1  |              |                   |
+| **2 - Limité**           | R0, R9, R10, R-S7, R-S9, R-S12, R-S13, R-S14, R-S16, R-S17, R-S20, R-S21, R-S22, R-S25 | R-S8             |              |                   |
+| **1 - Négligeable**      | R13, R-S10, R-S15, R-S18, R-S19                                                        | R6, R-S3         |              |                   |
 
-> **Note :** R-S3 et R-S15 ont été descendus d'un cran sur l'axe Impact grâce au **binding fingerprint SSH** introduit dans le plugin PamAccess ≥ 0.1.16. La vérification est effectuée côté LLNG à la fois sur `/pam/authorize` (à chaque ouverture de session SSH, phase PAM `account`) et sur `/pam/verify` (à chaque utilisation d'un token PAM pour sudo ou ré-authentification) : tant que l'empreinte de la clef SSH n'est pas présente, active et non révoquée dans la session persistante LLNG, ni la session SSH ni l'escalade sudo ne sont autorisées, indépendamment de la fraîcheur de la KRL locale. Voir [02-ssh-connection.md](02-ssh-connection.md) pour les détails.
+> **Note :** R-S3 et R-S15 sont descendus de I=3 à I=1 grâce au **binding fingerprint SSH** introduit dans le plugin PamAccess ≥ 0.1.16. La vérification est effectuée côté LLNG à la fois sur `/pam/authorize` (à chaque ouverture de session SSH, phase PAM `account`) et sur `/pam/verify` (à chaque utilisation d'un token PAM pour sudo ou ré-authentification) : tant que l'empreinte de la clef SSH n'est pas présente, active et non révoquée dans la session persistante LLNG, ni la session SSH ni l'escalade sudo ne sont autorisées, indépendamment de la fraîcheur de la KRL locale. Voir [02-ssh-connection.md](02-ssh-connection.md) pour les détails.
 
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
-**Zones de risque :**
+> **Comment lire cette matrice.** Elle consolide les **39 fiches de risque** des
+> deux études (R0–R13 pour l'enrôlement, R-S3–R-S25 et R-SA1/R-SA2 pour la
+> connexion SSH et les comptes de service) et reprend, case par case, le score
+> résiduel **écrit dans chaque fiche** — aucune case n'est une évaluation
+> autonome. `tests/ebios_matrix_check.py` le vérifie mécaniquement et échoue si
+> une case s'écarte de sa fiche, si un risque analysé manque, ou si un
+> identifiant y figure sans fiche. R-S1 et R-S2 sont éliminés par la cible Mode E
+> et n'ont donc pas de fiche.
 
-- Score ≥ 6 : Zone rouge (aucun risque dans cette zone en Mode E avec PR1 + PR2 activées)
-- Score 4-5 : Zone jaune → R-S4, R-SA2 (P=1, I=4), R-SA1 (P=2, I=4/3), R6, R-S8 (P=2, I=2), R-S6 (P=2, I=3)
-- Score ≤ 3 : Zone verte → Tous les autres risques (incluant R-S18 à P=2, I=1 = score 2)
+**Zones de risque** (score = P × I) **:**
+
+- Score ≥ 6 : Zone rouge → aucun risque dans cette zone en Mode E avec PR1 + PR2 activées
+- Score 4-5 : Zone jaune → R4, R5, R-S4, R-SA2 (P=1, I=4) ; R-S6 et R-SA1 (P=2, I=3) ; R-S8 (P=2, I=2)
+- Score ≤ 3 : Zone verte → tous les autres, y compris R6 et R-S3 (P=2, I=1 = score 2)
 
 **Risques éliminés ou ramenés en zone verte par le Mode E (avec PR1 et PR2 activées) :**
 
@@ -44,7 +53,7 @@ Pistes pour réduire la probabilité à quasi-zéro :
 2. mTLS : Le serveur PAM présente aussi un certificat client
 3. DANE (DNSSEC + TLSA) : Validation du certificat via DNS signé
 
-### R6 _(P=2, I=2)_ - Expiration device_code
+### R6 _(P=2, I=1)_ - Expiration device_code
 
 Pistes pour réduire P à 1 :
 
@@ -88,7 +97,13 @@ Pistes pour réduire P à 1 :
 Pistes pour réduire I à 2 :
 
 1. **Segmentation par zone (credentials d'enrôlement)** : par défaut un `client_id` = un **projet** (toutes ses machines partagent l'allowlist, et les groupes PAM séparent les _politiques_ à l'intérieur du projet — pas les _credentials_). Pour réduire le rayon d'impact d'un bastion compromis, **découper en plusieurs `client_id`** (un par zone de sécurité), chacun avec un `allowed_bastions` distinct par backend → un bastion compromis ne peut voucher que pour les backends de sa zone. C'est un arbitrage : plus d'isolation des credentials, mais autant de RP OIDC à gérer.
-2. **Session recording** : Enregistrement de toutes les sessions transitant par le bastion
+2. ~~**Session recording**~~ — **LIVRÉ et actif par défaut.** L'enregistrement de
+   toutes les sessions transitant par le bastion n'est pas une piste : il est
+   activé par défaut (`ob-bastion-setup` : « Session recording is a core bastion
+   guarantee and is ON by default »), le désactiver demande un
+   `--disable-session-recorder` explicite, et il est **fail-closed** — si le
+   puits est injoignable, `ob-session-recorder` refuse la session
+   (« Session recording is required but unavailable; access refused »).
 3. **Réduire `pamAccessBastionVoucherTtl`** (défaut 43200 s = 12 h) : borne la durée pendant laquelle un bastion compromis peut continuer à obtenir des certificats pour les utilisateurs récemment vouchés sans nouvelle connexion de leur part. Compromis ergonomie (les admins doivent se reconnecter plus souvent) vs exposition.
 
 ### R-S8 _(P=2, I=2)_ - Session persistante après révocation
@@ -156,7 +171,7 @@ Le timer `ob-heartbeat` rafraîchit l'access_token (TTL 3600 s) toutes les 5 min
 
 ## Pistes d'Amélioration - Spécifiques au Mode E
 
-### R-S15 _(P=1, I=2)_ - KRL non à jour
+### R-S15 _(P=1, I=1)_ - KRL non à jour
 
 Pistes pour réduire P à quasi-zéro :
 
@@ -250,6 +265,7 @@ Avant remédiation, ce risque est en **zone rouge** (P=2, I=4). La remédiation 
 > **Contrepartie en cas de panne LLNG :** le module ne sert jamais d'entrée périmée (elle est supprimée à la lecture) et un échec transitoire renvoie `NSS_STATUS_UNAVAIL` sans repli sur le cache. Le tampon de résolution vaut donc exactement `cache_ttl` (défaut **300 s**, `/etc/open-bastion/nss_openbastion.conf`), là où le cache persistant de `nscd` couvrait plusieurs dizaines de minutes. Augmenter `cache_ttl` (jusqu'à 86400 s) sur les hôtes exposés à ce risque.
 
 > **Trois limites à connaître en régime nominal**, détaillées dans le guide d'administration :
+>
 > 1. **Seul root remplit le cache** (le jeton serveur LLNG est `0600 root:root`) : une entrée qui expire sans qu'un processus root ne résolve l'utilisateur n'est pas renouvelée. Dans une session SSH inactive : `ls -l` en uid numériques, `whoami`/`id` en échec, `ssh`/`scp` sortant refusé (« You don't exist, go away! »). Toute résolution root (nouvelle session, `su`, `sudo`, `cron`) répare immédiatement ; l'authentification et l'autorisation ne sont pas affectées.
 > 2. **Les résultats négatifs ne sont cachés qu'en mémoire, par processus** : le cache fichier n'est peuplé que sur succès, volontairement, car il est alimenté depuis un chemin non authentifié (`sshd` résout le nom avant l'authentification) et l'y autoriser donnerait à un attaquant distant un moyen de remplir `/var/cache/nss_llng` d'inodes. Chaque tentative SSH avec un nom inexistant coûte donc une requête HTTPS `/pam/userinfo`. `nscd` ne couvrait ce cas que partiellement (cache négatif keyé par nom, 20 s). Borner côté connexions (`MaxStartups`, `fail2ban`/CrowdSec).
 > 3. **SELinux `enforcing` (Rocky/RHEL) non validé** : le cache est écrit depuis le domaine du processus appelant (`sshd_t`, `sudo_t`, `crond_t`). Si la politique par défaut le refuse, l'écriture échoue en silence et le cache partagé n'est jamais peuplé — vérifier par `ausearch -m avc` avant déploiement.
@@ -271,7 +287,16 @@ Cette section couvre les nouveaux risques R-S19, R-S20, R-S21 introduits par l'a
 
 Pistes pour aller plus loin :
 
-1. **Démon collecteur de session privilégié** : remplacer le pty recording local par un démon `ob-session-collector` qui reçoit le flux pty via socket Unix (`SO_PEERCRED`) et écrit dans des fichiers root-owned. Détecte la fermeture brutale du recorder via RST socket et marque la session comme `killed_prematurely` côté serveur. Architecture déjà décrite dans le brainstorm initial mais non retenue à ce stade pour éviter d'introduire un nouveau service permanent.
+1. ~~**Démon collecteur de session privilégié**~~ — **LIVRÉ (PR #157)**, voir
+   [R-S18](#r-s18-p1-i1---effacement-des-enregistrements-de-session). Cette piste
+   était listée « non retenue pour éviter d'introduire un nouveau service
+   permanent » : les deux objections sont caduques. Le puits `ob-record-sink` est
+   **activé par socket** (`systemd/ob-record.socket`), donc pas un service
+   permanent, et il écrit des fichiers **root-owned** (`src/ob-record-sink.c`,
+   `openat(..., O_NOFOLLOW, 0640)` dans une arborescence `root:ob-sessions 0750`),
+   l'utilisateur étant dérivé de `SO_PEERCRED`. Reste à faire de cette piste :
+   la détection de fermeture brutale du recorder (`killed_prematurely` côté
+   serveur), qui n'est pas implémentée.
 2. **Mandatory Access Control** : profil AppArmor / SELinux qui interdit `setsid` aux shells utilisateurs (rompre le canal d'évasion à la racine). Coût opérationnel élevé (rédaction et maintenance du profil par distribution) mais blocage fort.
 3. **`KillUserProcesses=yes` rendu obligatoire** : retirer l'opt-in et l'imposer en postinst. Abandonné à cause de la philosophie Debian (pas de modification système globale silencieuse). Pourrait être réintroduit comme paquet `open-bastion-strict` dédié, qui imposerait le hardening sans demande de confirmation.
 
@@ -301,6 +326,11 @@ des dérogations volontaires au contrôle centralisé : utiles pour l'automatisa
 
 ### R-S24 _(P=1, I=3)_ - Sudo de compte de service hors token SSO
 
+> **Fiche de risque :** l'analyse complète de R-S24 (vecteurs, facteurs
+> atténuants, remédiation, score résiduel) est en section 6 de
+> [02-ssh-connection.md](02-ssh-connection.md) ; la section ci-dessous n'est
+> que le volet « pistes » du plan de traitement.
+
 Le droit sudo d'un compte de service provient **uniquement** de
 `service-accounts.conf` (`sudo_allowed` / `sudo_nopasswd`) : `pam_openbastion`
 l'accorde localement et renvoie un succès **sans aucun appel LLNG**, **y compris
@@ -315,12 +345,17 @@ Pistes :
    restreintes à des commandes précises plutôt qu'un sudo total.
 2. **Inventaire et rotation** : traiter chaque clé de service comme un secret de
    longue durée (coffre-fort, rotation périodique, révocation à la sortie d'un
-   prestataire/outil). Recoupe le compte de secours de [R-S17](#r-s17-_p1-i2_---verrouillage-total-lockout).
+   prestataire/outil). Recoupe le compte de secours de [R-S17](#r-s17-p1-i2---verrouillage-total-lockout).
 3. **Audit dédié** : journaliser/alerter sur l'usage sudo des comptes de service
    (auditd `-k` distinct), puisqu'il n'apparaît pas dans les logs d'autorisation
    LLNG.
 
 ### R-S25 _(P=1, I=2)_ - Hop de compte de service via ProxyJump non enregistré
+
+> **Fiche de risque :** l'analyse complète de R-S25 (vecteurs, facteurs
+> atténuants, remédiation, score résiduel) est en section 6 de
+> [02-ssh-connection.md](02-ssh-connection.md) ; la section ci-dessous n'est
+> que le volet « pistes » du plan de traitement.
 
 Un compte de service ne peut pas utiliser `ob-ssh` (pas de voucher SSO), mais un
 `ssh -J bastion compte@backend` natif fonctionne s'il est configuré des deux
