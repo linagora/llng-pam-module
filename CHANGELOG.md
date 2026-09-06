@@ -124,6 +124,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A failing `ctest` now keeps its log, and the concurrency test says why it
+  failed (#244).** `test_offline_cache` failed once in the Rocky 9 RPM job and
+  passed on a re-run of the same commit — but the re-run replaced the workflow
+  log, which was the only record of which sub-test failed and on which
+  assertion, so the flake could not be diagnosed at all. The three jobs that run
+  `ctest` now upload `Testing/Temporary/` as an artifact when the test step
+  fails, so the evidence survives a re-run.
+
+  `test_concurrent_failed_attempts` (the `#186` lockout regression) also had
+  four failure paths that printed nothing: a failed `pipe()` or `fork()`, a
+  short write to the release barrier, and a failed `offline_cache_get_entry()`
+  all returned "FAILED" with no reason. Each now names what went wrong, and each
+  child reports through its exit status whether its `verify()` actually took the
+  wrong-password path, which is the difference between a diagnosable failure and
+  a bare `failed_attempts=5 expected=6`.
+
 - **`ob-builder` artefacts that carry the client secret are no longer
   world-readable, and no longer commit themselves (#203).** With
   `client_secret_mode: embedded` the OIDC client secret is written in clear text

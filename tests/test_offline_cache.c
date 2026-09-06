@@ -569,14 +569,21 @@ static int test_concurrent_failed_attempts(void)
 
     int barrier[2];
     if (pipe(barrier) != 0) {
+        printf("(pipe failed: %s) ", strerror(errno));
         offline_cache_destroy(cache);
         return 0;
     }
 
     int started = 0;
+    int ok = 1;
     for (int i = 0; i < OC_CONC_CHILDREN; i++) {
         pid_t pid = fork();
-        if (pid < 0) break;
+        if (pid < 0) {
+            printf("(fork %d/%d failed: %s) ",
+                   i + 1, OC_CONC_CHILDREN, strerror(errno));
+            ok = 0;
+            break;
+        }
         if (pid == 0) {
             close(barrier[1]);
             /* Block until the parent releases every child at once. */
@@ -587,27 +594,53 @@ static int test_concurrent_failed_attempts(void)
             } while (r < 0 && errno == EINTR);
             close(barrier[0]);
 
-            offline_cache_verify(cache, "concurrent_user", "wrong_pass", NULL);
-            _exit(0);
+            /* The exit status carries the verdict: a child whose verify did
+             * not take the wrong-password path never incremented the counter,
+             * and saying so is the difference between a diagnosable failure
+             * and a bare "failed_attempts=5 expected=6". */
+            int cret = offline_cache_verify(cache, "concurrent_user",
+                                            "wrong_pass", NULL);
+            _exit(cret == OFFLINE_CACHE_ERR_PASSWORD ? 0 : 1);
         }
         started++;
     }
 
     close(barrier[0]);
     for (int i = 0; i < started; i++) {
-        if (write(barrier[1], "g", 1) != 1) break;
+        if (write(barrier[1], "g", 1) != 1) {
+            printf("(barrier write %d/%d failed: %s) ",
+                   i + 1, started, strerror(errno));
+            ok = 0;
+            break;
+        }
     }
     close(barrier[1]);
 
     for (int i = 0; i < started; i++) {
         int status;
-        wait(&status);
+        if (wait(&status) < 0) {
+            printf("(wait failed: %s) ", strerror(errno));
+            ok = 0;
+            continue;
+        }
+        if (!WIFEXITED(status)) {
+            printf("(child killed by signal %d) ",
+                   WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+            ok = 0;
+        } else if (WEXITSTATUS(status) != 0) {
+            printf("(a child's verify did not report a wrong password) ");
+            ok = 0;
+        }
     }
 
-    int ok = (started == OC_CONC_CHILDREN);
+    if (started != OC_CONC_CHILDREN) {
+        printf("(started=%d expected=%d) ", started, OC_CONC_CHILDREN);
+        ok = 0;
+    }
 
     offline_cache_entry_t entry;
-    if (ok && offline_cache_get_entry(cache, "concurrent_user", &entry) == OFFLINE_CACHE_OK) {
+    int gret = offline_cache_get_entry(cache, "concurrent_user", &entry);
+    if (gret == OFFLINE_CACHE_OK) {
         if (entry.failed_attempts != OC_CONC_CHILDREN) {
             printf("(failed_attempts=%d expected=%d) ",
                    entry.failed_attempts, OC_CONC_CHILDREN);
@@ -615,6 +648,7 @@ static int test_concurrent_failed_attempts(void)
         }
         offline_cache_entry_free(&entry);
     } else {
+        printf("(get_entry failed: %s) ", offline_cache_strerror(gret));
         ok = 0;
     }
 

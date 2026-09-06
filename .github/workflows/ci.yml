@@ -49,6 +49,18 @@ jobs:
         cd build
         ctest --output-on-failure
 
+    # ctest writes the failing test's own stdout to LastTest.log. Keep it:
+    # re-running a failed job replaces the workflow log, and with it the only
+    # record of which sub-test failed and on which assertion (#244).
+    - name: Upload ctest logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-${{ matrix.os }}
+        path: build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
+
     - name: Check PAM module symbols
       run: |
         echo "Checking exported PAM symbols..."
@@ -106,6 +118,15 @@ jobs:
       run: |
         cd build
         ctest --output-on-failure
+
+    - name: Upload ctest logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-sanitizers
+        path: build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
 
   package-deb:
     name: Build Debian Package
@@ -186,6 +207,17 @@ jobs:
           --transform "s,^,open-bastion-${VERSION}/," \
           --exclude='.git' .
         rpmbuild -ba rpm/open-bastion.spec
+
+    # The %check section runs ctest inside the rpmbuild tree, so its
+    # LastTest.log lives there and is lost with the job log on a re-run (#244).
+    - name: Upload ctest logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ctest-logs-rocky${{ matrix.version }}
+        path: ~/rpmbuild/BUILD/open-bastion-*/redhat-linux-build/Testing/Temporary/
+        retention-days: 7
+        if-no-files-found: warn
 
     - name: Upload RPM package
       uses: actions/upload-artifact@v7
