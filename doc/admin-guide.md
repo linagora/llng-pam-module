@@ -545,11 +545,15 @@ appearing in `getent passwd`. Note the distinction:
 Two things that do **not** substitute for this buffer, and should not be
 confused with it:
 
-- `offline_cache_ttl` (in `openbastion.conf`) covers PAM *authorization*
-  during an outage. It does nothing if NSS can no longer resolve the user in
-  the first place; the two need to be sized together. Note that the `cache_ttl`
-  discussed here is the one in `nss_openbastion.conf`; `openbastion.conf` has
-  its own unrelated `cache_ttl` for the PAM authorization cache.
+- The PAM *authorization* cache (`auth_cache = true` in `openbastion.conf`)
+  covers authorization during an outage. It does nothing if NSS can no longer
+  resolve the user in the first place; the two need to be sized together. Its
+  lifetime is not a local setting: the portal supplies it in the
+  `/pam/authorize` response from LLNG's `pamAccessOfflineTtl` (the module falls
+  back to 24 h when the portal sends none). `cache_ttl` exists only in
+  `nss_openbastion.conf`; `openbastion.conf` has no such key, and its
+  `offline_cache_ttl` belongs to the desktop-SSO credential cache, not to this
+  one.
 - Service accounts declared in `/etc/open-bastion/service-accounts.conf` are
   resolved locally without contacting LLNG, so they keep working regardless of
   `cache_ttl`. Keeping one break-glass service account is the recommended

@@ -471,7 +471,17 @@ static int url_contains_dangerous_chars(const char *url)
     return 0;
 }
 
-/* Parse a single config line */
+/*
+ * Parse a single config line.
+ *
+ * Returns 0 when the key was recognised and applied, -1 when the value was
+ * rejected, and PARSE_LINE_UNKNOWN_KEY when nothing knows the key. Callers
+ * reading openbastion.conf turn that last case into a warning: unknown keys
+ * are still ignored, but silently ignoring them made every documentation typo
+ * invisible (#229).
+ */
+#define PARSE_LINE_UNKNOWN_KEY 1
+
 static int parse_line(const char *key, const char *value, pam_openbastion_config_t *config)
 {
     /* Basic settings */
@@ -753,7 +763,19 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "allowed_managed_groups") == 0) {
         SET_STRING_FIELD(config->allowed_managed_groups, value, key);
     }
-    /* Unknown keys are silently ignored */
+    /*
+     * Keys that openbastion.conf legitimately carries for other components.
+     * They are not consumed here, but they are not typos either, so they must
+     * not be reported as unknown. ob-heartbeat(8) reads these three.
+     */
+    else if (strcmp(key, "node_role") == 0 ||
+             strcmp(key, "report_sessions") == 0 ||
+             strcmp(key, "max_reported_sessions") == 0) {
+        /* consumed by ob-heartbeat(8) */
+    }
+    else {
+        return PARSE_LINE_UNKNOWN_KEY;
+    }
 
     return 0;
 }
@@ -797,7 +819,16 @@ static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
 
     value = strip_quotes(value);
 
-    parse_line(key, value, config);
+    if (parse_line(key, value, config) == PARSE_LINE_UNKNOWN_KEY) {
+        /*
+         * Never log the value: it may be client_secret. The key alone is
+         * enough to spot a typo such as auth_cache_offline_ttl for
+         * offline_cache_ttl (#229).
+         */
+        syslog(LOG_WARNING,
+               "open-bastion: unknown configuration key '%s' in openbastion.conf, ignored",
+               key);
+    }
 }
 
 int config_load(const char *filename, pam_openbastion_config_t *config)

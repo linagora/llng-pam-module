@@ -554,10 +554,23 @@ Host backend
 
 ```ini
 # /etc/open-bastion/openbastion.conf
-auth_cache = true
-auth_cache_ttl = 3600        # 1 heure de cache
-auth_cache_offline_ttl = 86400  # 24h si LLNG indisponible
+auth_cache = true                              # cache d'autorisation PAM
+auth_cache_dir = /var/cache/open-bastion/auth
 ```
+
+La durée de vie de ce cache n'est **pas** réglable dans `openbastion.conf` : elle
+est fournie par le portail dans la réponse `/pam/authorize`, via le paramètre
+LLNG `pamAccessOfflineTtl` (Manager → plugin PAM Access). Si le portail ne
+renvoie pas de valeur, le module retombe sur 24 h en dur.
+
+```
+# Côté LLNG (Manager) :
+pamAccessOfflineTtl = 86400   # 24h d'autonomie si le portail est indisponible
+```
+
+> **Ne pas confondre :** `offline_cache_ttl` d'`openbastion.conf` ne concerne que
+> le cache de *credentials* du SSO Desktop (LightDM), pas le cache d'autorisation
+> SSH/sudo décrit ici.
 
 **Remédiation infrastructure :**
 
@@ -1063,7 +1076,7 @@ L'enregistrement de session est streamé vers le puits root `ob-record-sink` (so
 **Conditions du lockout :**
 
 1. LLNG indisponible (panne, réseau coupé, maintenance prolongée)
-2. Cache d'autorisation offline expiré (`auth_cache_offline_ttl` dépassé)
+2. Cache d'autorisation offline expiré (TTL `pamAccessOfflineTtl` dépassée)
 3. Certificats SSH des administrateurs expirés ou révoqués (KRL)
 4. Aucun compte de service configuré (`service-accounts.conf` vide ou absent)
 
@@ -1082,7 +1095,7 @@ L'enregistrement de session est streamé vers le puits root `ob-record-sink` (so
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Compte de service de secours** | Le paquet bootstrap `open-bastion-linagora` pré-configure un compte `linagora` dans `service-accounts.conf` avec clé RSA et `sudo_allowed = true`, stockée en coffre-fort                                  |
 | **Accès console via ttyS0**      | Le paquet bootstrap configure `/etc/securetty` avec `ttyS0` pour l'accès root via la console OVH/hors-bande. `PermitRootLogin no` dans sshd bloque l'accès root SSH, la console reste le filet de sécurité |
-| **Cache offline suffisant**      | Configurer `auth_cache_offline_ttl` à une valeur couvrant la durée maximale d'indisponibilité LLNG tolérée                                                                                                 |
+| **Cache offline suffisant**      | Configurer `pamAccessOfflineTtl` (côté LLNG) à une valeur couvrant la durée maximale d'indisponibilité tolérée, et activer `auth_cache = true` sur les hôtes. Sans valeur renvoyée par le portail, le module applique 24 h                                                                                                 |
 
 > **Automatisation bootstrap :** Le paquet `open-bastion-linagora` prend en charge la configuration initiale de `securetty`, du compte de service `linagora` et de `PermitRootLogin no`. Ces éléments n'ont pas besoin d'être configurés manuellement sur les déploiements utilisant ce paquet.
 
@@ -1561,10 +1574,9 @@ Le cache offline est une mesure de résilience en cas d'indisponibilité LLNG. S
 ```ini
 # /etc/open-bastion/openbastion.conf
 
-# Cache d'autorisation
+# Cache d'autorisation (la TTL vient du portail : pamAccessOfflineTtl)
 auth_cache = true
-auth_cache_ttl = 3600           # 1h de cache normal
-auth_cache_offline_ttl = 86400  # 24h si LLNG indisponible
+auth_cache_dir = /var/cache/open-bastion/auth
 
 # Protection contre brute-force du cache
 cache_rate_limit_enabled = true

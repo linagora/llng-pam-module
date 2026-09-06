@@ -448,6 +448,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording" listed under R-S6 as an improvement is on by default and
   fail-closed. Both are marked delivered, with what genuinely remains.
 
+- **An unrecognised key in `openbastion.conf` is now logged instead of silently
+  ignored (#229).** The parser dropped unknown keys without a word, which made
+  every documentation typo invisible: `doc/security/02-ssh-connection.md` told
+  operators to set `auth_cache_offline_ttl` (and `auth_cache_ttl`), neither of
+  which the module has ever parsed, so an operator sizing the offline
+  authorization window for a planned LLNG outage got no error and no effect.
+  Unknown keys are still ignored — no host can be locked out by this — but each
+  one now produces `open-bastion: unknown configuration key '<key>' in
+  openbastion.conf, ignored` in syslog. The key alone is logged, never the
+  value. Keys that `openbastion.conf` carries for `ob-heartbeat(8)`
+  (`node_role`, `report_sessions`, `max_reported_sessions`) are recognised as
+  legitimate and stay silent. PAM module arguments are unaffected.
+
+  The documentation is corrected with it: the PAM authorization cache has **no**
+  local TTL setting — the portal supplies it in the `/pam/authorize` response
+  from LLNG's `pamAccessOfflineTtl`, and the module falls back to 24 h when the
+  portal sends none. `openbastion.conf`'s `offline_cache_ttl` governs the
+  desktop-SSO credential cache only, and `cache_ttl` exists only in
+  `nss_openbastion.conf`.
+
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions
   up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`
