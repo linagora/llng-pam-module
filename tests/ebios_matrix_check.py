@@ -147,8 +147,16 @@ def main():
         errors.append(f"02-ssh-connection.md: only {len(ssh)} scored sheets parsed, expected 23+")
     # Same floor for the portal study, so a parser that silently stops seeing
     # sheets cannot pass the run by comparing an empty set to an empty matrix.
-    if portal and len(portal) < 8:
-        errors.append(f"09-portail-llng.md: only {len(portal)} scored sheets parsed, expected 8+")
+    #
+    # Gated on the file existing, NOT on `portal` being truthy. Keying it on the
+    # parse result made the floor vacuous in precisely the case it was written
+    # for: a parser that returns nothing leaves `portal` falsy, so the floor
+    # never fires AND the slice below drops the portal comparisons -- a third of
+    # the study stops being checked and the run still prints OK and exits 0.
+    if PORTAL.exists() and len(portal) < 8:
+        errors.append(f"09-portail-llng.md: only {len(portal)} scored sheets parsed, "
+                      f"expected 8+ (the file is there, so this is a parser failure, "
+                      f"not an absent study)")
 
     checks = [
         ("01-enrollment avant", ENROLLMENT, "## 3. Matrice des Risques\n\n### Avant remédiation\n",
@@ -164,7 +172,10 @@ def main():
         ("09-portail après", PORTAL, "### Après remédiation\n",
          {k: v["residual"] for k, v in portal.items()}, "residual"),
     ]
-    if not portal:
+    # Drop the portal comparisons only when the study itself is absent. When the
+    # file exists the checks stay in, so a parse that came back empty is caught
+    # by the floor above and by every R-P missing from the matrices below.
+    if not PORTAL.exists():
         checks = checks[:4]
 
     for label, path, heading, expected, kind in checks:

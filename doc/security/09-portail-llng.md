@@ -14,12 +14,12 @@
 
 ## Composants couverts
 
-| Plugin                      | Rôle                                                            | Routes                                                                            |
-| --------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `pam-access`                | Autorisation SSH et `sudo`, vouchers de rebond, cache offline   | `/pam/authorize`, `/pam/verify`, `/pam/bastion-cert`                              |
-| `ssh-ca`                    | Signature des certificats utilisateur, KRL, administration      | `/ssh/sign`, `/ssh/ca`, `/ssh/revoked`, `/ssh/admin`, `/ssh/certs`, `/ssh/revoke` |
-| `oidc-device-authorization` | Flux RFC 8628 d'enrôlement des machines                         | `/device`, `/oauth2/device`                                                       |
-| `oidc-device-organization`  | Identité machine (`_deviceId`), rattachement à une organisation | —                                                                                 |
+| Plugin                      | Rôle                                                            | Routes                                                                                                                                                                                  |
+| --------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pam-access`                | Autorisation SSH et `sudo`, vouchers de rebond, cache offline   | `/pam/authorize`, `/pam/verify`, `/pam/bastion-cert`, `/pam/heartbeat`, `/pam/whoami` (ajouté par la PR amont `#94`), `/pam/bastion-token` (supprimé par la PR amont `#86` — voir R-P6) |
+| `ssh-ca`                    | Signature des certificats utilisateur, KRL, administration      | `/ssh/sign`, `/ssh/ca`, `/ssh/revoked`, `/ssh/admin`, `/ssh/certs`, `/ssh/revoke`                                                                                                       |
+| `oidc-device-authorization` | Flux RFC 8628 d'enrôlement des machines                         | `/device`, `/oauth2/device`                                                                                                                                                             |
+| `oidc-device-organization`  | Identité machine (`_deviceId`), rattachement à une organisation | —                                                                                                                                                                                       |
 
 **Version minimale requise :** `À COMPLÉTER` — à figer dans
 [08-dossier-homologation.md](08-dossier-homologation.md) au moment de la
@@ -166,8 +166,14 @@ ailleurs son intérêt en défense en profondeur.
 | **Probabilité** |   2   |
 | **Impact**      |   4   |
 
-**Description :** Les écritures de la KRL par `ssh-ca` ne sont ni atomiques ni
-verrouillées. Une KRL tronquée mais dont l'en-tête reste valide est servie telle
+**Description :** Les écritures de la KRL par `ssh-ca` sont sérialisées entre
+générateurs — `_updateKrl` prend un `flock(LOCK_EX)` sur `<sshCaKrlPath>.lock`
+autour de tout le lire-modifier-écrire depuis la PR amont `#13` — mais elles ne
+sont **pas atomiques** : `ssh-keygen -u` réécrit le fichier en place. Deux
+chemins échappent en outre à ce verrou dans la version publiée : les **lecteurs**
+(`/ssh/revoked` et le téléchargement côté open-bastion, qui ne prennent aucun
+verrou) et le script cron `sshca-rebuild-krl`, qui réécrit le fichier sans
+passer par le verrou du portail. Une KRL tronquée mais dont l'en-tête reste valide est servie telle
 quelle ; elle franchit le contrôle de plausibilité d'open-bastion
 (`head -c 6 | grep SSHKRL`), est déployée en `RevokedKeys`, et **`sshd` échoue
 alors fermé sur toutes les clés**. Le comportement a été reproduit.
@@ -188,9 +194,11 @@ d'indisponibilité. Recoupe R-S17 (verrouillage total).
 - Le compte de service de secours et l'accès console hors-bande (CE12) restent
   le filet
 
-**Remédiation plugin (amont) :** écriture atomique (fichier temporaire +
-`rename`) et verrou sur la génération de la KRL. `#59` est **corrigée en
-amont**, non publiée à ce jour ; la mesure côté open-bastion ci-dessous reste
+**Remédiation plugin (amont) :** écriture atomique (fichier temporaire dans le
+répertoire cible + `rename()`), verrou partagé pris par les lecteurs, extension
+du verrou existant au cron `sshca-rebuild-krl`, et refus de servir une KRL que
+`ssh-keygen` ne relit pas. `#59` est **corrigée en amont** par la PR `#77`, non
+publiée à ce jour ; la mesure côté open-bastion ci-dessous reste
 donc la seule effective, et garde de toute façon sa valeur (elle couvre aussi
 une KRL corrompue en transit ou au stockage, hors du périmètre du correctif).
 
@@ -306,7 +314,8 @@ substitue pas de contrôle à la `locationRules`, qui reste la mesure.
 synthétique pour porter l'identité de la machine (`_deviceId`). En cas d'échec de
 cette construction, il retourne `PE_OK` : l'hôte obtient alors un jeton dont le
 sujet est l'**administrateur approbateur** et qui ne porte **aucun identifiant de
-device**. Le plugin qui porte ce mécanisme n'a par ailleurs aucun test.
+device**. Le plugin qui porte ce mécanisme n'avait par ailleurs aucun test au
+moment de l'analyse.
 
 **Conséquence :** perte d'imputabilité côté portail — les appels `/pam/*` de cet
 hôte sont attribués à un humain ; le heartbeat et les mécanismes qui s'appuient
@@ -332,10 +341,13 @@ enrôlement et refuser un hôte sans device-id ; surveiller les jetons serveur
 dont le sujet est un compte humain.
 
 **Remédiation plugin (amont) :** échec fermé en cas d'échec de la session
-synthétique, et couverture de tests. `#72` (échec fermé) est **corrigée en
-amont**, non publiée ; `#71` (absence de suite de tests sur le plugin qui porte
-le `_deviceId`) reste **ouverte**, et c'est elle qui maintient la probabilité
-à 2.
+synthétique, et couverture de tests. Les deux sont **corrigées en amont, non
+publiées** : `#72` par la PR `#80`, et `#71` par le commit `2e5e4c4`, arrivé sur
+`main` via la PR `#90` — le plugin porte désormais `t/38-Device-Organization.t`
+(PR `#80`) et `t/39-Device-Organization-Identity.t`. La probabilité résiduelle
+reste à 2 pour la même raison que R-P3 et R-P7, et pour elle seule : **rien
+n'est publié**, et la vérification manuelle d'`ob-bastion-id` après enrôlement
+(CE19) est le seul contrôle dont dispose un exploitant aujourd'hui.
 
 |                 |                              Score résiduel                               |
 | --------------- | :-----------------------------------------------------------------------: |
@@ -351,9 +363,11 @@ le `_deviceId`) reste **ouverte**, et c'est elle qui maintient la probabilité
 | **Probabilité** |   2   |
 | **Impact**      |   3   |
 
-**Description :** Ceci n'est pas un défaut isolé mais un **motif** : sept courses
-lecture-modification-écriture ont été identifiées à travers les deux dépôts, sur
-des magasins qui n'offrent aucune atomicité. `Common::Session->update` réécrit
+**Description :** Ceci n'est pas un défaut isolé mais un **motif** : **neuf**
+courses lecture-modification-écriture ont été identifiées à travers les deux
+dépôts — limiteur de débit, verrouillage du cache offline, consommation d'OTP,
+vouchers, certificats éphémères, `device_code`, statut de device, `_sshCerts`,
+KRL — sur des magasins qui n'offrent aucune atomicité. `Common::Session->update` réécrit
 l'intégralité du blob de session sans comparaison-et-échange, et les backends de
 session utilisent `Lock::Null`. Deux écritures concurrentes sur la même session
 ne se sérialisent pas : la dernière gagne, silencieusement.
@@ -417,10 +431,18 @@ pour toute l'organisation.
 **Remédiation configuration :** limitation de débit au niveau du reverse proxy
 devant le portail ; surveillance de la taille de la KRL et du temps de signature.
 
-**Remédiation plugin (amont) :** limitation de débit sur `/ssh/sign`, purge des
-entrées de KRL expirées. Suivie dans `linagora/lemonldap-ng-plugins#63` ;
-**corrigée en amont**, non publiée à ce jour, par la PR amont `#90` (limitation de débit et
-quota par utilisateur sur `/ssh/sign`).
+**Remédiation plugin (amont) :** borner `/ssh/sign`. Suivie dans
+`linagora/lemonldap-ng-plugins#63` ; **corrigée en amont**, non publiée à ce
+jour, par la PR amont `#90` : `sshCaSignMaxPerHour` (20/h, **429**) et
+`sshCaMaxCertsPerUser` (20, **409**), comptés dans la session de l'utilisateur.
+
+La KRL, elle, n'est **délibérément pas plafonnée** en amont : refuser
+d'enregistrer une révocation parce que le fichier est devenu gros serait un
+fail-open silencieux — le certificat resterait utilisable. Borner les deux
+entrées borne la KRL sans jamais perdre une révocation. Il n'y a donc **aucune
+purge d'entrées expirées à attendre de l'amont**, et la limitation obtenue est
+celle du plugin, pas celle du reverse proxy que suppose CE17 : la remédiation
+configuration ci-dessus reste entièrement à la charge de l'exploitant (MT49).
 
 |                 |                            Score résiduel                            |
 | --------------- | :------------------------------------------------------------------: |
@@ -449,20 +471,50 @@ quota par utilisateur sur `/ssh/sign`).
 | **2 - Limité**           | R-P8                | R-P6             |              |                   |
 | **1 - Négligeable**      |                     |                  |              |                   |
 
-**Ce que cette matrice dit et que les autres ne disaient pas :** quatre des huit
-risques du portail dépendent d'une **configuration** que le produit ne pose pas
-lui-même (R-P1, R-P2, R-P5 et, pour partie, R-P4). Deux restent en zone orange
+**Ce que cette matrice dit et que les autres ne disaient pas :** **cinq** des
+huit risques du portail dépendent d'une **configuration** que le produit ne pose
+pas lui-même (R-P1, R-P2, R-P5, R-P8 et, pour partie, R-P4). Pour R-P8, la
+descente de (2,3) à (1,2) suppose la limitation de débit au reverse proxy et la
+surveillance de la taille de la KRL — CE17 et MT49, toutes deux `À COMPLÉTER` :
+sa zone verte est conditionnelle, exactement comme celle de R-P1 l'est via
+CE03. Deux restent en zone orange
 et sont portés à l'acceptation formelle en
-[08, §3.1](08-dossier-homologation.md#31-zone-orange-acceptation-requise) :
+[08, §3.1](08-dossier-homologation.md#31-zone-orange--acceptation-requise) :
 R-P3 (corruption de la KRL) et R-P7 (concurrence sur le magasin de sessions).
 
 **État des correctifs amont au 6 septembre 2026.** L'analyse a été menée contre
-le code publié ; depuis, l'amont a bougé, et il a fini de bouger. Les **neuf**
-tickets référencés par ces fiches sont **tous corrigés et mergés** dans
-`linagora/lemonldap-ng-plugins` : `#58`, `#59`, `#60`, `#69`, `#72`, `#74`
-l'étaient déjà, et les trois derniers l'ont été le 6 septembre (`#50` → PR
-`#92`, `#54`/`#66`/`#68` → PR `#87` et `#88`, `#63` → PR `#90`). Le tour
-d'audit complet couvre les PR `#76` à `#95`.
+le code publié ; depuis, l'amont a bougé, et il a fini de bouger. Les **quinze**
+tickets référencés par ces fiches sont **tous fermés et mergés** dans
+`linagora/lemonldap-ng-plugins`. L'inventaire est donné en entier, parce que
+c'est lui qui fonde l'acceptation formelle en
+[08, §3.1](08-dossier-homologation.md#31-zone-orange--acceptation-requise) et
+qu'un relecteur doit pouvoir le refaire :
+
+| Ticket amont | Fiche | Fermé par                                |
+| ------------ | ----- | ---------------------------------------- |
+| `#50`        | R-P1  | PR `#92`                                 |
+| `#53`        | R-P7  | PR `#88`                                 |
+| `#54`        | R-P7  | PR `#87`                                 |
+| `#55`        | R-P1  | PR `#86`                                 |
+| `#56`        | R-P1  | PR `#86`                                 |
+| `#58`        | R-P2  | PR `#76`                                 |
+| `#59`        | R-P3  | PR `#77`                                 |
+| `#60`        | R-P4  | PR `#78`                                 |
+| `#63`        | R-P8  | PR `#90`                                 |
+| `#66`        | R-P7  | PR `#87`                                 |
+| `#68`        | R-P7  | PR `#88`                                 |
+| `#69`        | R-P7  | PR `#80`                                 |
+| `#71`        | R-P6  | commit `2e5e4c4`, arrivé via la PR `#90` |
+| `#72`        | R-P6  | PR `#80`                                 |
+| `#74`        | R-P5  | PR `#80`                                 |
+
+Le tour d'audit complet couvre les PR `#76` à `#95`.
+
+> **Sur `#71` en particulier.** La PR `#91` porte bien ce correctif, mais sa
+> branche de base est `fix/sshca-rate-limit`, pas `main` : elle a été mergée
+> dans cette branche intermédiaire, et c'est la PR `#90` qui a amené le commit
+> sur `main`. Elle n'a par ailleurs livré qu'un fichier de tests — `t/38` vient
+> de la PR `#80`.
 
 **Aucun n'est publié** — la dernière version étiquetée est `v0.5.2`, ces
 correctifs sortiront en `0.6.0` — donc **aucun score de cette matrice ne
