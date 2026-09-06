@@ -25,10 +25,11 @@ DOC = Path(__file__).resolve().parent.parent / "doc" / "security"
 
 ENROLLMENT = DOC / "01-enrollment.md"
 SSH = DOC / "02-ssh-connection.md"
+PORTAL = DOC / "09-portail-llng.md"
 CONSOLIDATED = DOC / "99-risk-reduce.md"
 WORKSHOP1 = DOC / "04-atelier1-cadrage-socle.md"
 
-RISK_ID = r"R-?S?A?\d+"
+RISK_ID = r"R-?(?:SA|S|P)?\d+"
 HEADING = re.compile(rf"^#{{3,4}}\s+({RISK_ID})\s*[-–—]\s", re.M)
 ANY_HEADING = re.compile(r"^#{1,6}\s", re.M)
 
@@ -138,11 +139,24 @@ def main():
 
     enrol = sheets(ENROLLMENT)
     ssh = sheets(SSH)
+    portal = sheets(PORTAL) if PORTAL.exists() else {}
 
     if len(enrol) < 14:
         errors.append(f"01-enrollment.md: only {len(enrol)} scored sheets parsed, expected 14")
     if len(ssh) < 23:
         errors.append(f"02-ssh-connection.md: only {len(ssh)} scored sheets parsed, expected 23+")
+    # Same floor for the portal study, so a parser that silently stops seeing
+    # sheets cannot pass the run by comparing an empty set to an empty matrix.
+    #
+    # Gated on the file existing, NOT on `portal` being truthy. Keying it on the
+    # parse result made the floor vacuous in precisely the case it was written
+    # for: a parser that returns nothing leaves `portal` falsy, so the floor
+    # never fires AND the slice below drops the portal comparisons -- a third of
+    # the study stops being checked and the run still prints OK and exits 0.
+    if PORTAL.exists() and len(portal) < 8:
+        errors.append(f"09-portail-llng.md: only {len(portal)} scored sheets parsed, "
+                      f"expected 8+ (the file is there, so this is a parser failure, "
+                      f"not an absent study)")
 
     checks = [
         ("01-enrollment avant", ENROLLMENT, "## 3. Matrice des Risques\n\n### Avant remédiation\n",
@@ -153,7 +167,16 @@ def main():
          {k: v["initial"] for k, v in ssh.items()}, "initial"),
         ("02-ssh après", SSH, "### Après remédiation complète\n",
          {k: v["residual"] for k, v in ssh.items()}, "residual"),
+        ("09-portail avant", PORTAL, "## Matrice des risques du portail\n\n### Avant remédiation\n",
+         {k: v["initial"] for k, v in portal.items()}, "initial"),
+        ("09-portail après", PORTAL, "### Après remédiation\n",
+         {k: v["residual"] for k, v in portal.items()}, "residual"),
     ]
+    # Drop the portal comparisons only when the study itself is absent. When the
+    # file exists the checks stay in, so a parse that came back empty is caught
+    # by the floor above and by every R-P missing from the matrices below.
+    if not PORTAL.exists():
+        checks = checks[:4]
 
     for label, path, heading, expected, kind in checks:
         try:
@@ -167,6 +190,7 @@ def main():
     all_residual = {}
     all_residual.update({k: v["residual"] for k, v in enrol.items()})
     all_residual.update({k: v["residual"] for k, v in ssh.items()})
+    all_residual.update({k: v["residual"] for k, v in portal.items()})
     try:
         placed, _ = matrix(CONSOLIDATED, "## Matrice des Risques Résiduels (Mode E)\n")
     except ValueError:

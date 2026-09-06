@@ -713,7 +713,11 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 | **Probabilité** |   3   |
 | **Impact**      |   3   |
 
-**Description :** Des utilisateurs peuvent générer des clés SSH utilisant des algorithmes cryptographiques faibles ou obsolètes (DSA, RSA-1024), et les faire signer par la CA LLNG. La politique de clés CA peut rejeter ces clés, mais un contrôle côté PAM offre une défense en profondeur.
+**Description :** Des utilisateurs peuvent générer des clés SSH utilisant des algorithmes cryptographiques faibles ou obsolètes (DSA, RSA-1024) et les faire signer par la CA LLNG.
+
+> **Correction d'une hypothèse de cette fiche.** Elle indiquait que « la politique de clés CA peut rejeter ces clés », le contrôle PAM n'étant qu'une défense en profondeur. C'était faux **dans la version publiée du plugin** (`v0.5.2` et antérieures) : `ssh-ca` n'y applique aucune contrainte de type ni de taille, une clé RSA-1024 est signée sans objection. Le contrôle côté PAM n'y est donc pas une défense en profondeur, c'est **le seul contrôle**, et il doit être activé (`ssh_key_policy_enabled = true`), faute de quoi le risque reste à son niveau initial.
+>
+> **L'amont a corrigé ce point** (`linagora/lemonldap-ng-plugins#61`, PR `#78`) : `sshCaMinKeyBits` (2048 par défaut) et `sshCaAllowedKeyTypes` refusent RSA < 2048 bits et `ssh-dss` en 400, et acceptent au passage les clés FIDO2 `sk-*` jusque-là rejetées. Ce correctif est **mergé et non publié** : il sortira en `0.6.0`. À partir de cette version, et **seulement** à partir d'elle, le contrôle PAM redevient ce que la fiche disait au départ — une défense en profondeur. Le score ci-dessous et la mesure restent donc calés sur la version déployable aujourd'hui. Voir [09-portail-llng.md](09-portail-llng.md) pour le périmètre serveur.
 
 **Vecteurs d'attaque :**
 
@@ -723,7 +727,7 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 
 **Conséquence :** Un attaquant pourrait casser une clé faible et obtenir le certificat associé.
 
-**Remédiation embarquée (IMPLÉMENTÉE, sous condition de déploiement) :**
+**Remédiation embarquée (côté client uniquement, sous condition de déploiement) :**
 
 Le module PAM applique une politique de restriction des types **et des tailles**
 de clés SSH :
@@ -1486,7 +1490,7 @@ Contrairement à R-S19 (recorder tué) et R-S20 (action différée), ici le reco
 
 ### Description
 
-La politique de clés SSH (`ssh_key_policy_enabled`) est activée par défaut en cible de sécurité maximale. Elle s'applique aux clés utilisées pour signer les certificats CA.
+La politique de clés SSH (`ssh_key_policy_enabled`) est **désactivée par défaut** — `src/config.c` la pose à `false` et `config/openbastion.conf.example` la livre commentée : sans elle, tous les types et toutes les tailles de clés sont acceptés. Elle doit donc être activée explicitement en cible de sécurité maximale. Ce n'est pas un détail de configuration : tant que les plugins ne sont pas en `0.6.0`, c'est le **seul** contrôle qui refuse une clé faible (voir la correction d'hypothèse de R-S11 ci-dessus), et le score résiduel de R-S11 la suppose active — d'où la condition d'emploi **CE20**. Elle s'applique aux clés utilisées pour signer les certificats CA.
 
 ### Configuration recommandée (haute sécurité)
 

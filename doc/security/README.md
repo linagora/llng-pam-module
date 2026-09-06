@@ -10,26 +10,26 @@ anglais.
 
 ## Plan de lecture
 
-| Atelier                         | Document                                                                                      | Contenu                                                                             |
-| ------------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| —                               | [00-architecture.md](00-architecture.md)                                                      | Cible de sécurité, architecture, mécanismes de défense                              |
-| **1** — Cadrage et socle        | [04-atelier1-cadrage-socle.md](04-atelier1-cadrage-socle.md)                                  | Périmètre, valeurs métier, biens supports, **échelles**, événements redoutés, socle |
-| **2** — Sources de risque       | [05-atelier2-sources-de-risque.md](05-atelier2-sources-de-risque.md)                          | Sources de risque, objectifs visés, couples SR/OV retenus                           |
-| **3** — Scénarios stratégiques  | [06-atelier3-scenarios-strategiques.md](06-atelier3-scenarios-strategiques.md)                | Écosystème, niveaux de menace, sept scénarios stratégiques                          |
-| **4** — Scénarios opérationnels | [01-enrollment.md](01-enrollment.md) · [02-ssh-connection.md](02-ssh-connection.md)           | **39 fiches de risque** avec scores initiaux et résiduels, matrices                 |
-| **5** — Traitement              | [07-plan-de-traitement.md](07-plan-de-traitement.md) · [99-risk-reduce.md](99-risk-reduce.md) | Plan de traitement daté et porté ; matrice résiduelle consolidée et argumentaire    |
-| Décision                        | [08-dossier-homologation.md](08-dossier-homologation.md)                                      | Périmètre d'homologation, **conditions d'emploi**, acceptation des résiduels        |
-| Opérationnel                    | [03-offboarding.md](03-offboarding.md)                                                        | Procédure de révocation des accès administrateurs                                   |
+| Atelier                         | Document                                                                                                                       | Contenu                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| —                               | [00-architecture.md](00-architecture.md)                                                                                       | Cible de sécurité, architecture, mécanismes de défense                                                              |
+| **1** — Cadrage et socle        | [04-atelier1-cadrage-socle.md](04-atelier1-cadrage-socle.md)                                                                   | Périmètre, valeurs métier, biens supports, **échelles**, événements redoutés, socle                                 |
+| **2** — Sources de risque       | [05-atelier2-sources-de-risque.md](05-atelier2-sources-de-risque.md)                                                           | Sources de risque, objectifs visés, couples SR/OV retenus                                                           |
+| **3** — Scénarios stratégiques  | [06-atelier3-scenarios-strategiques.md](06-atelier3-scenarios-strategiques.md)                                                 | Écosystème, niveaux de menace, sept scénarios stratégiques                                                          |
+| **4** — Scénarios opérationnels | [01-enrollment.md](01-enrollment.md) · [02-ssh-connection.md](02-ssh-connection.md) · [09-portail-llng.md](09-portail-llng.md) | **47 fiches de risque** avec scores initiaux et résiduels, matrices — dont huit pour le portail LLNG et ses plugins |
+| **5** — Traitement              | [07-plan-de-traitement.md](07-plan-de-traitement.md) · [99-risk-reduce.md](99-risk-reduce.md)                                  | Plan de traitement daté et porté ; matrice résiduelle consolidée et argumentaire                                    |
+| Décision                        | [08-dossier-homologation.md](08-dossier-homologation.md)                                                                       | Périmètre d'homologation, **conditions d'emploi**, acceptation des résiduels                                        |
+| Opérationnel                    | [03-offboarding.md](03-offboarding.md)                                                                                         | Procédure de révocation des accès administrateurs                                                                   |
 
 ## Deux lectures utiles selon le besoin
 
 - **« Puis-je déployer ce produit ? »** → lire les **conditions d'emploi** en
   [08-dossier-homologation.md, §2](08-dossier-homologation.md#2-conditions-demploi).
-  Ce sont les quinze hypothèses que les scores résiduels supposent vérifiées, et
+  Ce sont les vingt hypothèses que les scores résiduels supposent vérifiées, et
   que le produit n'impose pas toutes.
 - **« Quel est le risque résiduel ? »** → lire la matrice consolidée en tête de
   [99-risk-reduce.md](99-risk-reduce.md), puis les trois risques en zone orange
-  en [08, §3.1](08-dossier-homologation.md#31-zone-orange-acceptation-requise).
+  en [08, §3.1](08-dossier-homologation.md#31-zone-orange--acceptation-requise).
 
 ## Cohérence vérifiée mécaniquement
 

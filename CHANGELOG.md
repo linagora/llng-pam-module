@@ -76,6 +76,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated before installation, as before. `doc/pam-modes.md` and EBIOS risk
   R-S16 now describe the trade-off and name the flag.
 
+- **The LLNG plugin boundary is now inside the risk study (#218).** The study
+  covered the client half only: the four LemonLDAP::NG plugins that carry
+  authorization, certificate issuance and machine identity were a trusted
+  boundary with no risk sheets, no measures and no conditions of use, while the
+  sheets invoked LLNG-side mechanisms (`RequirePKCE`, `RtActivity`, CrowdSec,
+  ssh-ca) as givens.
+
+  `doc/security/09-portail-llng.md` adds **eight workshop-4 risk sheets** for the
+  server half: caller impersonation on `/pam/*` (no RP/audience binding, and
+  `server_group` read from the request body when `pamAccessServerGroups` is
+  empty — the configuration the architecture document recommends), unauthorized
+  certificate revocation (`/ssh/certs` and `/ssh/revoke` have no authorization at
+  all: any SSO account can mass-revoke), KRL corruption taking the whole fleet
+  down, CA private-key exposure, enrolment approval by any authenticated user,
+  loss of machine identity, **concurrency on the shared session store as a
+  systemic pattern** (nine read-modify-write races, not nine bugs), and a cheap
+  authenticated denial of service on `ssh-ca`.
+
+  Five conditions of use (CE16–CE19, plus CE20 recording that
+  `ssh_key_policy_enabled` defaults to `false`) and thirteen treatment measures
+  (MT40–MT52) follow, with the upstream ones marked as such — their owner is the
+  plugin maintainer, not this repository. Two of the new risks land in the orange
+  zone and are carried to the acceptance table: R-P3 and R-P7 both depend on an
+  upstream fix, so accepting them means accepting a delay outside the project's
+  control.
+
+  Each sheet also records where its upstream fix stands, because the answer
+  moved while the study was being written, and the sheets now carry the full
+  inventory rather than a count: all **fifteen** referenced tickets are closed
+  and merged upstream (`#50` → PR `#92`; `#53`/`#68` → PR `#88`; `#54`/`#66` →
+  PR `#87`; `#55`/`#56` → PR `#86`; `#58` → PR `#76`; `#59` → PR `#77`; `#60` →
+  PR `#78`; `#63` → PR `#90`; `#69`/`#72`/`#74` → PR `#80`; `#71` → commit
+  `2e5e4c4`, which reached `main` through PR `#90`). **None is released**, so no
+  residual score changes — the matrices still describe what an operator can
+  deploy today.
+
+  What the acceptance becomes is *not* the same for both orange risks, and the
+  dossier no longer says it is. For R-P3 it is a publication delay: the cause is
+  fixed upstream and `0.6.0` closes it. For R-P7 it is more than that — the
+  merged PRs close the nine identified races but deliver neither real locking nor
+  compare-and-swap, so the pattern, and the orange status, survive `0.6.0`. The
+  upgrade that brings these fixes is itself disruptive — `/pam/bastion-token`
+  disappears (MT51, #248), a voucher bound to no fingerprint drops from 12 h to
+  15 min, and the `ssh-ca` admin routes deny until `sshCaAdminRule` is set — so
+  it needs planning, which is why the sheets say so rather than leaving it to the
+  upgrade night.
+
+  One existing claim is corrected: R-S11 said the CA "can reject" weak keys, with
+  the PAM check as defence in depth. In the **released** plugin (`v0.5.2` and
+  earlier) the CA enforces no key type or size at all — an RSA-1024 key signs
+  without objection — so the PAM policy is not defence in depth there, it is
+  **the only control**, and the sheet no longer reads "IMPLÉMENTÉE". Upstream
+  `#61` (PR `#78`) adds `sshCaMinKeyBits` and `sshCaAllowedKeyTypes`; from
+  `0.6.0`, and only from it, the PAM check goes back to being defence in depth.
+  Because that control is the only one until then, and because it ships
+  **disabled** (`ssh_key_policy_enabled` defaults to `false`), the condition it
+  represents is now recorded as CE20 instead of being asserted in prose — §6 of
+  `02-ssh-connection.md` claimed the opposite.
+
 - **The missing EBIOS RM workshops, treatment plan and homologation dossier
   (#212, #216, #217).** `doc/security/` was presented as an EBIOS RM study while
   containing only workshop 4: the word "EBIOS" appeared nowhere inside it, there

@@ -10,20 +10,21 @@
 
 ## Matrice des Risques Résiduels (Mode E)
 
-| Impact ↓ / Probabilité → | 1 - Très improbable                                                                    | 2 - Peu probable | 3 - Probable | 4 - Très probable |
-| ------------------------ | -------------------------------------------------------------------------------------- | ---------------- | ------------ | ----------------- |
-| **4 - Critique**         | R4, R5, R-S4, R-SA2                                                                    |                  |              |                   |
-| **3 - Important**        | R2, R3, R7, R8, R11, R12, R-S5, R-S11, R-S23, R-S24                                    | R1, R-S6, R-SA1  |              |                   |
-| **2 - Limité**           | R0, R9, R10, R-S7, R-S9, R-S12, R-S13, R-S14, R-S16, R-S17, R-S20, R-S21, R-S22, R-S25 | R-S8             |              |                   |
-| **1 - Négligeable**      | R13, R-S10, R-S15, R-S18, R-S19                                                        | R6, R-S3         |              |                   |
+| Impact ↓ / Probabilité → | 1 - Très improbable                                                                          | 2 - Peu probable            | 3 - Probable | 4 - Très probable |
+| ------------------------ | -------------------------------------------------------------------------------------------- | --------------------------- | ------------ | ----------------- |
+| **4 - Critique**         | R4, R5, R-S4, R-SA2, R-P4                                                                    |                             |              |                   |
+| **3 - Important**        | R2, R3, R7, R8, R11, R12, R-S5, R-S11, R-S23, R-S24, R-P1, R-P2, R-P5                        | R1, R-S6, R-SA1, R-P3, R-P7 |              |                   |
+| **2 - Limité**           | R0, R9, R10, R-S7, R-S9, R-S12, R-S13, R-S14, R-S16, R-S17, R-S20, R-S21, R-S22, R-S25, R-P8 | R-S8, R-P6                  |              |                   |
+| **1 - Négligeable**      | R13, R-S10, R-S15, R-S18, R-S19                                                              | R6, R-S3                    |              |                   |
 
 > **Note :** R-S3 et R-S15 sont descendus de I=3 à I=1 grâce au **binding fingerprint SSH** introduit dans le plugin PamAccess ≥ 0.1.16. La vérification est effectuée côté LLNG à la fois sur `/pam/authorize` (à chaque ouverture de session SSH, phase PAM `account`) et sur `/pam/verify` (à chaque utilisation d'un token PAM pour sudo ou ré-authentification) : tant que l'empreinte de la clef SSH n'est pas présente, active et non révoquée dans la session persistante LLNG, ni la session SSH ni l'escalade sudo ne sont autorisées, indépendamment de la fraîcheur de la KRL locale. Voir [02-ssh-connection.md](02-ssh-connection.md) pour les détails.
 
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
-> **Comment lire cette matrice.** Elle consolide les **39 fiches de risque** des
-> deux études (R0–R13 pour l'enrôlement, R-S3–R-S25 et R-SA1/R-SA2 pour la
-> connexion SSH et les comptes de service) et reprend, case par case, le score
+> **Comment lire cette matrice.** Elle consolide les **47 fiches de risque** des
+> trois volets de l'atelier 4 (R0–R13 pour l'enrôlement, R-S3–R-S25 et
+> R-SA1/R-SA2 pour la connexion SSH et les comptes de service, R-P1–R-P8 pour le
+> portail LLNG et ses plugins) et reprend, case par case, le score
 > résiduel **écrit dans chaque fiche** — aucune case n'est une évaluation
 > autonome. `tests/ebios_matrix_check.py` le vérifie mécaniquement et échoue si
 > une case s'écarte de sa fiche, si un risque analysé manque, ou si un
@@ -35,11 +36,11 @@
 (score = Vraisemblance × Gravité) **:**
 
 - **Rouge** (score ≥ 9) : aucun risque, en Mode E avec PR1 + PR2 activées
-- **Orange** (score 6–8) : R1, R-S6, R-SA1 (P=2, I=3 = 6) — les trois seuls à
-  requérir une acceptation formelle, portée par
+- **Orange** (score 6–8) : R1, R-S6, R-SA1, R-P3, R-P7 — les cinq risques qui
+  requièrent une acceptation formelle, portée par
   [08-dossier-homologation.md](08-dossier-homologation.md)
-- **Jaune** (score 4–5) : R4, R5, R-S4, R-SA2 (P=1, I=4) et R-S8 (P=2, I=2)
-- **Verte** (score ≤ 3) : les 31 autres, dont R6 et R-S3 (P=2, I=1 = 2)
+- **Jaune** (score 4–5) : R4, R5, R-S4, R-S8, R-SA2, R-P4, R-P6
+- **Verte** (score ≤ 3) : les 35 autres, dont R6 et R-S3 (P=2, I=1 = 2)
 
 **Risques éliminés ou ramenés en zone verte par le Mode E (avec PR1 et PR2 activées) :**
 
