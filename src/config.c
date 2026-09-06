@@ -471,7 +471,17 @@ static int url_contains_dangerous_chars(const char *url)
     return 0;
 }
 
-/* Parse a single config line */
+/*
+ * Parse a single config line.
+ *
+ * Returns 0 when the key was recognised and applied, -1 when the value was
+ * rejected, and PARSE_LINE_UNKNOWN_KEY when nothing knows the key. Callers
+ * reading openbastion.conf turn that last case into a warning: unknown keys
+ * are still ignored, but silently ignoring them made every documentation typo
+ * invisible (#229).
+ */
+#define PARSE_LINE_UNKNOWN_KEY 1
+
 static int parse_line(const char *key, const char *value, pam_openbastion_config_t *config)
 {
     /* Basic settings */
@@ -753,7 +763,46 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     else if (strcmp(key, "allowed_managed_groups") == 0) {
         SET_STRING_FIELD(config->allowed_managed_groups, value, key);
     }
-    /* Unknown keys are silently ignored */
+    /*
+     * Keys that openbastion.conf legitimately carries for other components.
+     * They are not consumed here, but they are not typos either, so they must
+     * not be reported as unknown. ob-heartbeat(8) reads these three.
+     */
+    else if (strcmp(key, "node_role") == 0 ||
+             strcmp(key, "report_sessions") == 0 ||
+             strcmp(key, "max_reported_sessions") == 0) {
+        /* consumed by ob-heartbeat(8) */
+    }
+    /*
+     * Keys this project's own tooling writes into openbastion.conf and that
+     * nothing reads back from it. Who writes what, exactly:
+     *
+     *   ob-backend-setup   all five
+     *   ob-bastion-setup   the three cache_* ones
+     *   the ansible template  the same three
+     *   ob-builder         cache_enabled and cache_ttl, in its heredocs
+     *   the shipped example  none of them
+     *
+     * cache_ttl and default_shell are live settings -- but of the NSS module,
+     * read from nss_openbastion.conf, its own file.
+     *
+     * Reporting them would have made this change worse than the silence it
+     * replaces: config_load() runs once per PAM process, so every login on
+     * every officially deployed host would emit three to five syslog warnings,
+     * drowning the real typo this is meant to surface. Removing them from the
+     * generators is a separate change; recognising them here is what keeps the
+     * signal usable today.
+     */
+    else if (strcmp(key, "cache_enabled") == 0 ||
+             strcmp(key, "cache_dir") == 0 ||
+             strcmp(key, "cache_ttl") == 0 ||
+             strcmp(key, "create_home") == 0 ||
+             strcmp(key, "default_shell") == 0) {
+        /* written by ob-bastion-setup / ob-backend-setup / ob-builder */
+    }
+    else {
+        return PARSE_LINE_UNKNOWN_KEY;
+    }
 
     return 0;
 }
@@ -763,7 +812,8 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
  * Split out of config_load() so the line syntax (comments, quotes, inline
  * comments) can be tested without a root-owned file on disk.
  */
-static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
+static void parse_config_file_line(char *line, pam_openbastion_config_t *config,
+                                   const char *filename)
 {
     char *trimmed = trim(line);
 
@@ -797,7 +847,16 @@ static void parse_config_file_line(char *line, pam_openbastion_config_t *config)
 
     value = strip_quotes(value);
 
-    parse_line(key, value, config);
+    if (parse_line(key, value, config) == PARSE_LINE_UNKNOWN_KEY) {
+        /*
+         * Never log the value: it may be client_secret. The key alone is
+         * enough to spot a typo such as auth_cache_offline_ttl for
+         * offline_cache_ttl (#229).
+         */
+        syslog(LOG_WARNING,
+               "open-bastion: unknown configuration key '%s' in %s, ignored",
+               key, filename ? filename : "openbastion.conf");
+    }
 }
 
 int config_load(const char *filename, pam_openbastion_config_t *config)
@@ -837,7 +896,7 @@ int config_load(const char *filename, pam_openbastion_config_t *config)
     char line[1024];
 
     while (fgets(line, sizeof(line), f)) {
-        parse_config_file_line(line, config);
+        parse_config_file_line(line, config, filename);
     }
 
     fclose(f);

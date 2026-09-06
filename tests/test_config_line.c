@@ -41,7 +41,7 @@ static void feed(pam_openbastion_config_t *config, const char *raw)
 {
     char line[1024];
     snprintf(line, sizeof(line), "%s", raw);
-    parse_config_file_line(line, config);
+    parse_config_file_line(line, config, "test.conf");
 }
 
 static void with_config(const char *raw,
@@ -189,6 +189,87 @@ static void test_pam_args_no_comment_stripping(void)
     config_free(&config);
 }
 
+/*
+ * ---- unknown keys are reported, not silently swallowed (#229) ----
+ *
+ * doc/security/02-ssh-connection.md told operators to set
+ * `auth_cache_offline_ttl`, a key the parser never knew; the setting was
+ * dropped without a word and the 7-day default silently applied. parse_line()
+ * now says so, and config_load() turns that into a syslog warning.
+ */
+static int classify(const char *raw)
+{
+    pam_openbastion_config_t config;
+    config_init(&config);
+
+    char line[1024];
+    snprintf(line, sizeof(line), "%s", raw);
+    char *trimmed = trim(line);
+    char *eq = strchr(trimmed, '=');
+    int rc;
+    if (!eq) {
+        rc = -1;
+    } else {
+        *eq = '\0';
+        char *key = trim(trimmed);
+        char *value = trim(eq + 1);
+        rc = parse_line(key, strip_quotes(value), &config);
+    }
+
+    config_free(&config);
+    return rc;
+}
+
+static void test_unknown_keys(void)
+{
+    CHECK(classify("auth_cache_offline_ttl = 86400") == PARSE_LINE_UNKNOWN_KEY,
+          "auth_cache_offline_ttl        -> reported unknown (the #229 typo)");
+    CHECK(classify("auth_cache_ttl = 3600") == PARSE_LINE_UNKNOWN_KEY,
+          "auth_cache_ttl                -> reported unknown (same doc, no such key)");
+    CHECK(classify("verify_ssl = true") == 0,
+          "verify_ssl                    -> recognised");
+    CHECK(classify("auth_cache = true") == 0,
+          "auth_cache                    -> recognised");
+#ifdef ENABLE_DESKTOP_SSO
+    /*
+     * offline_cache_ttl is the desktop-SSO credential cache, compiled in only
+     * with INSTALL_DESKTOP=ON (the Debian package). In a core build the key is
+     * genuinely inert, and reporting it is the honest answer.
+     */
+    CHECK(classify("offline_cache_ttl = 86400") == 0,
+          "offline_cache_ttl             -> recognised (desktop build)");
+#else
+    CHECK(classify("offline_cache_ttl = 86400") == PARSE_LINE_UNKNOWN_KEY,
+          "offline_cache_ttl             -> reported unknown (core build)");
+#endif
+
+    /*
+     * Every key this project's own tooling writes into openbastion.conf must
+     * be accepted. config_load() runs once per PAM process, so a key that
+     * ob-bastion-setup or ob-backend-setup emits and this parser rejects costs
+     * a syslog warning on every single login of every deployed host -- which
+     * would bury the one typo the whole change exists to surface.
+     */
+    CHECK(classify("cache_enabled = true") == 0,
+          "cache_enabled                 -> accepted (written by both setups)");
+    CHECK(classify("cache_dir = /var/cache/open-bastion") == 0,
+          "cache_dir                     -> accepted (written by both setups)");
+    CHECK(classify("cache_ttl = 300") == 0,
+          "cache_ttl                     -> accepted (both setups; live in NSS conf)");
+    CHECK(classify("create_home = true") == 0,
+          "create_home                   -> accepted (written by ob-backend-setup)");
+    CHECK(classify("default_shell = /bin/bash") == 0,
+          "default_shell                 -> accepted (backend setup; live in NSS conf)");
+
+    /* openbastion.conf is shared with ob-heartbeat(8): its keys are not typos. */
+    CHECK(classify("node_role = bastion") == 0,
+          "node_role                     -> accepted (ob-heartbeat key)");
+    CHECK(classify("report_sessions = true") == 0,
+          "report_sessions               -> accepted (ob-heartbeat key)");
+    CHECK(classify("max_reported_sessions = 50") == 0,
+          "max_reported_sessions         -> accepted (ob-heartbeat key)");
+}
+
 int main(void)
 {
     printf("Running openbastion.conf line-syntax tests...\n\n");
@@ -221,6 +302,9 @@ int main(void)
     printf("\nPAM module arguments:\n");
     test_pam_args_quotes();
     test_pam_args_no_comment_stripping();
+
+    printf("\nUnknown keys are reported instead of silently ignored (#229):\n");
+    test_unknown_keys();
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
