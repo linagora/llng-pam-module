@@ -636,12 +636,35 @@ pkill -u $USERNAME -KILL
 - **`target_host` enregistré dans le key-id** (`bastion=<id>;user=<u>;target=<h>`) : tracé à des fins d'audit. Note : `ob-ssh-principals` n'enforce que `bastion=<id>` (allowlist) et `user=<u>` — il **ne vérifie pas** `target=`, donc le certificat n'est pas restreint à un backend précis ; c'est `source-address` qui le restreint au bastion émetteur
 - La clé privée éphémère ne quitte jamais le bastion (tmpfs, effacée à la sortie) : seul le certificat signé transite sur le réseau
 
+**Limite connue — confiance à la première connexion (TOFU) :** `ob-ssh`,
+`ob-scp` et `ob-sftp` se connectent avec `StrictHostKeyChecking=accept-new` par
+défaut. La **première** connexion du bastion vers un backend donné accepte la
+clé d'hôte présentée sans la vérifier ; les suivantes sont épinglées par le
+`known_hosts` du bastion. Un attaquant capable d'intercepter le chemin
+bastion→backend peut donc se faire passer pour un backend lors de cette
+première connexion et **lire le contenu de la session**. Il ne capture rien de
+réutilisable : la clé privée éphémère ne quitte pas le bastion et le certificat
+est épinglé sur l'adresse source du bastion.
+
 **Remédiation configuration :**
 
 ```yaml
 # LLNG Manager - Réduire la durée de vie du certificat éphémère
 pamAccessBastionCertTtl: 60 # 1 minute au lieu de 2 (si politique plus stricte)
 ```
+
+```bash
+# Bastion - supprimer le TOFU : pré-alimenter les clés d'hôte par un canal
+# de confiance, puis refuser toute clé inconnue.
+ssh-keyscan -t ed25519 backend-01 backend-02 >> /etc/ssh/ssh_known_hosts
+
+# /etc/open-bastion/ssh-proxy.conf
+SSH_OPTIONS="-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts"
+```
+
+`SSH_OPTIONS` est passé à `ssh` **avant** l'option par défaut et `ssh` retient
+la première valeur reçue pour une option : ce réglage l'emporte donc sur
+`accept-new`.
 
 |                 |                          Score résiduel                          |
 | --------------- | :--------------------------------------------------------------: |

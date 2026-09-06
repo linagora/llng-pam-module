@@ -155,7 +155,7 @@ load_config 2>/dev/null
 
 # Output variables for verification
 echo "PORTAL_URL=$PORTAL_URL"
-echo "SERVER_TOKEN_FILE=$SERVER_TOKEN_FILE"
+echo "SERVER_TOKEN_FILE=${SERVER_TOKEN_FILE:-IGNORED}"
 echo "TARGET_GROUP=$TARGET_GROUP"
 echo "TIMEOUT=$TIMEOUT"
 echo "VERIFY_SSL=$VERIFY_SSL"
@@ -186,9 +186,12 @@ EOF
         all_good=false
         details+="PORTAL_URL wrong; "
     fi
-    if ! echo "$output" | grep -q "SERVER_TOKEN_FILE=/tmp/test_token"; then
+    # SERVER_TOKEN_FILE is accepted-but-ignored since #202: the key must still
+    # parse without error, but the library must not keep it -- nothing here
+    # reads the server token any more, ob-cert-daemon does.
+    if ! echo "$output" | grep -q "SERVER_TOKEN_FILE=IGNORED"; then
         all_good=false
-        details+="SERVER_TOKEN_FILE wrong; "
+        details+="SERVER_TOKEN_FILE should be ignored, not stored; "
     fi
     if ! echo "$output" | grep -q "TARGET_GROUP=mygroup"; then
         all_good=false
@@ -296,168 +299,73 @@ EOF
     fi
 }
 
-# Test 9: build_curl_opts without SSL skip
-test_curl_opts_ssl_verify() {
-    local test_script="$TEST_TMPDIR/test_curl_ssl.sh"
-    cat > "$test_script" <<'TESTSCRIPT'
-#!/bin/bash
-set -u
-source_file="$1"
-
-source "$source_file"
-
-VERIFY_SSL=true
-TIMEOUT=10
-
-build_curl_opts
-
-# Check for -k flag
-has_k=false
-for opt in "${CURL_OPTS[@]}"; do
-    if [ "$opt" = "-k" ]; then
-        has_k=true
-    fi
-done
-
-if $has_k; then
-    echo "HAS_K"
-else
-    echo "NO_K"
-fi
-TESTSCRIPT
-
-    chmod +x "$test_script"
-    local output
-    output=$("$test_script" "$LIB" 2>&1)
-
-    if [[ "$output" == "NO_K" ]]; then
-        test_pass "build_curl_opts without SSL skip: no -k flag"
+# Test 9: the library never talks to the portal itself any more (#202).
+# A `[ -r "$SERVER_TOKEN_FILE" ]` branch used to call /pam/bastion-cert directly
+# with the bearer token whenever the caller could read it -- root, or a lab that
+# had relaxed the 0600. That escape hatch around the SO_PEERCRED design is gone;
+# every caller now goes through ob-cert-daemon.
+test_no_direct_portal_call() {
+    local bad=""
+    grep -q 'pam/bastion-cert' "$LIB" && bad+="calls /pam/bastion-cert; "
+    grep -q 'get_server_token' "$LIB" && bad+="still reads the server token; "
+    grep -q 'Authorization: Bearer' "$LIB" && bad+="still sends a bearer token; "
+    if [ -z "$bad" ]; then
+        test_pass "cert lib has no direct portal path (ob-cert-daemon only)"
     else
-        test_fail "build_curl_opts without SSL skip: should not have -k flag"
+        test_fail "cert lib still has a privileged fallback" "$bad"
     fi
 }
 
-# Test 10: build_curl_opts with SSL skip
-test_curl_opts_ssl_skip() {
-    local test_script="$TEST_TMPDIR/test_curl_nossl.sh"
+# Tests 10-12: the host-key policy is a default, not a lock.
+#
+# ssh keeps the FIRST value given for an option, so the hardcoded
+# `-o StrictHostKeyChecking=accept-new` used to sit before SSH_OPTIONS and could
+# not be tightened by an operator at all. It is now emitted only when the
+# operator has not set the option themselves.
+_host_key_opts_for() {
+    local test_script="$TEST_TMPDIR/test_host_key_opts.sh"
     cat > "$test_script" <<'TESTSCRIPT'
 #!/bin/bash
 set -u
-source_file="$1"
-
-source "$source_file"
-
-VERIFY_SSL=false
-TIMEOUT=10
-
-build_curl_opts
-
-has_k=false
-for opt in "${CURL_OPTS[@]}"; do
-    if [ "$opt" = "-k" ]; then
-        has_k=true
-    fi
-done
-
-if $has_k; then
-    echo "HAS_K"
-else
-    echo "NO_K"
-fi
+source "$1"
+shift
+SSH_OPTIONS_ARRAY=()
+[ "$#" -gt 0 ] && read -r -a SSH_OPTIONS_ARRAY <<<"$1"
+build_host_key_opts
+printf '%s\n' ${HOST_KEY_OPTS[@]+"${HOST_KEY_OPTS[@]}"}
 TESTSCRIPT
-
     chmod +x "$test_script"
-    local output
-    output=$("$test_script" "$LIB" 2>&1)
+    "$test_script" "$LIB" "$@" 2>&1
+}
 
-    if [[ "$output" == "HAS_K" ]]; then
-        test_pass "build_curl_opts with SSL skip: has -k flag"
+test_host_key_opts_default() {
+    local out
+    out=$(_host_key_opts_for)
+    if [ "$out" = "-o
+StrictHostKeyChecking=accept-new" ]; then
+        test_pass "host key policy defaults to accept-new (TOFU)"
     else
-        test_fail "build_curl_opts with SSL skip: should have -k flag"
+        test_fail "host key policy default wrong" "Got: $out"
     fi
 }
 
-# Test 11: get_server_token reads JSON format
-test_get_token_json() {
-    local test_script="$TEST_TMPDIR/test_token_json.sh"
-    cat > "$test_script" <<'TESTSCRIPT'
-#!/bin/bash
-set -u
-source_file="$1"
-token_file="$2"
-
-source "$source_file"
-
-SERVER_TOKEN_FILE="$token_file"
-get_server_token 2>/dev/null
-TESTSCRIPT
-
-    chmod +x "$test_script"
-    local token_file="$TEST_TMPDIR/token_json"
-    echo '{"access_token": "mytoken123", "refresh_token": "rt"}' > "$token_file"
-
-    local output
-    output=$("$test_script" "$LIB" "$token_file" 2>&1)
-
-    if [[ "$output" == "mytoken123" ]]; then
-        test_pass "get_server_token reads JSON format"
+test_host_key_opts_operator_override() {
+    local out
+    out=$(_host_key_opts_for "-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts")
+    if [ -z "$out" ]; then
+        test_pass "operator StrictHostKeyChecking=yes is not overridden by the default"
     else
-        test_fail "get_server_token reads JSON format" "Got: $output"
+        test_fail "default still emitted over the operator's setting" "Got: $out"
     fi
 }
 
-# Test 12: get_server_token reads plain text
-test_get_token_plaintext() {
-    local test_script="$TEST_TMPDIR/test_token_plain.sh"
-    cat > "$test_script" <<'TESTSCRIPT'
-#!/bin/bash
-set -u
-source_file="$1"
-token_file="$2"
-
-source "$source_file"
-
-SERVER_TOKEN_FILE="$token_file"
-get_server_token 2>/dev/null
-TESTSCRIPT
-
-    chmod +x "$test_script"
-    local token_file="$TEST_TMPDIR/token_plain"
-    echo "plaintoken456" > "$token_file"
-
-    local output
-    output=$("$test_script" "$LIB" "$token_file" 2>&1)
-
-    if [[ "$output" == "plaintoken456" ]]; then
-        test_pass "get_server_token reads plain text format"
+test_host_key_opts_override_joined_form() {
+    local out
+    out=$(_host_key_opts_for "-oStrictHostKeyChecking=yes")
+    if [ -z "$out" ]; then
+        test_pass "operator -oStrictHostKeyChecking=yes (joined form) is honoured"
     else
-        test_fail "get_server_token reads plain text format" "Got: $output"
-    fi
-}
-
-# Test 13: get_server_token rejects missing file
-test_get_token_missing() {
-    local test_script="$TEST_TMPDIR/test_token_missing.sh"
-    cat > "$test_script" <<'TESTSCRIPT'
-#!/bin/bash
-source_file="$1"
-
-source "$source_file"
-
-SERVER_TOKEN_FILE="/nonexistent/path/to/token"
-get_server_token 2>&1
-exit $?
-TESTSCRIPT
-
-    chmod +x "$test_script"
-    local output
-    local exit_code=0
-    output=$("$test_script" "$LIB" 2>&1) || exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-        test_pass "get_server_token rejects missing file"
-    else
-        test_fail "get_server_token should reject missing file" "Exit code: $exit_code"
+        test_fail "joined -o form not recognised" "Got: $out"
     fi
 }
 
@@ -800,11 +708,10 @@ test_config_permissions_group_writable
 test_safe_config_parsing
 test_config_quotes
 test_config_comments
-test_curl_opts_ssl_verify
-test_curl_opts_ssl_skip
-test_get_token_json
-test_get_token_plaintext
-test_get_token_missing
+test_no_direct_portal_call
+test_host_key_opts_default
+test_host_key_opts_operator_override
+test_host_key_opts_override_joined_form
 test_parse_args_host_port
 test_parse_args_default_port
 test_parse_args_config_file

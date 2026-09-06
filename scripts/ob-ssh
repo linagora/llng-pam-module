@@ -99,13 +99,14 @@ connect_via_cert() {
     # it to the backend to run, and the array keeps each word intact (no bastion
     # re-splitting / globbing). Empty array expands to nothing under `set -u`.
     local rc=0
+    build_host_key_opts
     ssh -i "$OB_EPH_KEY" \
         -o CertificateFile="$OB_EPH_CERT" \
         -o IdentitiesOnly=yes \
-        -o StrictHostKeyChecking=accept-new \
         "${tty_opt[@]}" \
         -p "$target_port" \
         "${SSH_OPTIONS_ARRAY[@]}" \
+        ${HOST_KEY_OPTS[@]+"${HOST_KEY_OPTS[@]}"} \
         -l "$target_user" \
         -- "$target_host" "${REMOTE_CMD[@]}" || rc=$?
 
