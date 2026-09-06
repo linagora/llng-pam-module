@@ -437,6 +437,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgraded, so the refusal lands at login with an audited reason instead of on a
   hop a quarter of an hour later.
 
+- **An empty `allowed_bastions` no longer passes unnoticed (#182).**
+  `ob-backend-setup` created the backend allowlist empty, and an empty allowlist
+  means "accept a hop voucher from any vouched bastion" — in practice, from any
+  host enrolled in the project. That allowlist is the residual defence behind a
+  real gap on the SSO side (the pam-access plugin does no RP/audience binding on
+  `/pam/*` tokens and, with `pamAccessServerGroups` empty, takes `server_group`
+  from the request body), and the second defence,
+  `pamAccessBastionCertPinSourceAddress`, is off by default too.
+
+  Three changes, none of which can break an existing fleet on upgrade:
+
+  - `ob-backend-setup` **asks** for the list when run interactively, alongside
+    the other required settings, and shows it in the pre-flight banner;
+  - leaving it empty prints a loud multi-line warning naming the exposure and
+    the fix, instead of the previous one-line `info`;
+  - `ob-ssh-principals` logs an `authpriv.warning` **on every hop** it accepts
+    without checking which bastion it came from, so a running fleet shows the
+    condition in its logs rather than only in a setup transcript.
+
+  The empty-means-any semantic is deliberately unchanged: inverting it would
+  deny every hop the moment a backend upgrades. The list is now validated
+  (`[A-Za-z0-9._-]`, comma/semicolon/space separated) and normalised, so a typo
+  is refused at setup instead of silently matching nothing, and a
+  whitespace-only value no longer looks configured while meaning "any".
+
 ### Changed
 
 - **A failing `ctest` now keeps its log, and the concurrency test says why it
