@@ -97,7 +97,7 @@ ssh-keygen -lf /path/to/key.pub
 | ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `key_fingerprint` | Yes      | SSH key fingerprint (SHA256:... or MD5:...)                                                                                                                                      |
 | `sudo_allowed`    | No       | Allow sudo access (default: false)                                                                                                                                               |
-| `sudo_nopasswd`   | No       | Sudo without password (default: false)                                                                                                                                           |
+| `sudo_nopasswd`   | No       | Sudo without re-proving the key (default: false) — see [Sudo and the key check](#sudo-and-the-key-check)                                                                          |
 | `gecos`           | No       | User description                                                                                                                                                                 |
 | `shell`           | No       | Login shell — must be in `approved_shells` (default: common shells) or the account is dropped                                                                                    |
 | `home`            | No       | Home directory — must be under `approved_home_prefixes` (default `/home:/var/home`) or the account is dropped                                                                    |
@@ -107,7 +107,8 @@ ssh-keygen -lf /path/to/key.pub
 ## How It Works
 
 1. Service account connects via SSH with its configured key
-2. PAM module extracts the SSH key fingerprint from `SSH_USER_AUTH` environment
+2. PAM module resolves the SSH key fingerprint — from `SSH_USER_AUTH` when sshd
+   exposes it, otherwise from the principals spool `/run/open-bastion/ssh-fp`
 3. PAM module checks if user is in `service-accounts.conf`
 4. If found, the SSH key fingerprint is validated against the configured value
 5. If fingerprint matches, account is authorized locally (no LLNG call needed)
@@ -250,6 +251,24 @@ certificate-vouching used by human users. Consequences:
   a hop is **not recorded**. Treat this as a deliberate audit bypass: if you need
   service-account activity audited, run it against the target directly (the
   target's own logs/auditd apply) rather than tunnelling through the bastion.
+
+## Sudo and the key check
+
+With `sudo_nopasswd = false`, a service account's `sudo` must re-prove the SSH
+key that opened the session. That check reads the fingerprint from the
+principals spool (`/run/open-bastion/ssh-fp`), which the account's SSH session
+populated and which `sudo` inherits through the process tree.
+
+Until 0.6.2 it read `SSH_USER_AUTH` only. That variable does not exist in a
+`sudo` PAM handle, so the check could never succeed and `sudo_nopasswd = false`
+was unusable — leaving `sudo_nopasswd = true`, which grants sudo with no proof of
+identity at all, as the only configuration that worked. That is fixed; both
+settings now do what they say.
+
+`sudo_nopasswd = false` requires the host to run the `AuthorizedPrincipalsCommand`
+helper (the certificate modes), since that is what writes the spool. On a host
+without it there is no fingerprint to recover in either context, and a service
+account's `sudo` is refused.
 
 ## Sudo bypasses the SSO token (including in Mode E)
 

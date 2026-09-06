@@ -338,6 +338,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth required pam_deny.so`. Check with
   `grep '^auth' /etc/pam.d/sshd`.
 
+- **The fingerprint spool is harder to forge, and what it is worth is now
+  written down (#235 review).** The spool's trust root is the `nobody` account:
+  `sshd` requires a non-privileged `AuthorizedPrincipalsCommandUser`, so the
+  helper that writes the drops runs as `nobody` and the directory must be
+  writable by it. Code execution as `nobody` can therefore read the deposited
+  fingerprints and write false ones, and none of the module's existing checks
+  (`O_NOFOLLOW`, `nlink == 1`, mode `0600`, drop owner == directory owner) is
+  designed against an attacker who is already inside that perimeter. Three
+  changes narrow it without changing its nature:
+
+  - The anchor `/proc/<pid>` must be a live process owned by **root**. The
+    anchor is chosen by process *name*, and `prctl(PR_SET_NAME)` accepts fifteen
+    characters while `sshd-session` is twelve — so a local user could put a
+    process by that name in the ancestry of their own `sudo` and choose which
+    drop was read. That half of the forge needed no privilege at all.
+  - A drop older than its anchor process is refused. Nothing removes a drop when
+    a session ends and the principals helper does not run for password logins,
+    so once a PID was recycled the new session inherited the previous
+    occupant's binding, with every ownership and mode check passing. On Linux
+    the mtime of `/proc/<pid>` is the process start time, which makes the
+    comparison exact.
+  - A service-account authentication resting on a spool-derived fingerprint,
+    rather than on `sshd`'s own `SSH_USER_AUTH`, is logged at WARN and the
+    provenance is carried in the reason of the single audit success event. It is
+    a root grant whose integrity rests on `nobody`, and the trail should be able
+    to say so afterwards.
+
+  The real fix — a socket-activated root daemon identifying its caller with
+  `SO_PEERCRED`, the pattern `ob-cert-daemon` already uses — is tracked in
+  [#249](https://github.com/linagora/open-bastion/issues/249).
+  `doc/security/99-risk-reduce.md` states the residual plainly, next to the
+  R-S3 / R-S15 reduction it underwrites.
+
+- **`fingerprint_required` is documented where an operator looks for it.** It is
+  condition of use **CE09** of the homologation dossier and the assumption
+  behind the R-S3 / R-S15 residual scores, but `doc/admin-guide.md`'s "SSH Key
+  Policy" section did not mention it, and the accepted alias
+  `ssh_fingerprint_required` appeared in no document at all.
+
+- **`fingerprint_required` now covers service accounts too, and their SSH check
+  actually runs.** The service-account branch of `pam_sm_acct_mgmt` returned
+  `PAM_SUCCESS` before the enforcement block, so the setting documented as
+  covering "every SSH login" skipped them. Worse, their account-phase check read
+  `SSH_USER_AUTH` alone — which a modern OpenSSH does not set for a plain public
+  key — and for a public-key login that is the *only* check that runs, since
+  `sshd` never calls `pam_authenticate()` on that path. It resolves through the
+  spool now, like the `sudo` path, and `fingerprint_required` is enforced before
+  the early return.
+
+- **A missing `.key` drop is no longer reported as a missing key binding.**
+  `read_spool_drop()` is shared between the `.fp` and `.key` suffixes and warned
+  identically for both. The `.key` drop only exists when `sshd` passes `%t` to
+  the helper; a host configured from the shorter `%u %f` form still shown in
+  places has none, and its absence is a missing capability the caller handles by
+  falling back, not a missing security binding. WARN for `.fp`, DEBUG for the
+  rest.
+
+- **Service-account `sudo` with `sudo_nopasswd = false` now works at all
+  (#194).** The fingerprint check read `SSH_USER_AUTH` only. That variable does
+  not exist in a `sudo` PAM handle, so the check could never succeed and the
+  branch always returned `PAM_AUTH_ERR` — leaving `sudo_nopasswd = true`, which
+  grants sudo with no proof of identity, as the only workable setting, and
+  pushing admins toward it. The fingerprint is now also recovered from the
+  principals spool (`/run/open-bastion/ssh-fp`), which the SSH session populated
+  and which `sudo` inherits through the process tree, so both settings do what
+  they say. On a host without the principals helper there is still no
+  fingerprint in either context and `sudo_nopasswd = false` refuses, which is
+  the fail-closed answer.
+
+### Security
+
+- **A missing SSH fingerprint drop is now visible, and can be made fatal
+  (#192).** When the principals spool exists but this session's drop is absent —
+  post-upgrade drift, a lost `tmpfiles.d` entry, or a password login on a
+  cert-aware host — the module dropped the fingerprint binding with a DEBUG line
+  and authorized the session anyway. `doc/security/99-risk-reduce.md` credits
+  that binding with reducing R-S3 and R-S15, and the bastion voucher TTL is only
+  capped by the SSO certificate expiry when a fingerprint was supplied, so a
+  provisioning failure silently removed a control the risk matrix depends on.
+
+  The missing drop is now logged at **WARN** (the spool directory being absent
+  altogether stays at DEBUG: that host simply does not use the helper), and a new
+  opt-in `fingerprint_required = true` refuses an SSH login whose fingerprint
+  cannot be recovered instead of authorizing without the binding. Enable it on
+  certificate-mode hosts — the EBIOS study now names it as a condition of use for
+  the R-S3 / R-S15 residual scores. Do **not** enable it in the token-only modes,
+  where no fingerprint ever exists and every SSH login would be denied.
+
+  The portal is growing the server-side half of the same control:
+  `linagora/lemonldap-ng-plugins#86` caps a voucher that no fingerprint binds at
+  `pamAccessBastionVoucherUnboundTtl` (900 s instead of 12 h) and adds
+  `pamAccessRequireFingerprint` to refuse the unbound case outright. Once that
+  ships, a missing spool drop stops degrading silently and starts breaking
+  visibly: `ob-ssh` hops fail about fifteen minutes into the session with
+  `voucher_expired`. That is the better failure, but it is a failure — which is
+  the argument for turning `fingerprint_required` on **before** the portal is
+  upgraded, so the refusal lands at login with an audited reason instead of on a
+  hop a quarter of an hour later.
+
 ### Changed
 
 - **A failing `ctest` now keeps its log, and the concurrency test says why it

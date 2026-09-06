@@ -19,6 +19,64 @@
 
 > **Note :** R-S3 et R-S15 sont descendus de I=3 à I=1 grâce au **binding fingerprint SSH** introduit dans le plugin PamAccess ≥ 0.1.16. La vérification est effectuée côté LLNG à la fois sur `/pam/authorize` (à chaque ouverture de session SSH, phase PAM `account`) et sur `/pam/verify` (à chaque utilisation d'un token PAM pour sudo ou ré-authentification) : tant que l'empreinte de la clef SSH n'est pas présente, active et non révoquée dans la session persistante LLNG, ni la session SSH ni l'escalade sudo ne sont autorisées, indépendamment de la fraîcheur de la KRL locale. Voir [02-ssh-connection.md](02-ssh-connection.md) pour les détails.
 
+> **Note (condition d'emploi du binding fingerprint) :** la réduction ci-dessus
+> suppose que l'empreinte parvienne effectivement à LLNG. Elle est récupérée par
+> le module dans `/run/open-bastion/ssh-fp`, alimenté par
+> l'`AuthorizedPrincipalsCommand`. Si ce spool disparaît — dérive après mise à
+> jour, entrée `tmpfiles.d` manquante — le module appelle `/pam/authorize` sans
+> champ `fingerprint`, que le plugin traite comme optionnel : la mesure
+> disparaît silencieusement, et la durée de vie du voucher bastion n'est plus
+> bornée par l'expiration du certificat SSO. Deux garde-fous depuis la 0.6.3 :
+> l'absence du drop est journalisée en **WARN** (et non plus en DEBUG), et
+> l'option `fingerprint_required = true` d'`openbastion.conf` refuse la session
+> plutôt que de l'autoriser sans binding. **Activer cette option sur les hôtes en
+> mode certificat est une condition d'emploi du score résiduel R-S3 / R-S15**
+> (ne pas l'activer sur les modes token, où il n'y a jamais d'empreinte).
+>
+> **Ce que change la montée de version du portail.** La PR amont
+> `linagora/lemonldap-ng-plugins#86` (issue `#55`) ajoute le pendant serveur de
+> cette option : un voucher qu'aucune empreinte ne lie au certificat SSO est
+> plafonné à `pamAccessBastionVoucherUnboundTtl` (900 s au lieu de 12 h), et
+> `pamAccessRequireFingerprint` refuse carrément le cas non lié. Le mode de
+> défaillance d'un spool absent cesse alors d'être un affaiblissement silencieux
+> pour devenir une **coupure visible** : les rebonds `ob-ssh` échouent une
+> quinzaine de minutes après la connexion au bastion, avec
+> `reason: voucher_expired`. C'est le comportement souhaitable, mais il faut le
+> savoir avant la mise à jour — un spool cassé qui passait inaperçu se
+> manifestera comme une panne. `fingerprint_required = true` fait échouer la
+> connexion au bon endroit (à l'ouverture de session, avec un motif audité)
+> plutôt que quinze minutes plus tard sur un rebond.
+>
+> **Ce que vaut le spool comme racine de confiance.** Le répertoire
+> `/run/open-bastion/ssh-fp` appartient à `nobody`, et ce n'est pas un choix :
+> `sshd` exige un utilisateur non privilégié pour
+> `AuthorizedPrincipalsCommandUser`, donc le helper qui écrit les drops tourne
+> sous ce compte et le répertoire doit lui appartenir. Il en découle qu'une
+> **exécution de code sous `nobody` permet de lire les empreintes déposées et
+> d'en écrire de fausses**. Les contrôles du module (`O_NOFOLLOW`, `nlink == 1`,
+> mode `0600`, propriétaire du drop = propriétaire du répertoire) protègent
+> contre un attaquant extérieur au périmètre de confiance, pas contre un
+> attaquant qui est `nobody`.
+>
+> Deux durcissements réduisent la surface sans changer cette nature : l'ancre
+> `/proc/<pid>` doit être un processus vivant appartenant à **root** (l'ancre
+> est choisie par nom de processus, et `prctl(PR_SET_NAME)` accepte quinze
+> caractères — « sshd-session » en fait douze, donc un utilisateur local pouvait
+> sinon choisir quel drop serait lu), et un drop plus ancien que son processus
+> ancre est refusé (rien ne supprime un drop en fin de session, et le helper ne
+> tourne pas pour une connexion par mot de passe : une réutilisation de PID
+> faisait sinon hériter le binding de l'occupant précédent). Enfin, toute
+> authentification de compte de service fondée sur une empreinte venue du spool
+> plutôt que de `sshd` est journalisée en **WARN** et tracée dans l'audit.
+>
+> La correction de fond est un démon root activé par socket qui reçoit les
+> empreintes et vérifie l'appelant par `SO_PEERCRED`, sur le modèle
+> d'`ob-cert-daemon` — le répertoire redevient alors `0700 root`. Suivie dans
+> [#249](https://github.com/linagora/open-bastion/issues/249). **Tant qu'elle
+> n'est pas faite, `sudo_allowed` sur un compte de service est un octroi de root
+> dont l'intégrité repose sur le compte `nobody` de l'hôte** : le minimiser
+> (piste 1 plus bas) n'est pas une recommandation de style.
+
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
 > **Comment lire cette matrice.** Elle consolide les **47 fiches de risque** des
@@ -210,7 +268,7 @@ consommé côté portail, et la phase `account` — donc la vérification
 d'autorisation — s'exécute en direct à **chaque** `sudo`, si bien qu'une
 révocation LLNG prend effet immédiatement. Ce que cela affaiblit : la
 revendication « chaque élévation est adossée à une authentification SSO
-*fraîche* ». L'option `--enable-sudo-fresh-otp` d'`ob-bastion-setup` /
+_fraîche_ ». L'option `--enable-sudo-fresh-otp` d'`ob-bastion-setup` /
 `ob-backend-setup` écrit `Defaults:%open-bastion-sudo timestamp_timeout=0` et
 rétablit la revendication littérale ; elle reste **opt-in** parce qu'elle change
 la cadence des invites pour tous les utilisateurs SSO. Voir
@@ -372,6 +430,12 @@ Pistes :
 1. **Minimiser** : n'accorder `sudo_allowed` qu'aux comptes qui en ont
    réellement besoin ; préférer `sudo_nopasswd = false` et des règles `sudoers`
    restreintes à des commandes précises plutôt qu'un sudo total.
+   `sudo_nopasswd = false` est réellement utilisable depuis la 0.6.3 : le
+   contrôle d'empreinte ne lisait que `SSH_USER_AUTH`, absent d'un handle PAM
+   `sudo`, si bien qu'il échouait toujours et que `sudo_nopasswd = true` —
+   c'est-à-dire aucune preuve d'identité — était la seule configuration qui
+   fonctionnait. L'empreinte est désormais reprise du spool des principals, que
+   `sudo` hérite par l'arbre de processus.
 2. **Inventaire et rotation** : traiter chaque clé de service comme un secret de
    longue durée (coffre-fort, rotation périodique, révocation à la sortie d'un
    prestataire/outil). Recoupe le compte de secours de [R-S17](#r-s17-p1-i2---verrouillage-total-lockout).

@@ -336,6 +336,21 @@ log_level = warn
 # Default: 256
 # ssh_key_min_ecdsa_bits = 256
 
+# Require the SSH key fingerprint binding on every SSH login
+# The fingerprint of the key that opened the session is sent to LLNG with
+# /pam/authorize, which lets the portal cross-check it against the user's
+# session and caps the bastion voucher lifetime at the SSO certificate's
+# expiry. It is recovered from /run/open-bastion/ssh-fp, written by the
+# AuthorizedPrincipalsCommand helper.
+# When that spool is missing - a provisioning failure, a lost tmpfiles.d
+# entry after an upgrade - the binding is dropped and the login is authorized
+# without it. Setting this to true refuses such a login instead.
+# Only enable it on hosts that run the principals helper (certificate modes):
+# in the token-only modes there is never a fingerprint and every SSH login
+# would be denied.
+# Default: false
+# fingerprint_required = false
+
 # ==============================================================================
 # Cache Brute-Force Protection (offline mode security)
 # ==============================================================================

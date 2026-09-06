@@ -600,6 +600,38 @@ static int test_load_config_file(void)
     return ok;
 }
 
+/*
+ * fingerprint_required (#192): off by default, settable from the config file
+ * and from a pam.d argument, under either spelling.
+ */
+static int test_fingerprint_required_default_off(void)
+{
+    pam_openbastion_config_t config;
+    config_init(&config);
+    int ok = (config.fingerprint_required == false);
+    config_free(&config);
+    return ok;
+}
+
+static int test_parse_fingerprint_required(void)
+{
+    pam_openbastion_config_t config;
+    config_init(&config);
+
+    const char *argv[] = { "fingerprint_required=true" };
+    config_parse_args(1, argv, &config);
+    int ok = (config.fingerprint_required == true);
+    config_free(&config);
+
+    config_init(&config);
+    const char *alias[] = { "ssh_fingerprint_required=true" };
+    config_parse_args(1, alias, &config);
+    ok = ok && (config.fingerprint_required == true);
+    config_free(&config);
+
+    return ok;
+}
+
 int main(void)
 {
     printf("Running configuration tests...\n\n");
@@ -624,6 +656,8 @@ int main(void)
     TEST(cache_rate_limit_defaults);
     TEST(parse_cache_rate_limit_args);
     TEST(cache_rate_limit_bounds);
+    TEST(fingerprint_required_default_off);
+    TEST(parse_fingerprint_required);
 #ifdef ENABLE_DESKTOP_SSO  /* Desktop SSO only and never compiled inside open-bastion core */
     TEST(oauth2_token_auth_defaults);
     TEST(parse_oauth2_token_auth_args);
