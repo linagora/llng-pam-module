@@ -51,8 +51,22 @@ run_case mode-c "'passwordauthentication no' 'kbdinteractiveauthentication yes' 
     "mode-c with KbdInteractiveAuthentication yes warns" warn
 run_case mode-c "'passwordauthentication yes' 'kbdinteractiveauthentication no' 'usepam no'" \
     "UsePAM no escalates: stack is not consulted" warn "NOT refused"
+# Every mode whose generated stack accepts a password must stay silent. mode-d
+# is the one that matters: it is "All methods (SSH keys, Open Bastion tokens,
+# Unix passwords)" and generate_pam_sshd gives it `auth sufficient pam_unix.so`,
+# so warning there would call a deliberate choice a misconfiguration and advise
+# turning it off. mode-a denies passwords in the stack, but it is a token mode:
+# sshd taking passwords is how the token is carried, not a mismatch.
 run_case mode-a "'passwordauthentication yes' 'kbdinteractiveauthentication yes' 'usepam yes'" \
-    "password modes are not warned about" silent
+    "mode-a (token) is not warned about" silent
+run_case mode-b "'passwordauthentication yes' 'kbdinteractiveauthentication yes' 'usepam yes'" \
+    "mode-b (token or password) is not warned about" silent
+run_case mode-d "'passwordauthentication yes' 'kbdinteractiveauthentication yes' 'usepam yes'" \
+    "mode-d (all methods) is not warned about" silent
+run_case mode-d "'passwordauthentication yes' 'kbdinteractiveauthentication no' 'usepam no'" \
+    "mode-d with UsePAM no is not warned about either" silent
+run_case none "'passwordauthentication yes' 'kbdinteractiveauthentication yes' 'usepam yes'" \
+    "mode 'none' is not warned about" silent
 
 # The helper must actually be called, and after the PAM stack is written --
 # a helper that exists but is never invoked would pass every case above.

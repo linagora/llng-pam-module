@@ -48,6 +48,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The postinst reports a mode-c install on an sshd that still takes passwords
+  (#180).** mode-c is the one PAM mode whose generated stack refuses passwords
+  outright (`auth required pam_deny.so`), so an sshd left with
+  `PasswordAuthentication yes` is a mismatch worth naming. It is only reported,
+  never fixed: turning password authentication off from a package script can
+  lock out an administrator connected over a password session, and this
+  project's convention is that intrusive hardening is opt-in
+  (`ob-bastion-setup` writes that drop-in, and it is run deliberately).
+
+  The warning escalates when `UsePAM no` is in effect, because sshd then checks
+  `/etc/shadow` itself and never consults the stack — the PAM denial is not
+  merely redundant there, it is bypassed.
+
+  Only mode-c. mode-a, mode-b and mode-d all accept a password somewhere by
+  design: mode-b and mode-d are given `auth sufficient pam_unix.so`, and mode-a
+  carries its token over the password prompt. `sshd -T` is read without `-C`,
+  which cannot be built at install time, so a `Match` block re-enabling
+  passwords is not seen and the check stays silent — it reports a mismatch it
+  can see, and never claims the absence of one.
+
+
 - **`UPGRADE-NOTES.md`.** What has to be done, or checked, before deploying a
   release — starting with the `lemonldap-ng-plugins` 0.6.0 upgrade: the
   `/pam/whoami` migration above, unbound vouchers dropping from 12 h to 15 min,

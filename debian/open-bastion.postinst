@@ -34,14 +34,26 @@ backup_pam_file() {
 warn_if_sshd_accepts_passwords() {
     _mode="$1"
 
+    # mode-c ONLY. It is the one mode whose generated stack refuses passwords
+    # (auth required pam_deny.so). mode-d is "All methods (SSH keys, Open
+    # Bastion tokens, Unix passwords)" per debian/open-bastion.templates, and
+    # generate_pam_sshd gives mode-b and mode-d the same stack, with
+    # `auth sufficient pam_unix.so` -- passwords are accepted there by design.
+    # Warning on mode-d would state three false things and advise turning off a
+    # method the administrator explicitly chose.
     case "$_mode" in
-        mode-c|mode-d) ;;   # certificate/key modes: passwords are not expected
+        mode-c) ;;
         *) return 0 ;;
     esac
 
     command -v sshd >/dev/null 2>&1 || return 0
 
     # Effective configuration, comments and drop-ins resolved by sshd itself.
+    # Deliberately without -C: a connection spec would need a user, host and
+    # address we do not have at install time. The cost is that `Match` blocks
+    # are not evaluated, so a Match that re-enables PasswordAuthentication is
+    # not seen and this check stays silent. Best-effort by design -- it reports
+    # a mismatch it can see, and never claims the absence of one.
     _eff=$(sshd -T 2>/dev/null) || return 0
     [ -n "$_eff" ] || return 0
 
