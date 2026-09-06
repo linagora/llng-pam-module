@@ -713,7 +713,9 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 | **Probabilité** |   3   |
 | **Impact**      |   3   |
 
-**Description :** Des utilisateurs peuvent générer des clés SSH utilisant des algorithmes cryptographiques faibles ou obsolètes (DSA, RSA-1024), et les faire signer par la CA LLNG. La politique de clés CA peut rejeter ces clés, mais un contrôle côté PAM offre une défense en profondeur.
+**Description :** Des utilisateurs peuvent générer des clés SSH utilisant des algorithmes cryptographiques faibles ou obsolètes (DSA, RSA-1024) et les faire signer par la CA LLNG.
+
+> **Correction d'une hypothèse de cette fiche.** Elle indiquait que « la politique de clés CA peut rejeter ces clés », le contrôle PAM n'étant qu'une défense en profondeur. C'est faux : le plugin `ssh-ca` **n'applique aucune contrainte de type ni de taille** — une clé RSA-1024 est signée sans objection. Le contrôle côté PAM n'est donc pas une défense en profondeur, c'est **le seul contrôle**. Il doit être activé (`ssh_key_policy_enabled = true`), faute de quoi le risque reste à son niveau initial. Voir [09-portail-llng.md](09-portail-llng.md) pour le périmètre serveur.
 
 **Vecteurs d'attaque :**
 
@@ -723,7 +725,7 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 
 **Conséquence :** Un attaquant pourrait casser une clé faible et obtenir le certificat associé.
 
-**Remédiation embarquée (IMPLÉMENTÉE, sous condition de déploiement) :**
+**Remédiation embarquée (côté client uniquement, sous condition de déploiement) :**
 
 Le module PAM applique une politique de restriction des types **et des tailles**
 de clés SSH :

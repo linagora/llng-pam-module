@@ -127,17 +127,17 @@ du chemin d'attaque : les scénarios sont l'objet des ateliers 3 et 4.
 
 Correspondance avec les fiches de l'atelier 4 :
 
-| ER  | Fiches de risque associées                                                             |  Nb |
-| --- | -------------------------------------------------------------------------------------- | --: |
-| ER1 | R4, R8, R11, R-S3, R-S6, R-S11, R-S12, R-S13, R-S16, R-S22, R-S23, R-S24, R-SA1, R-SA2 |  14 |
-| ER2 | R12, R-S8, R-S15                                                                       |   3 |
-| ER3 | R-S5, R-S18, R-S19, R-S20, R-S21, R-S25                                                |   6 |
-| ER4 | R-S9                                                                                   |   1 |
-| ER5 | R6, R9, R10, R-S7, R-S10, R-S14, R-S17                                                 |   7 |
-| ER6 | R5, R-S4                                                                               |   2 |
-| ER7 | R0, R1, R2, R3, R7, R13                                                                |   6 |
+| ER  | Fiches de risque associées                                                                   |  Nb |
+| --- | -------------------------------------------------------------------------------------------- | --: |
+| ER1 | R4, R8, R11, R-S3, R-S6, R-S11, R-S12, R-S13, R-S16, R-S22, R-S23, R-S24, R-SA1, R-SA2, R-P1 |  15 |
+| ER2 | R12, R-S8, R-S15, R-P7                                                                       |   4 |
+| ER3 | R-S5, R-S18, R-S19, R-S20, R-S21, R-S25, R-P6                                                |   7 |
+| ER4 | R-S9                                                                                         |   1 |
+| ER5 | R6, R9, R10, R-S7, R-S10, R-S14, R-S17, R-P2, R-P3, R-P8                                     |  10 |
+| ER6 | R5, R-S4, R-P4                                                                               |   3 |
+| ER7 | R0, R1, R2, R3, R7, R13, R-P5                                                                |   7 |
 
-Les 39 fiches de l'atelier 4 sont rattachées, chacune à un et un seul événement
+Les 47 fiches de l'atelier 4 sont rattachées, chacune à un et un seul événement
 redouté ; `tests/ebios_matrix_check.py` vérifie que la table ci-dessus les
 couvre toutes et n'en invente aucune.
 

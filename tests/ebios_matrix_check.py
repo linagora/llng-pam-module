@@ -25,10 +25,11 @@ DOC = Path(__file__).resolve().parent.parent / "doc" / "security"
 
 ENROLLMENT = DOC / "01-enrollment.md"
 SSH = DOC / "02-ssh-connection.md"
+PORTAL = DOC / "09-portail-llng.md"
 CONSOLIDATED = DOC / "99-risk-reduce.md"
 WORKSHOP1 = DOC / "04-atelier1-cadrage-socle.md"
 
-RISK_ID = r"R-?S?A?\d+"
+RISK_ID = r"R-?(?:SA|S|P)?\d+"
 HEADING = re.compile(rf"^#{{3,4}}\s+({RISK_ID})\s*[-–—]\s", re.M)
 ANY_HEADING = re.compile(r"^#{1,6}\s", re.M)
 
@@ -138,6 +139,7 @@ def main():
 
     enrol = sheets(ENROLLMENT)
     ssh = sheets(SSH)
+    portal = sheets(PORTAL) if PORTAL.exists() else {}
 
     if len(enrol) < 14:
         errors.append(f"01-enrollment.md: only {len(enrol)} scored sheets parsed, expected 14")
@@ -153,7 +155,13 @@ def main():
          {k: v["initial"] for k, v in ssh.items()}, "initial"),
         ("02-ssh après", SSH, "### Après remédiation complète\n",
          {k: v["residual"] for k, v in ssh.items()}, "residual"),
+        ("09-portail avant", PORTAL, "## Matrice des risques du portail\n\n### Avant remédiation\n",
+         {k: v["initial"] for k, v in portal.items()}, "initial"),
+        ("09-portail après", PORTAL, "### Après remédiation\n",
+         {k: v["residual"] for k, v in portal.items()}, "residual"),
     ]
+    if not portal:
+        checks = checks[:4]
 
     for label, path, heading, expected, kind in checks:
         try:
@@ -167,6 +175,7 @@ def main():
     all_residual = {}
     all_residual.update({k: v["residual"] for k, v in enrol.items()})
     all_residual.update({k: v["residual"] for k, v in ssh.items()})
+    all_residual.update({k: v["residual"] for k, v in portal.items()})
     try:
         placed, _ = matrix(CONSOLIDATED, "## Matrice des Risques Résiduels (Mode E)\n")
     except ValueError:

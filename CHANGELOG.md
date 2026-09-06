@@ -76,6 +76,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated before installation, as before. `doc/pam-modes.md` and EBIOS risk
   R-S16 now describe the trade-off and name the flag.
 
+- **The LLNG plugin boundary is now inside the risk study (#218).** The study
+  covered the client half only: the four LemonLDAP::NG plugins that carry
+  authorization, certificate issuance and machine identity were a trusted
+  boundary with no risk sheets, no measures and no conditions of use, while the
+  sheets invoked LLNG-side mechanisms (`RequirePKCE`, `RtActivity`, CrowdSec,
+  ssh-ca) as givens.
+
+  `doc/security/09-portail-llng.md` adds **eight workshop-4 risk sheets** for the
+  server half: caller impersonation on `/pam/*` (no RP/audience binding, and
+  `server_group` read from the request body when `pamAccessServerGroups` is
+  empty — the configuration the architecture document recommends), unauthorized
+  certificate revocation (`/ssh/certs` and `/ssh/revoke` have no authorization at
+  all: any SSO account can mass-revoke), KRL corruption taking the whole fleet
+  down, CA private-key exposure, enrolment approval by any authenticated user,
+  loss of machine identity, **concurrency on the shared session store as a
+  systemic pattern** (seven read-modify-write races, not seven bugs), and a cheap
+  authenticated denial of service on `ssh-ca`.
+
+  Four conditions of use (CE16–CE19) and eleven treatment measures (MT40–MT50)
+  follow, with the upstream ones marked as such — their owner is the plugin
+  maintainer, not this repository. Two of the new risks land in the orange zone
+  and are carried to the acceptance table: R-P3 and R-P7 both depend on an
+  upstream fix that does not exist yet, so accepting them means accepting a fix
+  delay outside the project's control.
+
+  One existing claim is corrected: R-S11 said the CA "can reject" weak keys, with
+  the PAM check as defence in depth. The CA enforces no key type or size at all —
+  an RSA-1024 key signs without objection — so the PAM policy is not defence in
+  depth, it is **the only control**, and the sheet no longer reads "IMPLÉMENTÉE".
+
 - **The missing EBIOS RM workshops, treatment plan and homologation dossier
   (#212, #216, #217).** `doc/security/` was presented as an EBIOS RM study while
   containing only workshop 4: the word "EBIOS" appeared nowhere inside it, there
