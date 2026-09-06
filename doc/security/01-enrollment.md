@@ -1114,18 +1114,27 @@ sequenceDiagram
 | Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
 | ------------------------ | ------------------- | ---------------- | ------------ | ----------------- |
 | **4 - Critique**         |                     | R3 R5 R7 R11 R13 | R4           |                   |
-| **3 - Important**        |                     | R8 R10           | R1 R2 R12    |                   |
-| **2 - Limité**           |                     | R0 R6 R9         |              |                   |
+| **3 - Important**        |                     | R2 R8 R10        | R1 R12       |                   |
+| **2 - Limité**           |                     | R0 R9            | R6           |                   |
 | **1 - Négligeable**      |                     |                  |              |                   |
 
 ### Après remédiation
 
+Configuration de référence : un `client_id` par projet, avec la segmentation
+`server_group` appliquée. Chaque case reprend le **score résiduel écrit dans la
+fiche** du risque ; aucune valeur conditionnelle n'est appliquée en silence ici
+(la variante « clients OIDC distincts » a sa propre matrice ci-dessous).
+
 | Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
 | ------------------------ | ------------------- | ---------------- | ------------ | ----------------- |
-| **4 - Critique**         | R5                  |                  |              |                   |
-| **3 - Important**        | R1 R3 R8 R12        | R2               |              |                   |
-| **2 - Limité**           | R4 R7 R9 R10 R11    | R6               |              |                   |
-| **1 - Négligeable**      | R0 R13              |                  |              |                   |
+| **4 - Critique**         | R4 R5               |                  |              |                   |
+| **3 - Important**        | R2 R3 R7 R8 R11 R12 | R1               |              |                   |
+| **2 - Limité**           | R0 R9 R10           |                  |              |                   |
+| **1 - Négligeable**      | R13                 | R6               |              |                   |
+
+> **R4 :** sa fiche donne `I=4 (ou 3 avec segmentation server_group)`. La matrice
+> retient la valeur non conditionnelle, `I=4` ; avec `pamAccessServerGroups`
+> renseigné, R4 descend en `I=3` aux côtés de R7 et R11.
 
 **Remédiations appliquées :**
 
@@ -1140,16 +1149,30 @@ sequenceDiagram
 
 > **Deux axes à ne pas confondre.** Le `server_group` sépare les _politiques_ **à l'intérieur** d'un projet (un même `client_id`) ; il ne borne le rayon d'impact des _credentials_ d'enrôlement que si le **mapping d'autorité `client_id → server_group`** (`pamAccessServerGroups` — à ne pas confondre avec les _règles_ d'accès par groupe `pamAccessSshRules`/`pamAccessSudoRules`) est renseigné. Quand un `client_id` couvre un projet **multi-groupes** (le modèle par défaut), l'isolation des credentials passe par des **`client_id` distincts par zone** (ligne « Clients OIDC distincts »), pas par le `server_group`.
 
-**Détail des améliorations avec clients OIDC distincts (voir section 5.2) :**
+### Après remédiation, variante « clients OIDC distincts » (configuration conditionnelle)
 
-| Risque  | Sans clients distincts | Avec clients distincts | Amélioration                                                       |
-| ------- | ---------------------- | ---------------------- | ------------------------------------------------------------------ |
-| **R0**  | P=1, I=2               | **P=1, I=1**           | Le secret compromis ne peut initier d'enrôlements que dans sa zone |
-| **R4**  | P=1, I=3               | **P=1, I=2**           | Le token volé n'est valide que pour le scope de sa zone            |
-| **R7**  | P=1, I=3               | **P=1, I=2**           | Le serveur malveillant ne peut usurper que sa zone                 |
-| **R11** | P=1, I=3               | **P=1, I=2**           | Le refresh_token compromis est limité à sa zone                    |
+Cette matrice ne s'applique **que si** un `client_id` distinct est déclaré par
+zone (voir section 5.2). Ce n'est pas la configuration par défaut, et elle n'est
+pas supposée acquise par la matrice précédente.
 
-**Résultat :** Seul R5 (usurpation du serveur LLNG) reste critique - c'est le point unique de défaillance irréductible.
+| Risque  | Fiche (client unique) | Avec clients distincts | Amélioration                                                       |
+| ------- | --------------------- | ---------------------- | ------------------------------------------------------------------ |
+| **R0**  | P=1, I=2              | **P=1, I=1**           | Le secret compromis ne peut initier d'enrôlements que dans sa zone |
+| **R4**  | P=1, I=4 (3 segmenté) | **P=1, I=2**           | Le token volé n'est valide que pour le scope de sa zone            |
+| **R7**  | P=1, I=3              | **P=1, I=2**           | Le serveur malveillant ne peut usurper que sa zone                 |
+| **R11** | P=1, I=3              | **P=1, I=2**           | Le refresh_token compromis est limité à sa zone                    |
+
+| Impact ↓ / Probabilité → | 1 - Très improbable | 2 - Peu probable | 3 - Probable | 4 - Très probable |
+| ------------------------ | ------------------- | ---------------- | ------------ | ----------------- |
+| **4 - Critique**         | R5                  |                  |              |                   |
+| **3 - Important**        | R2 R3 R8 R12        | R1               |              |                   |
+| **2 - Limité**           | R4 R7 R9 R10 R11    |                  |              |                   |
+| **1 - Négligeable**      | R0 R13              | R6               |              |                   |
+
+**Résultat :** dans la configuration de référence, R4 (vol du fichier token) et
+R5 (usurpation du serveur LLNG) restent en impact 4 ; avec des `client_id`
+distincts par zone, seul R5 y reste — c'est le point unique de défaillance
+irréductible, le seul que la segmentation ne borne pas.
 
 **Légende :**
 

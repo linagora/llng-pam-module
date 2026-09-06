@@ -118,6 +118,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reusable is captured — is now documented in `doc/admin-guide.md`,
   `man ob-ssh` and risk R-S9 of the EBIOS study, where it had never been stated.
 
+- **Every EBIOS risk matrix now agrees with the risk sheets it summarises
+  (#213, #214, #215).** The five matrices in `doc/security/` were maintained by
+  hand and had drifted from the sheets: risks placed one column off, residual
+  scores no sheet states, the consolidated table missing 11 of the analysed risks
+  and carrying two identifiers (`R-S24`, `R-S25`) that had no sheet at all, and
+  `99-risk-reduce.md` stating three different values for `R-S18` on three lines.
+  An evaluator reads the matrix, not the sheets.
+
+  All five are now derived from the sheets, cell by cell, with no local
+  re-evaluation; the conditional "clients OIDC distincts" configuration, which
+  the enrolment matrix used to apply silently, has its own labelled matrix.
+  `R-S24` and `R-S25` gained full risk sheets in
+  `doc/security/02-ssh-connection.md` (vectors, mitigating factors, remediation,
+  residual score) rather than being dropped, and the service-account risks now
+  appear in the SSH matrices so those cover the whole study.
+
+  `tests/ebios_matrix_check.py`, run by `tests/test_ob_ebios_matrices.sh` in CI,
+  re-derives every matrix from the 39 sheets and fails on any divergence, any
+  missing analysed risk, and any identifier without a sheet — including the score
+  repeated in each `99-risk-reduce.md` section heading.
+
+  The backlog was swept against the shipped code at the same time: the
+  "privileged session collector" listed under R-S19 as *not retained* was
+  delivered by #157 (`ob-record-sink` is socket-activated, so the "new permanent
+  service" objection is void, and it writes root-owned files), and "session
+  recording" listed under R-S6 as an improvement is on by default and
+  fail-closed. Both are marked delivered, with what genuinely remains.
+
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions
   up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`
