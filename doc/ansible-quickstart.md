@@ -85,6 +85,23 @@ public key fetched from the portal. See
 [`admin-builder/templates/ansible/role/README.md`](../admin-builder/templates/ansible/role/README.md)
 for the full list of `ob_*` variables.
 
+### If you build with `client_secret_mode: embedded`
+
+The default is `prompt`, which keeps the OIDC client secret out of every
+generated file. `embedded` bakes it in clear text into `defaults/main.yml` and
+into the shell installer, so the bundle becomes a credential:
+
+- `ob-builder` restricts those two files to the building user (`0600` and
+  `0700`) and drops a `.gitignore` at the root of the bundle so a `git add -A`
+  in a surrounding working tree cannot publish it;
+- treat the directory as secret material — do not copy it into a repository, an
+  attachment or a shared drive;
+- to version it anyway, delete that `.gitignore`, rebuild with
+  `client_secret_mode: prompt`, and supply the secret with
+  `ansible-vault encrypt_string 's3cr3t' --name ob_client_secret`;
+- if a bundle has already been shared, rotate the client secret in the LLNG
+  portal: it is a bearer credential for the deployment's OIDC client.
+
 ## Step 2 — Declare your hosts and their IPs
 
 **This is where the IPs of the machines you are building go.** Create an

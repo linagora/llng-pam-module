@@ -53,3 +53,28 @@ local-test/vm/
 build-verify/
 build-asan/
 bv/
+
+# Deployment bundles produced by ob-builder (#203).
+#
+# A bundle built with client_secret_mode=embedded carries the OIDC client
+# secret in clear text in roles/open-bastion/defaults/main.yml, and its
+# inventory names production hosts. Generate bundles OUTSIDE this working
+# tree; these entries only cover the ones that are already here.
+/linagora-setup-bastion/
+/linagora-setup-backend/
+/old-linagora-setup/
+/*-setup-bastion/
+/*-setup-backend/
+/*-setup-standalone/
+
+# Presentation material dropped in the tree
+/Open-Bastion.zip
+
+# Upstream source packages unpacked for reference (openssh, pam)
+/openssh_*.orig.tar.*
+/openssh_*.debian.tar.*
+/openssh_*.dsc
+/pam_*.orig.tar.*
+/pam_*.debian.tar.*
+/pam_*.dsc
+/pam-[0-9]*/
