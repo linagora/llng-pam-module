@@ -101,13 +101,29 @@ SSH_OPTIONS=""
 DEBUG=false
 .fi
 .PP
-A normal (non-root) user cannot read the root-only server token; the single
-privileged call is delegated to
+The server token is never read by
+.BR ob-ssh :
+the single privileged call is delegated to
 .BR ob-cert-daemon (8),
 a socket-activated service reached through the unprivileged
 .BR ob-cert-request (1)
-client. The daemon derives the certificate's user from the connection's
-SO_PEERCRED, so it always mints for the connecting user. No sudo, no setuid.
+client, which reads \fISERVER_TOKEN_FILE\fR from this same configuration file.
+The daemon derives the certificate's user from the connection's SO_PEERCRED, so
+it always mints for the connecting user. No sudo, no setuid, and root takes the
+same path as everyone else.
+.SS "Host key policy"
+The bastion\(->backend hop uses \fBStrictHostKeyChecking=accept-new\fR unless
+\fISSH_OPTIONS\fR sets the option itself. That is trust-on-first-use: the first
+connection to a backend accepts the host key it presents, later ones are pinned
+by \fIknown_hosts\fR. To refuse unknown keys instead, pre-seed the host keys
+over a trusted channel and set
+.PP
+.nf
+SSH_OPTIONS="-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts"
+.fi
+.PP
+\fISSH_OPTIONS\fR is passed to \fBssh\fR before the default and \fBssh\fR keeps
+the first value given for an option, so this wins.
 .SH "TTY HANDLING"
 When standard input is a terminal,
 .B ob-ssh

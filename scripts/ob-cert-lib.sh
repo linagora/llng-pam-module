@@ -3,9 +3,10 @@
 #
 # ob-cert-lib.sh - shared bastion certificate-vouching helpers
 #
-# Sourced by ob-ssh, ob-scp and ob-sftp. Holds the
-# common configuration, logging and the LLNG /pam/bastion-cert minting flow so
-# both the SSH and SCP front-ends behave identically.
+# Sourced by ob-ssh, ob-scp and ob-sftp. Holds the common configuration,
+# logging and certificate-minting flow so the SSH, SCP and SFTP front-ends
+# behave identically. Minting itself is delegated to ob-cert-daemon through the
+# unprivileged ob-cert-request client; nothing here contacts the portal.
 #
 # This file is meant to be SOURCED, not executed. It does not set shell options
 # (the sourcing script owns `set -euo pipefail`) and defines no main().
@@ -17,7 +18,6 @@
 # Configuration (can be overridden via /etc/open-bastion/ssh-proxy.conf, then by
 # the sourcing script before load_config is called).
 : "${PORTAL_URL:=}"
-: "${SERVER_TOKEN_FILE:=/var/lib/open-bastion/token}"
 : "${TARGET_GROUP:=default}"
 : "${TIMEOUT:=10}"
 : "${VERIFY_SSL:=true}"
@@ -76,7 +76,10 @@ load_config() {
             value="${value#\'}" ; value="${value%\'}"
             case "$key" in
                 PORTAL_URL)          PORTAL_URL="$value" ;;
-                SERVER_TOKEN_FILE)   SERVER_TOKEN_FILE="$value" ;;
+                # SERVER_TOKEN_FILE is consumed by ob-cert-daemon, which
+                # parses this same file; nothing in this library reads the
+                # server token any more, so accept the key and drop it here.
+                SERVER_TOKEN_FILE)   : ;;
                 # SERVER_GROUP accepted-but-ignored (back-compat): the bastion's
                 # group is resolved server-side from its enrolled token.
                 SERVER_GROUP)        : ;;
@@ -94,6 +97,11 @@ load_config() {
 
 # Validate required configuration and warn about insecure transports. Call after
 # load_config from the sourcing script's main().
+#
+# PORTAL_URL is no longer contacted from here -- ob-cert-daemon holds the portal
+# connection -- but it stays required: an ssh-proxy.conf without it is an
+# unconfigured bastion, and failing here says so far more clearly than a socket
+# error would.
 validate_config() {
     if [ -z "$PORTAL_URL" ]; then
         error "PORTAL_URL not configured. Set it in $CONFIG_FILE"
@@ -104,32 +112,39 @@ validate_config() {
     fi
 }
 
+# ── Host-key policy ──────────────────────────────────────────────────────────
+# Emit the default host-key options for the bastion->backend hop, unless the
+# operator has already set StrictHostKeyChecking in SSH_OPTIONS.
+#
+# The default is accept-new: the first connection to a backend trusts whatever
+# host key it presents (TOFU), later ones are pinned by known_hosts. An attacker
+# who can intercept the bastion->backend path can therefore MITM that first hop
+# and read the session. The ephemeral private key never leaves the bastion and
+# the certificate is pinned to the bastion's source address, so credentials are
+# not stolen -- but the session content is exposed.
+#
+# ssh takes the FIRST value it is given for an option, so this must be emitted
+# after the operator's SSH_OPTIONS to be overridable; a site that pre-seeds
+# /etc/ssh/ssh_known_hosts sets, in /etc/open-bastion/ssh-proxy.conf:
+#
+#   SSH_OPTIONS="-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts"
+#
+# See doc/security/02-ssh-connection.md.
+build_host_key_opts() {
+    # Consumed by the sourcing script (ob-ssh / ob-scp / ob-sftp), not this lib.
+    # shellcheck disable=SC2034
+    HOST_KEY_OPTS=()
+    local opt
+    for opt in ${SSH_OPTIONS_ARRAY[@]+"${SSH_OPTIONS_ARRAY[@]}"}; do
+        case "$opt" in
+            StrictHostKeyChecking=*|-oStrictHostKeyChecking=*) return 0 ;;
+        esac
+    done
+    # shellcheck disable=SC2034
+    HOST_KEY_OPTS=(-o StrictHostKeyChecking=accept-new)
+}
+
 # ── Certificate minting ──────────────────────────────────────────────────────
-# Build curl options into the global CURL_OPTS array.
-build_curl_opts() {
-    # --fail-with-body (not -f): on a non-2xx response curl still writes the
-    # JSON error body to stdout AND returns non-zero, so the caller can detect
-    # structured reasons like {"reason":"voucher_expired"} instead of getting an
-    # empty body. (-f would discard the body and hide the reason.)
-    CURL_OPTS=("-s" "--fail-with-body" "--connect-timeout" "$TIMEOUT")
-    if [ "$VERIFY_SSL" = "false" ]; then
-        CURL_OPTS+=("-k")
-    fi
-}
-
-# Read the server access token (JSON from ob-enroll, or plain text).
-get_server_token() {
-    if [ ! -f "$SERVER_TOKEN_FILE" ]; then
-        error "Server token file not found: $SERVER_TOKEN_FILE"
-        exit 1
-    fi
-    if head -c1 "$SERVER_TOKEN_FILE" | grep -q '{'; then
-        jq -r '.access_token // empty' "$SERVER_TOKEN_FILE" 2>/dev/null || cat "$SERVER_TOKEN_FILE"
-    else
-        cat "$SERVER_TOKEN_FILE"
-    fi
-}
-
 # Validate a hostname to prevent SSH option injection.
 # Only allows: alphanumeric, dots, hyphens, underscores, colons (IPv6), brackets.
 validate_hostname() {
@@ -163,62 +178,31 @@ request_bastion_cert() {
 
     debug "Requesting bastion cert for user $user to host $target_host"
 
+    # The server token is root-only BY DESIGN, and this is the only path: the
+    # single privileged call is performed by ob-cert-daemon (socket-activated,
+    # runs as root), reached through the unprivileged ob-cert-request client.
+    # The daemon derives the certificate's user from the connection's
+    # SO_PEERCRED — so it always mints for the connecting user, whatever we send
+    # — and the server token never leaves it. No sudo, no setuid, and minting is
+    # decoupled from the interactive sudo policy (Mode E).
+    #
+    # Until 0.6.2 a `[ -r "$SERVER_TOKEN_FILE" ]` branch called LLNG directly
+    # with the bearer token whenever the caller could read it — root, or a lab
+    # that had relaxed the 0600. It was an escape hatch around the SO_PEERCRED
+    # design with no counterpart in the daemon's checks, so it is gone: root
+    # and unprivileged callers now take the same, audited path (#202).
     local response
-    if [ -r "$SERVER_TOKEN_FILE" ]; then
-        # Privileged path (root, or a relaxed lab setup): call LLNG directly.
-        local server_token
-        server_token=$(get_server_token)
-        if [ -z "$server_token" ]; then
-            error "Failed to read server token"
-            return 1
-        fi
-
-        build_curl_opts
-
-        local json_payload
-        json_payload=$(jq -n \
-            --arg user "$user" \
-            --arg target_host "$target_host" \
-            --arg target_group "$TARGET_GROUP" \
-            --arg public_key "$pubkey" \
-            --arg voucher "$VOUCHER" \
-            '{user: $user, target_host: $target_host, target_group: $target_group, public_key: $public_key, voucher: $voucher}')
-
-        # 2>/dev/null (not 2>&1): keep curl's stderr OUT of $response so it stays
-        # valid JSON. With --fail-with-body the JSON error body is captured even
-        # on non-2xx, so we do NOT early-return on a non-zero rc — the parser
-        # below extracts .reason/.error. Only a truly empty response is fatal.
-        response=$(curl "${CURL_OPTS[@]}" \
-            -X POST \
-            -H "Authorization: Bearer $server_token" \
-            -H "Content-Type: application/json" \
-            -d "$json_payload" \
-            "${PORTAL_URL}/pam/bastion-cert" 2>/dev/null) || true
-        if [ -z "$response" ]; then
-            error "Failed to request bastion certificate (no response from ${PORTAL_URL}/pam/bastion-cert)"
-            return 1
-        fi
-    else
-        # Normal user path: the server token is root-only BY DESIGN. The single
-        # privileged call is performed by ob-cert-daemon (socket-activated, runs
-        # as root), reached through the unprivileged ob-cert-request client. The
-        # daemon derives the certificate's user from the connection's SO_PEERCRED
-        # — so it always mints for the connecting user, whatever we send — and
-        # the server token never leaves it. No sudo, no setuid, and minting is
-        # decoupled from the interactive sudo policy (Mode E).
-        debug "Server token not readable; requesting via ob-cert-daemon socket"
-        local rc=0
-        local client
-        client=$(command -v ob-cert-request 2>/dev/null) || client="/usr/bin/ob-cert-request"
-        # Protocol (newline-delimited): target_host, target_group, voucher, pubkey.
-        response=$(printf '%s\n%s\n%s\n%s\n' \
-            "$target_host" "$TARGET_GROUP" "$VOUCHER" "$pubkey" \
-            | "$client") || rc=$?
-        if [ -z "$response" ]; then
-            error "Failed to request bastion certificate via ob-cert-daemon (rc=$rc)."
-            error "Is ob-cert.socket enabled? (re-run ob-bastion-setup on this bastion)"
-            return 1
-        fi
+    local rc=0
+    local client
+    client=$(command -v ob-cert-request 2>/dev/null) || client="/usr/bin/ob-cert-request"
+    # Protocol (newline-delimited): target_host, target_group, voucher, pubkey.
+    response=$(printf '%s\n%s\n%s\n%s\n' \
+        "$target_host" "$TARGET_GROUP" "$VOUCHER" "$pubkey" \
+        | "$client") || rc=$?
+    if [ -z "$response" ]; then
+        error "Failed to request bastion certificate via ob-cert-daemon (rc=$rc)."
+        error "Is ob-cert.socket enabled? (re-run ob-bastion-setup on this bastion)"
+        return 1
     fi
 
     local cert

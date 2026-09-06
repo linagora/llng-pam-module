@@ -64,6 +64,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so there is nothing to hide. The repository's own `.gitignore` also covers the
   bundle directories that were sitting untracked in the working tree.
 
+- **`ob-ssh` / `ob-scp` / `ob-sftp` no longer have a privileged shortcut around
+  `ob-cert-daemon` (#202).** `request_bastion_cert()` took a
+  `[ -r "$SERVER_TOKEN_FILE" ]` branch that called `/pam/bastion-cert` directly
+  with the bastion's bearer token whenever the caller could read the token file
+  — root, or a lab that had relaxed the `0600`. It was an escape hatch around
+  the SO_PEERCRED design, with none of the daemon's checks. It is gone: root and
+  unprivileged callers now take the same audited path through
+  `ob-cert-request` → `ob-cert-daemon`. `get_server_token()` and
+  `build_curl_opts()` went with it — the shared library no longer contacts the
+  portal at all. `SERVER_TOKEN_FILE` stays in `ssh-proxy.conf`: it is read by
+  `ob-cert-daemon`, which parses the same file.
+
+- **The bastion→backend host-key policy can now be tightened (#202).** The three
+  connectors passed `-o StrictHostKeyChecking=accept-new` *before* the
+  operator's `SSH_OPTIONS`, and `ssh` keeps the **first** value it is given for
+  an option — so the trust-on-first-use default could not be overridden at all.
+  The default is now emitted only when `SSH_OPTIONS` does not set the option, so
+  a site that pre-seeds `/etc/ssh/ssh_known_hosts` can refuse unknown backend
+  host keys:
+
+  ```
+  SSH_OPTIONS="-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts"
+  ```
+
+  The TOFU trade-off itself — an attacker on the bastion→backend path can MITM
+  the *first* connection to a backend and read the session, though nothing
+  reusable is captured — is now documented in `doc/admin-guide.md`,
+  `man ob-ssh` and risk R-S9 of the EBIOS study, where it had never been stated.
+
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions
   up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`

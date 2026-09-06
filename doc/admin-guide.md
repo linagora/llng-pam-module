@@ -294,15 +294,48 @@ cat > /etc/open-bastion/ssh-proxy.conf << 'EOF'
 # LLNG SSH Proxy configuration
 PORTAL_URL=https://auth.example.com
 SERVER_TOKEN_FILE=/var/lib/open-bastion/token
-SERVER_GROUP=bastion
 TARGET_GROUP=production
 TIMEOUT=10
 VERIFY_SSL=true
-SSH_OPTIONS="-o StrictHostKeyChecking=accept-new"
 EOF
 
 chmod 644 /etc/open-bastion/ssh-proxy.conf
 ```
+
+`PORTAL_URL`, `SERVER_TOKEN_FILE`, `VERIFY_SSL` and `TIMEOUT` are read here by
+`ob-cert-daemon`; `ob-ssh` and friends read only `TARGET_GROUP`, `SSH_OPTIONS`
+and `DEBUG`. The token itself is never read by the user-facing commands — the
+daemon holds it, and refuses it unless it is a root-owned `0600` regular file.
+`SERVER_GROUP` is still parsed for backward compatibility but does nothing: the
+bastion's group is resolved server-side from its enrolled token.
+
+#### Host-key policy on the bastion→backend hop
+
+`ob-ssh`, `ob-scp` and `ob-sftp` connect with
+`StrictHostKeyChecking=accept-new` unless you say otherwise. That is
+trust-on-first-use: the **first** connection to a given backend accepts whatever
+host key it presents, and every later one is pinned against the bastion's
+`known_hosts`.
+
+What that costs you: an attacker able to intercept the bastion→backend network
+path can impersonate a backend on that first connection and read the session.
+What it does not cost you: the ephemeral private key never leaves the bastion
+and the certificate is pinned to the bastion's source address, so nothing
+reusable is captured.
+
+If the bastion→backend path is not trusted, pre-seed the host keys and turn the
+policy off. `SSH_OPTIONS` is passed to `ssh` **before** the default, and `ssh`
+keeps the first value it is given for an option, so setting it here wins:
+
+```bash
+# Collect the backends' host keys over a trusted channel, once
+ssh-keyscan -t ed25519 backend-01 backend-02 >> /etc/ssh/ssh_known_hosts
+
+# /etc/open-bastion/ssh-proxy.conf
+SSH_OPTIONS="-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts"
+```
+
+A backend whose key is not in that file is then refused instead of trusted.
 
 Users can then connect to backends in one command.
 
