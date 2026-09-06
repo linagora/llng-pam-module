@@ -82,6 +82,10 @@ HARDENING_LIMITS_DST="/etc/security/limits.d/open-bastion.conf"
 HARDENING_AT_ALLOW="/etc/at.allow"
 HARDENING_CRON_ALLOW="/etc/cron.allow"
 ENABLE_HARDENING=false
+# Opt-in: scope `timestamp_timeout=0` to %open-bastion-sudo so SSO users present
+# a fresh LLNG token on every sudo instead of riding sudo's own credential cache
+# (#178). Off by default: it changes the prompt cadence for every SSO user.
+SUDO_FRESH_OTP=false
 # Result of setup_hardening, consumed by print_summary. One of:
 #   not-applied (default — step never ran or was opt-out)
 #   applied     (all sub-steps succeeded)
@@ -615,6 +619,9 @@ session    required     pam_unix.so
         echo "$pam_content"
         info "[DRY-RUN] Would create group open-bastion-sudo"
         info "[DRY-RUN] Would create /etc/sudoers.d/open-bastion with: %open-bastion-sudo ALL=(ALL) ALL"
+        if [ "$SUDO_FRESH_OTP" = "true" ]; then
+            info "[DRY-RUN] Would add: Defaults:%open-bastion-sudo timestamp_timeout=0"
+        fi
         return 0
     fi
 
@@ -638,32 +645,95 @@ session    required     pam_unix.so
     groupadd --system open-bastion-sudo 2>/dev/null || true
 
     local sudoers_file="/etc/sudoers.d/open-bastion"
-    if [ ! -f "$sudoers_file" ]; then
-        # Write to a temp file and validate with visudo before installing, so a
-        # malformed drop-in can never break sudo on the host.
-        local tmp_sudoers
+    write_open_bastion_sudoers "$sudoers_file" "# Open Bastion: defense-in-depth sudo authorization"
+}
+
+# Render the drop-in's contents. Split out of write_open_bastion_sudoers so the
+# exact bytes can be asserted in a test without root (install -o root would
+# fail) and without touching /etc.
+render_open_bastion_sudoers() {
+    local header="$1"
+
+    printf '%s\n' "$header"
+    printf '%s\n' "# Both group membership (managed by PAM session) AND LLNG token are required"
+    if [ "$SUDO_FRESH_OTP" = "true" ]; then
+        printf '%s\n' "# --enable-sudo-fresh-otp: no sudo credential caching for SSO users, so"
+        printf '%s\n' "# every elevation goes through the PAM auth phase and asks for an LLNG token."
+        printf '%s\n' "Defaults:%open-bastion-sudo timestamp_timeout=0"
+    fi
+    printf '%s\n' "%open-bastion-sudo ALL=(ALL) ALL"
+}
+
+# Install /etc/sudoers.d/open-bastion, optionally with the fresh-OTP Defaults.
+#
+# sudo caches its own credential (timestamp_timeout, 15 min by default, idle-based
+# and rearmed on every use). While that timestamp is valid sudo skips the PAM
+# AUTH phase entirely, so pam_openbastion never runs and no LLNG one-time token
+# is asked for -- a user who keeps sudoing is never prompted again (#178).
+#
+# What that does NOT weaken: authorization is re-checked live on every sudo (the
+# account phase always runs), so an LLNG-side revocation takes effect at once,
+# and each OTP is single-use on the portal. What it does weaken is the Mode E
+# claim that every elevation is backed by a *fresh* SSO authentication.
+#
+# --enable-sudo-fresh-otp scopes timestamp_timeout=0 to the SSO group, so those
+# users present a token on every sudo while local break-glass admins keep normal
+# sudo behaviour. It is opt-in: turning it on by default would start prompting
+# on every sudo across an upgraded fleet, including inside scripts.
+write_open_bastion_sudoers() {
+    local sudoers_file="$1" header="$2"
+    local tmp_sudoers rendered
+
+    rendered=$(render_open_bastion_sudoers "$header")
+
+    if [ -f "$sudoers_file" ]; then
+        # Never rewrite an operator's file behind their back; only add the
+        # Defaults line they explicitly asked for, and only if it is missing.
+        if [ "$SUDO_FRESH_OTP" != "true" ] \
+           || grep -q '^Defaults:%open-bastion-sudo[[:space:]].*timestamp_timeout=0' "$sudoers_file"; then
+            return 0
+        fi
         tmp_sudoers=$(mktemp)
         {
-            echo "# Open Bastion: defense-in-depth sudo authorization"
-            echo "# Both group membership (managed by PAM session) AND LLNG token are required"
-            echo "%open-bastion-sudo ALL=(ALL) ALL"
+            printf '%s\n' "# --enable-sudo-fresh-otp: no sudo credential caching for SSO users (#178)"
+            printf '%s\n' "Defaults:%open-bastion-sudo timestamp_timeout=0"
+            cat "$sudoers_file"
         } > "$tmp_sudoers"
         if visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
-            # Ensure the drop-in directory exists (created 0750 root:root only
-            # when missing, so we never relax an existing one), then install and
-            # CHECK the result — otherwise a failed install would leave sudo
-            # broken while we log success.
-            [ -d /etc/sudoers.d ] || install -d -m 0750 -o root -g root /etc/sudoers.d
+            backup_file "$sudoers_file"
             if install -m 0440 -o root -g root "$tmp_sudoers" "$sudoers_file"; then
-                info "Created $sudoers_file"
+                info "Added timestamp_timeout=0 for %open-bastion-sudo in $sudoers_file"
             else
-                warn "Failed to install $sudoers_file; sudo may not work for SSO users"
+                warn "Failed to update $sudoers_file"
             fi
         else
-            warn "Generated sudoers rule failed visudo validation; not installing"
+            warn "Updated sudoers rule failed visudo validation; leaving $sudoers_file untouched"
         fi
         rm -f "$tmp_sudoers"
+        return 0
     fi
+
+    # Write to a temp file and validate with visudo before installing, so a
+    # malformed drop-in can never break sudo on the host.
+    tmp_sudoers=$(mktemp)
+    printf '%s\n' "$rendered" > "$tmp_sudoers"
+    if visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+        # Ensure the drop-in directory exists (created 0750 root:root only when
+        # missing, so we never relax an existing one), then install and CHECK the
+        # result -- otherwise a failed install would leave sudo broken while we
+        # log success.
+        [ -d /etc/sudoers.d ] || install -d -m 0750 -o root -g root /etc/sudoers.d
+        if install -m 0440 -o root -g root "$tmp_sudoers" "$sudoers_file"; then
+            info "Created $sudoers_file"
+            [ "$SUDO_FRESH_OTP" = "true" ] \
+                && info "SSO users must present a fresh LLNG token on every sudo (timestamp_timeout=0)"
+        else
+            warn "Failed to install $sudoers_file; sudo may not work for SSO users"
+        fi
+    else
+        warn "Generated sudoers rule failed visudo validation; not installing"
+    fi
+    rm -f "$tmp_sudoers"
 }
 
 # Configure sshd for max security (Mode E)
@@ -1739,6 +1809,11 @@ Options:
   --no-sudo               Don't configure sudo with LLNG
   --no-create-user        Don't enable automatic user creation
   --max-security          Enable Mode E (SSO certificates only, sudo via LLNG token, KRL)
+  --enable-sudo-fresh-otp Require a fresh LLNG token on EVERY sudo for SSO users
+                          (writes `Defaults:%open-bastion-sudo timestamp_timeout=0`).
+                          Without it, sudo's own 15-minute credential cache lets a
+                          user keep elevating without being asked again. Local
+                          break-glass admins are unaffected. OFF by default.
   --enable-hardening      Apply system-wide containment hardening (logind KillUserProcesses,
                           mask atd, at/cron allow-lists, nproc limit). OFF by default —
                           modifies system-wide behaviour, opt in only on dedicated backend hosts.
@@ -1869,6 +1944,10 @@ parse_args() {
                 ;;
             --max-security)
                 MAX_SECURITY=true
+                shift
+                ;;
+            --enable-sudo-fresh-otp)
+                SUDO_FRESH_OTP=true
                 shift
                 ;;
             --enable-hardening)

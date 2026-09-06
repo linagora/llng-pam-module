@@ -172,6 +172,21 @@ Le Mode E bloque l'escalade par conception (réauthentification SSO obligatoire)
 2. **Durée de token réduite** : Limiter la validité du token PAM-access à 5 minutes pour les opérations sudo
 3. **Audit renforcé** : Logger chaque utilisation de sudo avec le token ID pour traçabilité
 
+**Précision sur la fraîcheur de la réauthentification :** `sudo` possède son
+propre cache d'identifiants (`timestamp_timeout`, 15 min par défaut sur Debian,
+réarmé à chaque usage). Tant qu'il est valide, `sudo` **saute entièrement la
+phase PAM `auth`** : `pam_openbastion` n'est pas appelé et aucun token LLNG
+n'est demandé. Ce que cela n'affaiblit pas : le token est à usage unique et
+consommé côté portail, et la phase `account` — donc la vérification
+d'autorisation — s'exécute en direct à **chaque** `sudo`, si bien qu'une
+révocation LLNG prend effet immédiatement. Ce que cela affaiblit : la
+revendication « chaque élévation est adossée à une authentification SSO
+*fraîche* ». L'option `--enable-sudo-fresh-otp` d'`ob-bastion-setup` /
+`ob-backend-setup` écrit `Defaults:%open-bastion-sudo timestamp_timeout=0` et
+rétablit la revendication littérale ; elle reste **opt-in** parce qu'elle change
+la cadence des invites pour tous les utilisateurs SSO. Voir
+[doc/pam-modes.md](../pam-modes.md#how-often-you-are-actually-prompted-sudos-timestamp-cache).
+
 **Séparation des privilèges implémentée (enregistrement de session) :** le recording est streamé vers le puits root `ob-record-sink` (socket-activé, utilisateur dérivé de `SO_PEERCRED`), qui écrit des fichiers **root-owned** (`root:ob-sessions 0640`) dans une arborescence `root:ob-sessions 0750`. L'utilisateur enregistré n'a **aucun** accès (lister/lire/supprimer/tronquer), y compris sur ses propres enregistrements. L'enregistreur vivant sur le **bastion** (point de passage), être root sur un backend n'y échappe pas. Voir R-S18 ci-dessous.
 
 ### R-S18 _(P=1, I=1)_ - Effacement des enregistrements de session
