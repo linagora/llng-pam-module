@@ -48,37 +48,44 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length", 0)))
+        code, payload = self._response_for(self.path)
+        if payload is HTML:
+            self._html()
+        else:
+            self._json(code, payload)
 
+    def _response_for(self, path):
+        """(status, body) for this MODE and path. HTML means the catch-all."""
         if MODE == "catchall":
-            return self._html()
+            return 200, HTML
 
-        if self.path == "/pam/whoami":
+        if path == "/pam/whoami":
             if MODE == "whoami":
-                return self._json(200, {
+                return 200, {
                     "server_id": "9f86d081",
                     "bastion_id": "9f86d081",
                     "client_id": "pam-access",
                     "server_group": "bastion",
-                })
+                }
             if MODE == "forbidden":
-                return self._json(403, {"error": "PAM_CALLER_RP_REFUSED"})
-            if MODE in ("catchall-then-probe",):
-                return self._html()
-            return self._json(404, {"error": "not found"})
+                return 403, {"error": "PAM_CALLER_RP_REFUSED"}
+            if MODE == "catchall-then-probe":
+                return 200, HTML
+            return 404, {"error": "not found"}
 
-        if self.path == "/pam/bastion-token":
+        if path == "/pam/bastion-token":
             if MODE in ("legacy-id", "catchall-then-probe"):
-                return self._json(200, {"bastion_id": "legacy-id-42"})
+                return 200, {"bastion_id": "legacy-id-42"}
             if MODE == "legacy-jwt":
-                return self._json(200, {"bastion_jwt": jwt_with({"bastion_id": "jwt-id-7"})})
+                return 200, {"bastion_jwt": jwt_with({"bastion_id": "jwt-id-7"})}
             if MODE == "legacy-badjwt":
                 # A JWT whose payload segment is not base64url at all. This used
                 # to kill the script at the assignment under `set -e`, with rc=1
                 # and no message, instead of reaching its own error path.
-                return self._json(200, {"bastion_jwt": "header.!!!not-base64!!!.signature"})
-            return self._json(404, {"error": "gone"})
+                return 200, {"bastion_jwt": "header.!!!not-base64!!!.signature"}
+            return 404, {"error": "gone"}
 
-        self._json(404, {"error": "unknown path"})
+        return 404, {"error": "unknown path"}
 
 
 HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
