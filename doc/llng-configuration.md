@@ -350,9 +350,10 @@ pamAccessSudoRules = { \
 > }
 > ```
 >
-> When it is non-empty, `/pam/authorize` and `/pam/bastion-token` derive the
-> host's server group from its enrolled `client_id` instead of trusting the
-> group sent in the request. Leave it **empty** for the usual model of one
+> When it is non-empty, `/pam/authorize` derives the host's server group from
+> its enrolled `client_id` instead of trusting the group sent in the request,
+> and `/pam/whoami` reports that mapped group (and only that one — a server
+> asking who it is is never told back what it claimed about itself). Leave it **empty** for the usual model of one
 > `client_id` per project covering several server groups — an unmapped
 > `client_id` is refused. `/pam/bastion-cert` uses no group at all; it relies
 > solely on the voucher.

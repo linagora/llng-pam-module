@@ -55,7 +55,19 @@ info "enrol the bastion (--skip-setup), approving the device code in parallel"
 run_installer "$BASTION_VM" "$WORK/boot-bastion.sh" --skip-setup >"$WORK/bastion-enroll.log" 2>&1
 wait
 BID="$(dssh "${IP[$BASTION_VM]}" 'sudo ob-bastion-id 2>/dev/null' 2>/dev/null | tr -d '\r\n')"
-[ -n "$BID" ] && ok "bastion enrolled; ob-bastion-id=$BID" || { bad "ob-bastion-id failed"; BID="ob-bastion"; }
+if [ -n "$BID" ]; then
+    ok "bastion enrolled; ob-bastion-id=$BID"
+else
+    # Do NOT fall back to a literal here. `allowed_bastions` is matched against
+    # the bastion= field of the hop certificate key-id, which carries the
+    # portal-assigned device id; any placeholder simply never matches, so every
+    # hop is refused and the lab fails several phases later with certificate
+    # errors that say nothing about the real cause. An empty list means "accept
+    # any vouched bastion": weaker, but it fails in the direction that leaves
+    # the rest of the run diagnosable, and the run is already marked failed.
+    bad "ob-bastion-id failed — allowed_bastions left EMPTY, the hop allowlist is NOT under test in this run"
+    BID=""
+fi
 
 info "run bastion setup (--skip-enroll; this locks port 22)"
 run_installer "$BASTION_VM" "$WORK/boot-bastion.sh" --skip-enroll >"$WORK/bastion-setup.log" 2>&1 \

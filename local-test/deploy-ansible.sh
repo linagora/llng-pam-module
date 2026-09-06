@@ -88,17 +88,27 @@ if grep -q "failed=0" "$WORK/deploy-bastion.log"; then
     # In Mode E the bastion_id capture is skipped (sudo locked), so fall back to
     # the enrolling client_id, which is what the bastion_id resolves to here.
     BID="$([ -s "$WORK/bastion-id.txt" ] && cat "$WORK/bastion-id.txt" || true)"
-    BID="${BID:-ob-bastion}"
-    ok "bastion deployed; bastion_id=$BID"
-else bad "bastion deploy failed — see $WORK/deploy-bastion.log"; tail -20 "$WORK/deploy-bastion.log"; BID="ob-bastion"; fi
+    if [ -n "$BID" ]; then
+        ok "bastion deployed; bastion_id=$BID"
+    else
+        # Mode E gets here by design (the capture is skipped: sudo is locked to
+        # LLNG tokens, so the mgmt user cannot read the server token). Either
+        # way there is no id to allowlist, and there is no usable placeholder:
+        # bastion_id is a portal-assigned device id, not the client_id, so a
+        # literal never matches the hop certificate's key-id and refuses every
+        # hop. Empty means "accept any vouched bastion" -- the allowlist is not
+        # exercised, and the run says so instead of pretending otherwise.
+        skip "hop allowlist enforcement (no bastion_id captured, allowed_bastions left EMPTY)"
+    fi
+else bad "bastion deploy failed — see $WORK/deploy-bastion.log"; tail -20 "$WORK/deploy-bastion.log"; BID=""; fi
 
 # ── Phase 2: generate + deploy the backends with allowed_bastions=bastion_id ─
 phase "Phase 2 — backends (ob-builder + ansible)"
-sed -e "s/^allowed_bastions:.*/allowed_bastions: ${BID:-ob-bastion}/" \
+sed -e "s/^allowed_bastions:.*/allowed_bastions: ${BID}/" \
     -e "s/^scenario:.*/scenario: $SCENARIO/" "$CONFIG_DIR/build-backend.yml" > "$WORK/build-backend.yml"
 rm -rf "$WORK/role-backend"
 obbuild --config "$WORK/build-backend.yml" --output-ansible "$WORK/role-backend" >"$WORK/gen-backend.log" 2>&1 \
-    && ok "generated backend role (allowed_bastions=${BID:-ob-bastion})" || bad "ob-builder backend failed"
+    && ok "generated backend role (allowed_bastions=${BID:-<empty>})" || bad "ob-builder backend failed"
 { echo "all:"; echo "  vars:"; _inv_vars; echo "  children:"; echo "    backends:"; echo "      hosts:"
   echo "        ${BACKEND_VMS[0]}: { ansible_host: ${IP[${BACKEND_VMS[0]}]}, ob_server_group: backend }"
   echo "        ${BACKEND_VMS[1]}: { ansible_host: ${IP[${BACKEND_VMS[1]}]}, ob_server_group: backend }"

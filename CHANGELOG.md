@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`ob-bastion-id` now asks `POST /pam/whoami`, not the removed
+  `/pam/bastion-token` (#246).** Upstream `lemonldap-ng-plugins` 0.6.0 removes
+  `/pam/bastion-token` — it signed a JWT even when the user lookup had failed —
+  and replaces its `probe: true` self-identification mode with `POST
+  /pam/whoami`, which returns the same portal-assigned device id under the same
+  `bastion_id` field. The command falls back to the legacy probe when, and only
+  when, a portal answers 404, so it works against 0.5.x and 0.6.0 alike and can
+  be deployed before the portal is upgraded. The value is unchanged across the
+  upgrade: `allowed_bastions` files need no rewriting and no bastion needs
+  re-enrolling.
+
+  The request also lost its `curl -f`, which made curl exit non-zero on any 4xx
+  _and discard the body_, collapsing every portal-side refusal into the same
+  opaque "Request failed" and leaving the HTTP-status branch below it
+  unreachable. Telling 404 (endpoint gone) from 403 (caller refused) is what
+  the fallback turns on, so the status now survives. New in `--verbose`: the
+  whole response document rather than decoded JWT claims. Exit code 2 is now
+  "the portal request failed or was refused" and 3 "the portal answered, but
+  with no identity in it".
+
+- **The lab deployment scripts no longer invent a `bastion_id` when
+  `ob-bastion-id` fails (#246).** `local-test/deploy-shell.sh` wrote the literal
+  string `ob-bastion` into `allowed_bastions`, and `deploy-ansible.sh` did the
+  same, including on the Mode E path where the capture is skipped by design.
+  That literal never matches the `bastion=<id>` field of a hop certificate's
+  key-id, so every hop was refused several phases later with errors that point
+  at certificates rather than at the allowlist. Both now leave the list empty
+  and say so: weaker (an empty list accepts any vouched bastion) but honest,
+  and it keeps the rest of the run diagnosable.
+
+### Added
+
+- **`UPGRADE-NOTES.md`.** What has to be done, or checked, before deploying a
+  release — starting with the `lemonldap-ng-plugins` 0.6.0 upgrade: the
+  `/pam/whoami` migration above, unbound vouchers dropping from 12 h to 15 min,
+  the exact-match PAM scope, and why `pamAccessRequestSigningMode = required`
+  must not be turned on yet (#247).
+
 ### Security
 
 - **The portal `locationRules` that guard `/device` and the SSH CA admin routes

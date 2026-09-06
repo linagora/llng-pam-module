@@ -1,4 +1,4 @@
-.TH OB-BASTION-ID 1 "May 2026" "open-bastion 0.2.3" "User Commands"
+.TH OB-BASTION-ID 1 "September 2026" "open-bastion 0.6.2" "User Commands"
 .SH NAME
 ob-bastion-id \- Print this bastion's identifier (as seen by backends)
 .SH SYNOPSIS
@@ -6,11 +6,19 @@ ob-bastion-id \- Print this bastion's identifier (as seen by backends)
 .RI [ OPTIONS ]
 .SH DESCRIPTION
 .B ob-bastion-id
-issues a probe request to the LemonLDAP::NG
-.I /pam/bastion-token
-endpoint using this host's enrolled server token and prints the
+asks the LemonLDAP::NG
+.I /pam/whoami
+endpoint, using this host's enrolled server token, and prints the
 .I bastion_id
 assigned by LLNG at enrolment.
+.PP
+Portals running plugins older than 0.6.0 have no
+.IR /pam/whoami .
+Against those, and only when they answer 404, the command falls back to the
+legacy
+.I /pam/bastion-token
+probe that upstream removed in 0.6.0. The value is the same either way. Any
+other status \(em notably 403 \(em is reported, not worked around.
 .PP
 The
 .I bastion_id
@@ -79,15 +87,12 @@ printed successfully.
 Configuration or token file missing / unreadable.
 .TP
 .B 2
-.I /pam/bastion-token
-request failed (network error, HTTP non-200, or missing
-.I bastion_jwt
-field in the response).
+The portal request failed or was refused (network error, or an HTTP status
+other than 200 from the endpoint that was tried last).
 .TP
 .B 3
-JWT decoded but the
-.I bastion_id
-claim is absent (also returned when base64url decoding fails).
+The portal answered, but with no identity in it (also returned when a legacy
+JWT cannot be base64url\-decoded).
 .SH SECURITY
 Must be run as root in order to read
 .I /var/lib/open-bastion/token

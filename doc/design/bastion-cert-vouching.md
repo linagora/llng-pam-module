@@ -115,7 +115,10 @@ user cert with:
 - `key-id` carrying `bastion=<bastion_id>;user=<user>;target=<target_host>` (audit + allowlist);
 - custom extension `bastion-id@open-bastion = <bastion_id>` (+ optional `user-groups`);
 - optional `source-address` critical option = the bastion's IP (`$req->address`).
-  Keep `/pam/bastion-token` temporarily for backward-compat, or remove with a CHANGELOG note.
+  Kept `/pam/bastion-token` for backward-compat at the time; upstream removed it in
+  plugins 0.6.0 (lemonldap-ng-plugins#86), replacing its `probe: true` mode — the only
+  part still in use, and the only part worth keeping — with `POST /pam/whoami`
+  (lemonldap-ng-plugins#94).
 
 ### open-bastion changes
 
@@ -156,8 +159,12 @@ userCert.expires_at)`, so the user's SSO cert lifetime is the real bound.
 
 ### Open questions
 
-- Backward-compat / deprecation of `/pam/bastion-token` and the `bastion_jwt_*` config
-  (keep one release with a CHANGELOG deprecation note, then remove).
+- ~~Backward-compat / deprecation of `/pam/bastion-token` and the `bastion_jwt_*` config
+  (keep one release with a CHANGELOG deprecation note, then remove).~~ **Settled.** The
+  `bastion_jwt_*` config went in #131; the endpoint went upstream in plugins 0.6.0. Its
+  self-identification probe lives on as `POST /pam/whoami`, which `ob-bastion-id` uses,
+  falling back to the old probe against an older portal — see
+  [UPGRADE-NOTES.md](../../UPGRADE-NOTES.md).
 - `scp host1:/f host2:/g` _initiated on a backend_ (not on the bastion) — re-vouching
   backend→backend without a user key on the backend — is a separate, harder topic; out of
   scope here, noted as future work.

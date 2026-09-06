@@ -619,8 +619,10 @@ so two bastions sharing a `client_id` still have two distinct `bastion_id`s and
 can be allowlisted independently.
 
 Because it is server-assigned, the only way to learn it is to ask the portal:
-run `ob-bastion-id` on the enrolled bastion (it POSTs a probe to
-`/pam/bastion-token` and prints the `bastion_id` the server returns). Do not
+run `ob-bastion-id` on the enrolled bastion (it POSTs to `/pam/whoami` and
+prints the `bastion_id` the server returns; against a portal on plugins older
+than 0.6.0 it falls back to the removed `/pam/bastion-token` probe, which
+returns the same value). Do not
 guess it from the `client_id`, and note that **re-enrolling a bastion gives it a
 new `bastion_id`**, which every backend allowlist must then be updated with.
 
