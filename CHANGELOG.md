@@ -132,13 +132,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ctest` now upload `Testing/Temporary/` as an artifact when the test step
   fails, so the evidence survives a re-run.
 
+  Two of the three jobs could not have held that evidence: `test_offline_cache`
+  is only compiled with `INSTALL_DESKTOP=ON` (`tests/CMakeLists.txt:123`), which
+  neither the build matrix nor the sanitizer job passed. Both now do, so the
+  test of #244 also runs under ASan/UBSan — where a concurrency bug is most
+  likely to be caught — and on two more distributions. The artifact names carry
+  `github.run_attempt`, because artifacts are immutable per run and a partial
+  re-run keeps attempt 1's: a fixed name would make the re-run's upload fail
+  with `409 Conflict` and lose exactly the confirmation evidence #244 is about.
+  `fail-fast: false` on both matrices, because a cancelled step never runs
+  `if: failure()`, so one leg's failure would silently drop its sibling's log.
+
   `test_concurrent_failed_attempts` (the `#186` lockout regression) also had
-  four failure paths that printed nothing: a failed `pipe()` or `fork()`, a
-  short write to the release barrier, and a failed `offline_cache_get_entry()`
-  all returned "FAILED" with no reason. Each now names what went wrong, and each
-  child reports through its exit status whether its `verify()` actually took the
-  wrong-password path, which is the difference between a diagnosable failure and
-  a bare `failed_attempts=5 expected=6`.
+  four failure paths that printed nothing. Three returned "FAILED" with no
+  reason: a failed `pipe()`, a failed `fork()`, and a failed
+  `offline_cache_get_entry()`. The fourth was worse — a short write to the
+  release barrier broke out of the loop, and `close(barrier[1])` then released
+  the remaining children through EOF, so every increment still landed and the
+  test **passed silently** on a barrier that had not worked. Each path now names
+  what went wrong, and the barrier one fails: that is a verdict change, not just
+  added output.
+
+  Each child also reports its `verify()` result through its exit status, decoded
+  by name in the parent (`a child's verify returned Entry not found`), with 127
+  reserved for a wrong password that verified. This does **not** cover the
+  lost-increment mode of #186 — there the write is lost while `verify()` still
+  returns `ERR_PASSWORD`, so every child exits 0 and that mode still surfaces as
+  the bare `failed_attempts=5 expected=6` caught by the counter assertion. What
+  the channel adds is a name for the other failures: a child that errored out
+  early, or one that was killed. The counter is now compared against the number
+  of children actually started, so a fork failure no longer prints a second,
+  false layer of failure on top of the one already reported.
 
 - **`ob-builder` artefacts that carry the client secret are no longer
   world-readable, and no longer commit themselves (#203).** With

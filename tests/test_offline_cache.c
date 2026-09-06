@@ -594,13 +594,28 @@ static int test_concurrent_failed_attempts(void)
             } while (r < 0 && errno == EINTR);
             close(barrier[0]);
 
-            /* The exit status carries the verdict: a child whose verify did
-             * not take the wrong-password path never incremented the counter,
-             * and saying so is the difference between a diagnosable failure
-             * and a bare "failed_attempts=5 expected=6". */
+            /* The exit status carries the verdict, encoded so the parent can
+             * name it: 0 for the expected wrong-password result, the negated
+             * error code (1..8) for anything else, 127 for the one case that
+             * must never be mistaken for success — a wrong password that
+             * verified.
+             *
+             * This channel does NOT cover the lost-increment mode of #186:
+             * there the write is what is lost (lock_cache_entry() fails and
+             * the read-modify-write runs unlocked, or update_cache_entry()'s
+             * return is discarded at offline_cache.c:1268), while verify()
+             * still returns ERR_PASSWORD, so every child exits 0. That mode
+             * is caught by the exact-N counter assertion below, and shows up
+             * exactly as the bare "(failed_attempts=5 expected=6)" it always
+             * did. What this adds is a name for the *other* failures: a child
+             * that errored out early, or one that was killed. */
             int cret = offline_cache_verify(cache, "concurrent_user",
                                             "wrong_pass", NULL);
-            _exit(cret == OFFLINE_CACHE_ERR_PASSWORD ? 0 : 1);
+            int code;
+            if (cret == OFFLINE_CACHE_ERR_PASSWORD)      code = 0;
+            else if (cret < 0 && cret >= -8)             code = -cret;
+            else                                          code = 127;
+            _exit(code);
         }
         started++;
     }
@@ -628,7 +643,12 @@ static int test_concurrent_failed_attempts(void)
                    WIFSIGNALED(status) ? WTERMSIG(status) : 0);
             ok = 0;
         } else if (WEXITSTATUS(status) != 0) {
-            printf("(a child's verify did not report a wrong password) ");
+            int code = WEXITSTATUS(status);
+            if (code == 127)
+                printf("(a child's verify ACCEPTED the wrong password) ");
+            else
+                printf("(a child's verify returned %s) ",
+                       offline_cache_strerror(-code));
             ok = 0;
         }
     }
@@ -641,9 +661,13 @@ static int test_concurrent_failed_attempts(void)
     offline_cache_entry_t entry;
     int gret = offline_cache_get_entry(cache, "concurrent_user", &entry);
     if (gret == OFFLINE_CACHE_OK) {
-        if (entry.failed_attempts != OC_CONC_CHILDREN) {
+        /* Against `started`, not OC_CONC_CHILDREN: when a fork failed, the
+         * children that did run each incremented correctly, and comparing to
+         * the full count would print a second, false layer of failure that
+         * reads as a cache-integrity regression on top of the fork error. */
+        if (entry.failed_attempts != started) {
             printf("(failed_attempts=%d expected=%d) ",
-                   entry.failed_attempts, OC_CONC_CHILDREN);
+                   entry.failed_attempts, started);
             ok = 0;
         }
         offline_cache_entry_free(&entry);
