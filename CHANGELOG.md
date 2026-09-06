@@ -369,6 +369,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the R-S3 / R-S15 residual scores. Do **not** enable it in the token-only modes,
   where no fingerprint ever exists and every SSH login would be denied.
 
+  The portal is growing the server-side half of the same control:
+  `linagora/lemonldap-ng-plugins#86` caps a voucher that no fingerprint binds at
+  `pamAccessBastionVoucherUnboundTtl` (900 s instead of 12 h) and adds
+  `pamAccessRequireFingerprint` to refuse the unbound case outright. Once that
+  ships, a missing spool drop stops degrading silently and starts breaking
+  visibly: `ob-ssh` hops fail about fifteen minutes into the session with
+  `voucher_expired`. That is the better failure, but it is a failure — which is
+  the argument for turning `fingerprint_required` on **before** the portal is
+  upgraded, so the refusal lands at login with an audited reason instead of on a
+  hop a quarter of an hour later.
+
 ### Changed
 
 - **A failing `ctest` now keeps its log, and the concurrency test says why it

@@ -32,6 +32,20 @@
 > plutôt que de l'autoriser sans binding. **Activer cette option sur les hôtes en
 > mode certificat est une condition d'emploi du score résiduel R-S3 / R-S15**
 > (ne pas l'activer sur les modes token, où il n'y a jamais d'empreinte).
+>
+> **Ce que change la montée de version du portail.** La PR amont
+> `linagora/lemonldap-ng-plugins#86` (issue `#55`) ajoute le pendant serveur de
+> cette option : un voucher qu'aucune empreinte ne lie au certificat SSO est
+> plafonné à `pamAccessBastionVoucherUnboundTtl` (900 s au lieu de 12 h), et
+> `pamAccessRequireFingerprint` refuse carrément le cas non lié. Le mode de
+> défaillance d'un spool absent cesse alors d'être un affaiblissement silencieux
+> pour devenir une **coupure visible** : les rebonds `ob-ssh` échouent une
+> quinzaine de minutes après la connexion au bastion, avec
+> `reason: voucher_expired`. C'est le comportement souhaitable, mais il faut le
+> savoir avant la mise à jour — un spool cassé qui passait inaperçu se
+> manifestera comme une panne. `fingerprint_required = true` fait échouer la
+> connexion au bon endroit (à l'ouverture de session, avec un motif audité)
+> plutôt que quinze minutes plus tard sur un rebond.
 
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
