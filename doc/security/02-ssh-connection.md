@@ -715,7 +715,9 @@ pamAccessBastionCertTtl: 120 # 2 min (défaut)
 
 **Description :** Des utilisateurs peuvent générer des clés SSH utilisant des algorithmes cryptographiques faibles ou obsolètes (DSA, RSA-1024) et les faire signer par la CA LLNG.
 
-> **Correction d'une hypothèse de cette fiche.** Elle indiquait que « la politique de clés CA peut rejeter ces clés », le contrôle PAM n'étant qu'une défense en profondeur. C'est faux : le plugin `ssh-ca` **n'applique aucune contrainte de type ni de taille** — une clé RSA-1024 est signée sans objection. Le contrôle côté PAM n'est donc pas une défense en profondeur, c'est **le seul contrôle**. Il doit être activé (`ssh_key_policy_enabled = true`), faute de quoi le risque reste à son niveau initial. Voir [09-portail-llng.md](09-portail-llng.md) pour le périmètre serveur.
+> **Correction d'une hypothèse de cette fiche.** Elle indiquait que « la politique de clés CA peut rejeter ces clés », le contrôle PAM n'étant qu'une défense en profondeur. C'était faux **dans la version publiée du plugin** (`v0.5.2` et antérieures) : `ssh-ca` n'y applique aucune contrainte de type ni de taille, une clé RSA-1024 est signée sans objection. Le contrôle côté PAM n'y est donc pas une défense en profondeur, c'est **le seul contrôle**, et il doit être activé (`ssh_key_policy_enabled = true`), faute de quoi le risque reste à son niveau initial.
+>
+> **L'amont a corrigé ce point** (`linagora/lemonldap-ng-plugins#61`, PR `#78`) : `sshCaMinKeyBits` (2048 par défaut) et `sshCaAllowedKeyTypes` refusent RSA < 2048 bits et `ssh-dss` en 400, et acceptent au passage les clés FIDO2 `sk-*` jusque-là rejetées. Ce correctif est **mergé et non publié** : il sortira en `0.6.0`. À partir de cette version, et **seulement** à partir d'elle, le contrôle PAM redevient ce que la fiche disait au départ — une défense en profondeur. Le score ci-dessous et la mesure restent donc calés sur la version déployable aujourd'hui. Voir [09-portail-llng.md](09-portail-llng.md) pour le périmètre serveur.
 
 **Vecteurs d'attaque :**
 

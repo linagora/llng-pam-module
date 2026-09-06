@@ -145,6 +145,10 @@ def main():
         errors.append(f"01-enrollment.md: only {len(enrol)} scored sheets parsed, expected 14")
     if len(ssh) < 23:
         errors.append(f"02-ssh-connection.md: only {len(ssh)} scored sheets parsed, expected 23+")
+    # Same floor for the portal study, so a parser that silently stops seeing
+    # sheets cannot pass the run by comparing an empty set to an empty matrix.
+    if portal and len(portal) < 8:
+        errors.append(f"09-portail-llng.md: only {len(portal)} scored sheets parsed, expected 8+")
 
     checks = [
         ("01-enrollment avant", ENROLLMENT, "## 3. Matrice des Risques\n\n### Avant remédiation\n",

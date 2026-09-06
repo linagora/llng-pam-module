@@ -142,7 +142,7 @@ dispatch de route.
 Attention à ne pas écrire `^/ssh/revoke` seul : cela capture aussi
 `/ssh/revoked`, la KRL **publique** que chaque backend télécharge — la
 restreindre casserait la propagation des révocations. Voir
-[doc/llng-configuration.md](../llng-configuration.md#step-3b-restrict-device-and-the-ssh-ca-admin-routes-required)
+la section « Step 3b » de [doc/llng-configuration.md](../llng-configuration.md)
 et la condition d'emploi CE02.
 
 **Remédiation plugin (amont) :** contrôle d'autorisation intégré, par défaut

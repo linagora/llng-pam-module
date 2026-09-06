@@ -25,7 +25,7 @@ anglais.
 
 - **« Puis-je déployer ce produit ? »** → lire les **conditions d'emploi** en
   [08-dossier-homologation.md, §2](08-dossier-homologation.md#2-conditions-demploi).
-  Ce sont les quinze hypothèses que les scores résiduels supposent vérifiées, et
+  Ce sont les dix-neuf hypothèses que les scores résiduels supposent vérifiées, et
   que le produit n'impose pas toutes.
 - **« Quel est le risque résiduel ? »** → lire la matrice consolidée en tête de
   [99-risk-reduce.md](99-risk-reduce.md), puis les trois risques en zone orange

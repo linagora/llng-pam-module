@@ -87,7 +87,7 @@ document to its workshop.
 | Decision                    | [Homologation dossier](security/08-dossier-homologation.md)                                                                 | Perimeter, **conditions of use**, residual risk acceptance                                           |
 | Operational                 | [Offboarding](security/03-offboarding.md)                                                                                   | User and server offboarding procedure                                                                |
 
-> Deploying? The fifteen **conditions of use** in
+> Deploying? The nineteen **conditions of use** in
 > [the homologation dossier](security/08-dossier-homologation.md#2-conditions-demploi)
 > are the assumptions the residual scores depend on — and that the product does
 > not all enforce for you.
