@@ -147,6 +147,104 @@ device-authorization tuning, and SSH CA — are listed in a separate reference
 page: **[LemonLDAP::NG Plugin Parameters](llng-plugin-parameters.md)**. The
 defaults are fine for a standard setup.
 
+## Step 3b: Restrict `/device` and the SSH CA admin routes (required)
+
+Two sets of portal routes decide who may approve a host enrolment and who may
+revoke certificates. Where the authorization for them lives **depends on the
+plugin version**, and the two regimes fail in opposite directions:
+
+| Plugin version | `/ssh/admin`, `/ssh/certs`, `/ssh/revoke`                                           | If you configure nothing                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **≤ `v0.5.2`** | No check in the plugin. `locationRules` on the portal vhost is the **only** control | **Any authenticated SSO user** can list and revoke everyone's certificates — an org-wide SSH outage        |
+| **≥ `0.6.0`**  | `sshCaAdminRule` in the plugin, **fail-closed**                                     | **Nobody** administers: all three routes return 403, including the users `locationRules` would let through |
+
+Set both. `locationRules` is required today and remains defence in depth
+afterwards; `sshCaAdminRule` is the control from `0.6.0` on. Configuring only
+the vhost rule leaves a `0.6.0` portal with no working admin UI — including for
+the operator handling an incident.
+
+`/device` is a separate story: the `oidc-device-authorization` plugin **does**
+carry a native control, and it has two layers that do different jobs.
+
+| Layer                                           | What it gates                                                                                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oidcRPMetaDataOptionsAllowDeviceAuthorization` | The **approval decision**, per relying party. It is a `boolOrExpr`: any value other than `1` is compiled and evaluated against the user's session |
+| `locationRules` on `^/device`                   | The **page**, for every RP at once                                                                                                                |
+
+`= 1` means "any authenticated user may approve" — an activation flag, not a
+permission. Prefer the expression form when approvers differ per RP
+(`$groups =~ /\bdeviceadmins\b/`), and keep the vhost rule as the outer gate.
+
+### The vhost rules
+
+In the Manager, under **Virtual Hosts → your portal host → Access rules**, add:
+
+| Regexp                                   | Rule                             |
+| ---------------------------------------- | -------------------------------- |
+| `^/device`                               | `$groups =~ /\bob-approvers\b/`  |
+| `^/ssh/(admin\|certs\|revoke)(\?\|/\|$)` | `$groups =~ /\bob-ssh-admins\b/` |
+
+> **Copy these from the rendered page, not from the raw Markdown.** The `\|`
+> above is Markdown table escaping. Pasted literally into a rule, `\|` is a
+> **literal pipe** in the compiled Perl regexp: the alternation stops being an
+> alternation, the key matches nothing, `grant()` falls through to
+> `default: accept`, and the admin routes stay open to every SSO user — with no
+> error anywhere.
+
+`ob-approvers` and `ob-ssh-admins` are placeholders: **substitute your own
+groups**, and check they actually appear in the session (Manager → Sessions, or
+`$groups` in a test rule). A rule naming a group nobody has is a rule that
+returns 403 for everyone, which looks exactly like a rule that works.
+
+Or, in `lmConf-<n>.json`. These keys go **inside the existing `locationRules`
+object**, under your portal's own vhost key — a `locationRules` pasted as a
+second top-level key silently replaces the first, and your existing rules go
+with it:
+
+```json
+{
+  "locationRules": {
+    "auth.example.com": {
+      "^/device": "$groups =~ /\\bob-approvers\\b/",
+      "^/ssh/(admin|certs|revoke)(\\?|/|$)": "$groups =~ /\\bob-ssh-admins\\b/",
+      "default": "accept"
+    }
+  }
+}
+```
+
+And, from `0.6.0`, the plugin-side rule (Manager → Plugins → SSH CA, or
+`"sshCaAdminRule"` in `lmConf-<n>.json`):
+
+```json
+"sshCaAdminRule": "$groups =~ /\\bob-ssh-admins\\b/"
+```
+
+### Three details that are easy to get wrong
+
+- **Do not anchor `/device` with `$`.** Not for the reason you might expect: the
+  approval form posts to `PORTAL_URL/device` with `user_code` and `action` in
+  the **body**, so `REQUEST_URI` is `/device` and `^/device$` does match the
+  decision. What it misses is the **page** — `/device?user_code=ABCD-EFGH`
+  carries a query string, `grant()` matches against `REQUEST_URI`, and an
+  anchored rule lets that GET through ungated. It also lets through a crafted
+  `POST /device?user_code=…&action=approve`. Leave the rule unanchored and both
+  are covered.
+- **Do not write `^/ssh/revoke` on its own.** It also matches `/ssh/revoked`,
+  the **public KRL**. This does not break fleet-wide propagation — backends
+  fetch the KRL with an anonymous `curl`, and a request with no session never
+  reaches `grant()` at all: it is served by the plugin's unauthenticated route.
+  What it does break is a KRL fetch made **with** a session — an administrator
+  in a browser gets a 403. The `(\?|/|$)` group above keeps the two routes
+  apart, which is the right hygiene either way.
+- **Leave the user routes alone.** `/ssh/sign`, `/ssh/mycerts`, `/ssh/myrevoke`
+  and `/ssh` are the ordinary user's own certificate operations, and `/ssh/ca`
+  and `/ssh/revoked` are public by design.
+
+The shipped `docker-demo-cert` and `docker-demo-maxsec` configurations carry the
+vhost rules and `sshCaAdminRule`, scoped to the demo user `dwho`, as a working
+example on both plugin versions.
+
 ## Step 4: Generate and Import the SSH CA Key (optional)
 
 If you're using the SSH CA plugin for key-based authentication, you need to generate a CA key pair and import it into LemonLDAP::NG.

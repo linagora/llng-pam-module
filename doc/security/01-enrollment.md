@@ -795,7 +795,40 @@ openssl s_client -connect auth.example.com:443 2>/dev/null | \
 
 **Remédiation configuration (côté LLNG) :**
 
-- Restreindre qui peut approuver les enrôlements (ACL sur `/device`)
+- Restreindre qui peut approuver les enrôlements. Il y a **deux couches**, et
+  elles ne gardent pas la même chose :
+  1. `oidcRPMetaDataOptionsAllowDeviceAuthorization` est un `boolOrExpr` évalué
+     sur la **décision** d'approbation, par RP. `= 1` signifie « tout
+     utilisateur authentifié peut approuver » — c'est un drapeau d'activation,
+     pas une permission ; toute autre valeur est compilée et évaluée contre la
+     session (`$groups =~ /\\bdeviceadmins\\b/`). C'est la couche à préférer
+     quand les approbateurs diffèrent d'un RP à l'autre.
+  2. Une `locationRules` sur `^/device` garde la **page**, pour tous les RP à la
+     fois. Elle reste utile comme porte extérieure, et elle est le seul contrôle
+     si l'option ci-dessus est laissée à `1`.
+
+  Dans le Manager (Virtual Hosts → portail → Access rules), ou dans
+  `lmConf-<n>.json`, en fusionnant dans l'objet `locationRules` existant :
+
+  ```json
+  "locationRules": {
+    "auth.example.com": {
+      "^/device": "$groups =~ /\\bob-approvers\\b/",
+      "default": "accept"
+    }
+  }
+  ```
+
+  **Ne pas ancrer la fin** (`^/device$`) — mais pas pour la raison qu'on croit :
+  le formulaire d'approbation poste sur `PORTAL_URL/device` avec `user_code` et
+  `action` dans le **corps**, donc `REQUEST_URI` vaut `/device` et une règle
+  ancrée matche bien la décision. Ce qu'elle laisse passer, c'est la **page**
+  `/device?user_code=ABCD-EFGH` — `grant()` compare à `REQUEST_URI`, qui porte
+  la query string — ainsi qu'un `POST /device?user_code=…&action=approve`
+  fabriqué. Une règle non ancrée couvre les deux. Voir
+  [doc/llng-configuration.md](../llng-configuration.md#step-3b-restrict-device-and-the-ssh-ca-admin-routes-required)
+  pour la règle jumelle sur les routes d'administration `ssh-ca`.
+
 - Activer les notifications lors des approbations
 - Audit log des enrôlements avec IP source
 - Rotation périodique du `client_secret`
@@ -1467,6 +1500,12 @@ flowchart TB
 - [ ] `client_secret` stocké dans `/etc/open-bastion/openbastion.conf` (pas en CLI)
 - [ ] Fichier de config en permissions 0600
 - [ ] Accès au Manager LLNG restreint (risque : accès à la clé privée SSH CA)
+- [ ] **`locationRules` sur `^/device` déployée** et vérifiée (voir ci-dessous) —
+      sans elle, **tout utilisateur SSO authentifié** peut approuver un
+      enrôlement : la « two-person rule » n'existe pas
+- [ ] **`locationRules` sur `^/ssh/(admin|certs|revoke)(\?|/|$)` déployée** si le
+      plugin ssh-ca est activé — sans elle, tout utilisateur SSO peut lister
+      tous les certificats et **révoquer ceux de n'importe qui**
 - [ ] Canal de communication sécurisé avec l'administrateur LLNG établi
 - [ ] Administrateur LLNG disponible et prévenu
 
