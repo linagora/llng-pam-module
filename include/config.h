@@ -126,6 +126,9 @@ typedef struct {
     char *ssh_key_allowed_types;           /* Comma-separated allowed types: ed25519,ecdsa,rsa (default: all) */
     int ssh_key_min_rsa_bits;              /* Minimum RSA key size in bits (default: 2048) */
     int ssh_key_min_ecdsa_bits;            /* Minimum ECDSA key size in bits (default: 256) */
+    bool fingerprint_required;             /* Refuse an SSH login whose key fingerprint cannot be
+                                              recovered, instead of authorizing without the binding
+                                              (default: false) */
 
     /* Cache brute-force protection (#92) */
     bool cache_rate_limit_enabled;         /* Enable rate limiting for cache lookups (default: false) */

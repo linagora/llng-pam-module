@@ -1896,7 +1896,18 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
 
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
-        OB_LOG_DEBUG(pamh, "SSH spool drop not found at %s (errno=%d)", path, errno);
+        /*
+         * The spool directory exists, so this host DOES run the principals
+         * helper -- yet the drop for our sshd anchor is absent. That is the
+         * realistic provisioning-drift case (#192): the fingerprint binding
+         * that doc/security/99-risk-reduce.md credits for R-S3 and R-S15 has
+         * silently disappeared, and until now it said so only at DEBUG.
+         * A password/keyboard-interactive login on a cert-aware host lands
+         * here too, which is equally worth knowing.
+         */
+        OB_LOG_WARN(pamh,
+                    "No SSH fingerprint drop at %s (errno=%d): this session "
+                    "carries no key binding", path, errno);
         return NULL;
     }
 
@@ -2226,6 +2237,36 @@ static char *extract_ssh_key_fingerprint(pam_handle_t *pamh)
     }
 
     return fingerprint;
+}
+
+/*
+ * Resolve the fingerprint of the SSH key that opened this session, from either
+ * source that can carry it.
+ *
+ * SSH_USER_AUTH exists only inside an SSH PAM handle, and only when sshd was
+ * built/configured to expose it. Under `sudo` -- a different PAM service, run
+ * long after the SSH authentication -- it is never set, so a caller that only
+ * looked there could never authenticate a service account with sudo, leaving
+ * sudo_nopasswd=true (no proof of identity at all) as the only workable
+ * configuration (#194). The out-of-band spool written by the principals helper
+ * is keyed on the sshd-session anchor of the process tree, which `sudo`
+ * inherits, so it answers in both contexts.
+ *
+ * Returns an allocated string (caller frees), or NULL when neither source has
+ * one.
+ */
+static char *resolve_ssh_key_fingerprint(pam_handle_t *pamh)
+{
+    char *fp = extract_ssh_key_fingerprint(pamh);
+    if (fp) {
+        return fp;
+    }
+
+    fp = read_ssh_fp_from_spool(pamh);
+    if (fp) {
+        OB_LOG_DEBUG(pamh, "SSH fingerprint recovered from the spool: %s", fp);
+    }
+    return fp;
 }
 
 /*
@@ -2739,11 +2780,16 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
             return PAM_AUTH_ERR;
         }
         /*
-         * Sudo context: there is no SSH_USER_AUTH because sudo is not an
-         * SSH service. When sudo_nopasswd is configured the admin has
-         * declared that a valid existing Unix session is sufficient, so
-         * skip the fingerprint check here. pam_sm_acct_mgmt will still
-         * enforce sudo_allowed below.
+         * Sudo context: sudo_nopasswd is the admin's declaration that a valid
+         * existing Unix session is sufficient, so skip the fingerprint check.
+         * pam_sm_acct_mgmt will still enforce sudo_allowed below.
+         *
+         * With sudo_nopasswd=false the check now runs and can succeed: sudo has
+         * no SSH_USER_AUTH, but resolve_ssh_key_fingerprint() falls back to the
+         * principals spool, which is keyed on the sshd anchor that sudo
+         * inherits (#194). Before that fallback the branch could only ever
+         * return PAM_AUTH_ERR, which made sudo_nopasswd=true -- no proof of
+         * identity at all -- the sole usable setting.
          */
         bool skip_fp_check =
             (strcmp(service, "sudo") == 0) && sa->sudo_nopasswd;
@@ -2760,10 +2806,11 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
              * Extract the fingerprint from SSH_USER_AUTH and compare with configured value.
              * This requires ExposeAuthInfo=yes in sshd_config.
              */
-            char *ssh_fingerprint = extract_ssh_key_fingerprint(pamh);
+            char *ssh_fingerprint = resolve_ssh_key_fingerprint(pamh);
             if (!ssh_fingerprint) {
-                OB_LOG_ERR(pamh, "Service account %s: cannot extract SSH key fingerprint "
-                        "(is ExposeAuthInfo enabled in sshd_config?)", user);
+                OB_LOG_ERR(pamh, "Service account %s: cannot determine the SSH key "
+                        "fingerprint -- neither SSH_USER_AUTH nor the principals "
+                        "spool has one for this session", user);
 
                 if (audit_initialized) {
                     audit_event.event_type = AUDIT_AUTH_FAILURE;
@@ -3710,6 +3757,42 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh,
         audit_event.client_ip = client_ip;
         audit_event.tty = tty;
         audit_initialized = true;
+    }
+
+    /*
+     * Fail closed when the SSH key binding is required but absent (#192).
+     *
+     * Without this the binding degrades silently: a missing spool entry --
+     * post-upgrade drift, a missing tmpfiles.d entry -- makes
+     * extract_ssh_cert_info() return 0, /pam/authorize is called with no
+     * `fingerprint` field, and the SSO side treats the field as optional. The
+     * control that doc/security/99-risk-reduce.md credits for R-S3 and R-S15 is
+     * then gone with no operational signal, and the bastion voucher TTL is no
+     * longer capped by the SSO certificate expiry either.
+     *
+     * Off by default: hosts that do not run the principals helper (the token
+     * modes) never have a fingerprint to offer, and turning this on for them
+     * would deny every login. It is meant for cert-mode bastions and backends,
+     * where the binding is supposed to be present on every session.
+     */
+    if (data->config.fingerprint_required
+        && (strcmp(service, "sshd") == 0 || strcmp(service, "ssh") == 0)
+        && (!has_ssh_cert || !ssh_cert_info.key_fingerprint)) {
+        OB_LOG_ERR(pamh,
+                   "No SSH key fingerprint for %s and fingerprint_required is "
+                   "set: refusing. Check that the AuthorizedPrincipalsCommand "
+                   "helper runs and that /run/open-bastion/ssh-fp exists.",
+                   user);
+        if (has_ssh_cert) {
+            ob_ssh_cert_info_free(&ssh_cert_info);
+        }
+        if (audit_initialized) {
+            audit_event.result_code = PAM_PERM_DENIED;
+            audit_event.reason = "fingerprint_required: no SSH key binding available";
+            audit_event_set_end_time(&audit_event);
+            audit_log_event(data->audit, &audit_event);
+        }
+        return PAM_PERM_DENIED;
     }
 
     /*

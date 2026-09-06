@@ -338,6 +338,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auth required pam_deny.so`. Check with
   `grep '^auth' /etc/pam.d/sshd`.
 
+- **Service-account `sudo` with `sudo_nopasswd = false` now works at all
+  (#194).** The fingerprint check read `SSH_USER_AUTH` only. That variable does
+  not exist in a `sudo` PAM handle, so the check could never succeed and the
+  branch always returned `PAM_AUTH_ERR` — leaving `sudo_nopasswd = true`, which
+  grants sudo with no proof of identity, as the only workable setting, and
+  pushing admins toward it. The fingerprint is now also recovered from the
+  principals spool (`/run/open-bastion/ssh-fp`), which the SSH session populated
+  and which `sudo` inherits through the process tree, so both settings do what
+  they say. On a host without the principals helper there is still no
+  fingerprint in either context and `sudo_nopasswd = false` refuses, which is
+  the fail-closed answer.
+
+### Security
+
+- **A missing SSH fingerprint drop is now visible, and can be made fatal
+  (#192).** When the principals spool exists but this session's drop is absent —
+  post-upgrade drift, a lost `tmpfiles.d` entry, or a password login on a
+  cert-aware host — the module dropped the fingerprint binding with a DEBUG line
+  and authorized the session anyway. `doc/security/99-risk-reduce.md` credits
+  that binding with reducing R-S3 and R-S15, and the bastion voucher TTL is only
+  capped by the SSO certificate expiry when a fingerprint was supplied, so a
+  provisioning failure silently removed a control the risk matrix depends on.
+
+  The missing drop is now logged at **WARN** (the spool directory being absent
+  altogether stays at DEBUG: that host simply does not use the helper), and a new
+  opt-in `fingerprint_required = true` refuses an SSH login whose fingerprint
+  cannot be recovered instead of authorizing without the binding. Enable it on
+  certificate-mode hosts — the EBIOS study now names it as a condition of use for
+  the R-S3 / R-S15 residual scores. Do **not** enable it in the token-only modes,
+  where no fingerprint ever exists and every SSH login would be denied.
+
 ### Changed
 
 - **A failing `ctest` now keeps its log, and the concurrency test says why it

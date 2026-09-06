@@ -154,6 +154,7 @@ void config_init(pam_openbastion_config_t *config)
     config->ssh_key_allowed_types = NULL;  /* NULL means all types allowed */
     config->ssh_key_min_rsa_bits = 2048;   /* NIST recommendation minimum */
     config->ssh_key_min_ecdsa_bits = 256;  /* P-256 minimum */
+    config->fingerprint_required = false;  /* opt-in: see #192 */
 
     /* Cache brute-force protection - disabled by default (#92) */
     config->cache_rate_limit_enabled = false;
@@ -737,6 +738,10 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
              strcmp(key, "ssh_min_rsa_bits") == 0) {
         /* Valid RSA sizes: 1024 (weak), 2048 (minimum recommended), 3072, 4096 */
         config->ssh_key_min_rsa_bits = parse_int(value, 2048, 1024, 16384);
+    }
+    else if (strcmp(key, "fingerprint_required") == 0 ||
+             strcmp(key, "ssh_fingerprint_required") == 0) {
+        SET_BOOL_FIELD(config->fingerprint_required, value, key);
     }
     else if (strcmp(key, "ssh_key_min_ecdsa_bits") == 0 ||
              strcmp(key, "ssh_min_ecdsa_bits") == 0) {

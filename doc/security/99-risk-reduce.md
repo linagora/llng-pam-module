@@ -19,6 +19,20 @@
 
 > **Note :** R-S3 et R-S15 sont descendus de I=3 à I=1 grâce au **binding fingerprint SSH** introduit dans le plugin PamAccess ≥ 0.1.16. La vérification est effectuée côté LLNG à la fois sur `/pam/authorize` (à chaque ouverture de session SSH, phase PAM `account`) et sur `/pam/verify` (à chaque utilisation d'un token PAM pour sudo ou ré-authentification) : tant que l'empreinte de la clef SSH n'est pas présente, active et non révoquée dans la session persistante LLNG, ni la session SSH ni l'escalade sudo ne sont autorisées, indépendamment de la fraîcheur de la KRL locale. Voir [02-ssh-connection.md](02-ssh-connection.md) pour les détails.
 
+> **Note (condition d'emploi du binding fingerprint) :** la réduction ci-dessus
+> suppose que l'empreinte parvienne effectivement à LLNG. Elle est récupérée par
+> le module dans `/run/open-bastion/ssh-fp`, alimenté par
+> l'`AuthorizedPrincipalsCommand`. Si ce spool disparaît — dérive après mise à
+> jour, entrée `tmpfiles.d` manquante — le module appelle `/pam/authorize` sans
+> champ `fingerprint`, que le plugin traite comme optionnel : la mesure
+> disparaît silencieusement, et la durée de vie du voucher bastion n'est plus
+> bornée par l'expiration du certificat SSO. Deux garde-fous depuis la 0.6.3 :
+> l'absence du drop est journalisée en **WARN** (et non plus en DEBUG), et
+> l'option `fingerprint_required = true` d'`openbastion.conf` refuse la session
+> plutôt que de l'autoriser sans binding. **Activer cette option sur les hôtes en
+> mode certificat est une condition d'emploi du score résiduel R-S3 / R-S15**
+> (ne pas l'activer sur les modes token, où il n'y a jamais d'empreinte).
+
 > **Note (R-S18, R-S19, R-S20, R-S21) :** Les scores résiduels indiqués ci-dessus pour R-S19, R-S20 et R-S21 supposent l'activation **simultanée** du hardening (PR1 #112, `--enable-hardening`) et de la trace auditd (PR2 #113, `--enable-audit-trace`). En l'absence d'activation, R-S19 reste à (P=3, I=3), R-S20 et R-S21 restent à (P=2, I=3) — tous trois en zone jaune. Voir [doc/hardening.md](../hardening.md) et [doc/audit.md](../audit.md) (documentations techniques en anglais) pour les détails opérationnels.
 
 > **Comment lire cette matrice.** Elle consolide les **47 fiches de risque** des
@@ -372,6 +386,12 @@ Pistes :
 1. **Minimiser** : n'accorder `sudo_allowed` qu'aux comptes qui en ont
    réellement besoin ; préférer `sudo_nopasswd = false` et des règles `sudoers`
    restreintes à des commandes précises plutôt qu'un sudo total.
+   `sudo_nopasswd = false` est réellement utilisable depuis la 0.6.3 : le
+   contrôle d'empreinte ne lisait que `SSH_USER_AUTH`, absent d'un handle PAM
+   `sudo`, si bien qu'il échouait toujours et que `sudo_nopasswd = true` —
+   c'est-à-dire aucune preuve d'identité — était la seule configuration qui
+   fonctionnait. L'empreinte est désormais reprise du spool des principals, que
+   `sudo` hérite par l'arbre de processus.
 2. **Inventaire et rotation** : traiter chaque clé de service comme un secret de
    longue durée (coffre-fort, rotation périodique, révocation à la sortie d'un
    prestataire/outil). Recoupe le compte de secours de [R-S17](#r-s17-p1-i2---verrouillage-total-lockout).
