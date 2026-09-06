@@ -1100,16 +1100,23 @@ test_ob_bastion_id() {
 
     local id
     if ! id=$(docker exec ob-cert-bastion ob-bastion-id --quiet 2>&1); then
-        # 403 means the demo SSO has the endpoint but refuses this caller (the
-        # pam-access plugin is absent, or the enrolled token lacks the LLNG
-        # rule). 404 means the portal has neither /pam/whoami nor the legacy
-        # /pam/bastion-token, which is what a demo image built before the
-        # plugin release answers — ob-bastion-id reports the status of the
-        # *last* endpoint it tried, so the fallback ends on that 404. Neither
-        # is an ob-bastion-id bug. Anchor the match on a status boundary to
-        # avoid accidental matches on bodies containing "403"/"404".
-        if echo "$id" | grep -qE 'HTTP[/ ]40[34]|HTTP_STATUS__:40[34]|"status"[[:space:]]*:[[:space:]]*40[34]'; then
-            log_warn "the portal answered 403/404 — /pam/whoami not provisioned in this demo"
+        # Three ways this demo can legitimately have no endpoint to answer:
+        #
+        #  - 403: the endpoint is there but refuses this caller (the enrolled
+        #    token lacks the LLNG rule);
+        #  - 404: neither /pam/whoami nor the legacy /pam/bastion-token exists
+        #    and something answers 404 for them;
+        #  - "implements neither": the same absence in its *usual* shape. LLNG
+        #    has a catch-all that serves the portal's own HTML login page, with
+        #    a 200, for any /pam/* path no plugin registered — so a demo image
+        #    predating the plugin release does not 404, it returns a web page.
+        #    That is what this demo does today, since docker-demo-cert/sso
+        #    derives from the published portal image.
+        #
+        # None is an ob-bastion-id bug. Anchor the status matches on a boundary
+        # so a body containing "403"/"404" cannot trip them.
+        if echo "$id" | grep -qE 'HTTP[/ ]40[34]|HTTP_STATUS__:40[34]|"status"[[:space:]]*:[[:space:]]*40[34]|implements neither'; then
+            log_warn "the portal has no /pam/whoami — endpoint not provisioned in this demo"
             pass "ob-bastion-id test skipped (LLNG endpoint not available in this demo)"
             return 0
         fi

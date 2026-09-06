@@ -157,12 +157,14 @@ pam_post() {
 # different shapes and each is worth showing as-is.
 emit_id() {
     local body="$1" filter="$2" id
+    # Identity first, then --verbose: a body with no id in it is not an answer,
+    # and dumping it would present the portal's HTML login page as one.
+    id=$(printf '%s' "$body" | jq -r "$filter" 2>/dev/null) || return 1
+    [ -n "$id" ] || return 1
     if [ "$VERBOSE" = "true" ]; then
         printf '%s\n' "$body" | jq .
         exit 0
     fi
-    id=$(printf '%s' "$body" | jq -r "$filter" 2>/dev/null) || return 1
-    [ -n "$id" ] || return 1
     if [ "$JSON_OUT" = "true" ]; then
         jq -nc --arg id "$id" '{bastion_id: $id}'
     else
@@ -240,14 +242,19 @@ main() {
     pam_post /pam/whoami '{}' || exit 2
 
     if [ "$HTTP_STATUS" = "200" ]; then
-        emit_id "$BODY" '.bastion_id // .server_id // empty' \
-            || die "No bastion_id in /pam/whoami response: $BODY" 3
-    fi
-
-    # Anything but 404 is a real refusal (403 caller gate, 500, ...) and must
-    # not be papered over by falling back to an endpoint that answers the same
-    # way. 404 is the one status that means "this portal predates /pam/whoami".
-    if [ "$HTTP_STATUS" != "404" ]; then
+        # A portal that implements /pam/whoami always answers JSON carrying the
+        # id, so a 200 without one means the endpoint is not there and
+        # something else claimed the URL. That is the normal shape of its
+        # absence, not an edge case: LemonLDAP::NG's catch-all serves the
+        # portal's own HTML login page, with a 200, for any /pam/* path no
+        # plugin has registered. Absence is what the fallback is for.
+        emit_id "$BODY" '.bastion_id // .server_id // empty' || true
+        log_info "/pam/whoami answered 200 with no identity in it —" \
+                 "this portal does not implement it"
+    elif [ "$HTTP_STATUS" != "404" ]; then
+        # A real refusal (403 from the caller gate, 5xx, ...) must not be
+        # papered over by trying an endpoint that would answer the same way and
+        # report the wrong URL in the error.
         log_error "LLNG returned HTTP $HTTP_STATUS on /pam/whoami: $BODY"
         exit 2
     fi
@@ -286,8 +293,14 @@ main() {
     fi
 
     local jwt
-    jwt=$(printf '%s' "$BODY" | jq -r '.bastion_jwt // empty' 2>/dev/null)
-    [ -n "$jwt" ] || die "No bastion_jwt in response: $BODY" 2
+    # `|| jwt=""` is load-bearing: under `set -e` with `pipefail`, jq exiting
+    # non-zero on a body that is not JSON (the portal's HTML page, exactly the
+    # case below) kills the script before it can say anything useful.
+    jwt=$(printf '%s' "$BODY" | jq -r '.bastion_jwt // empty' 2>/dev/null) || jwt=""
+    # Neither endpoint answered with an identity. Most often both are simply
+    # absent and the catch-all served the portal page twice, which is what a
+    # deployment missing the pam-access plugin looks like from here.
+    [ -n "$jwt" ] || die "this portal implements neither /pam/whoami nor the legacy /pam/bastion-token probe: $BODY" 2
 
     # JWT is header.payload.signature -- decode the middle segment.
     local b64payload claims

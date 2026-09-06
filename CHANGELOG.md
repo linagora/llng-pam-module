@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade: `allowed_bastions` files need no rewriting and no bastion needs
   re-enrolling.
 
+  The absence of `/pam/whoami` does not usually look like a 404: LemonLDAP::NG
+  has a catch-all that serves the portal's own HTML login page, with a 200, for
+  any `/pam/*` path no plugin registered. So the fallback triggers on a 200
+  carrying no identity as well as on a 404, while a real refusal (403, 5xx) is
+  still reported rather than retried against the other URL.
+
   The request also lost its `curl -f`, which made curl exit non-zero on any 4xx
   _and discard the body_, collapsing every portal-side refusal into the same
   opaque "Request failed" and leaving the HTTP-status branch below it
