@@ -775,11 +775,16 @@ static int parse_line(const char *key, const char *value, pam_openbastion_config
     }
     /*
      * Keys this project's own tooling writes into openbastion.conf and that
-     * nothing reads back from it: ob-bastion-setup emits the three cache_*
-     * ones, ob-backend-setup those plus create_home and default_shell, and so
-     * do the ob-builder templates and the shipped example. cache_ttl and
-     * default_shell are live settings -- but of the NSS module, read from
-     * nss_openbastion.conf, its own file.
+     * nothing reads back from it. Who writes what, exactly:
+     *
+     *   ob-backend-setup   all five
+     *   ob-bastion-setup   the three cache_* ones
+     *   the ansible template  the same three
+     *   ob-builder         cache_enabled and cache_ttl, in its heredocs
+     *   the shipped example  none of them
+     *
+     * cache_ttl and default_shell are live settings -- but of the NSS module,
+     * read from nss_openbastion.conf, its own file.
      *
      * Reporting them would have made this change worse than the silence it
      * replaces: config_load() runs once per PAM process, so every login on

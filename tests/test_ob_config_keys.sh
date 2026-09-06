@@ -36,6 +36,12 @@ keys_from_printf() {           # generator scripts: printf 'key = ...'
 keys_from_conf() {             # example / template: active "key = value" lines
     grep -oE '^[a-z_]+[[:space:]]*=' "$1" 2>/dev/null | sed 's/[[:space:]]*=$//'
 }
+keys_from_heredoc() {          # ob-builder: config emitted inside `cat << MODE`
+    # Same shape as a conf file, but embedded in a shell script, so the printf
+    # extractor above sees none of it. ob-builder was missed entirely until a
+    # reviewer's miscount sent us back to check who writes what.
+    grep -oE '^[a-z_]+[[:space:]]*=' "$1" 2>/dev/null | sed 's/[[:space:]]*=$//'
+}
 
 check_source() {
     local desc="$1" file="$2" mode="$3" missing="" k
@@ -62,6 +68,8 @@ check_source "the shipped example carries only known keys" \
     "$ROOT_DIR/config/openbastion.conf.example" conf
 check_source "the ansible template carries only known keys" \
     "$ROOT_DIR/admin-builder/templates/ansible/role/templates/openbastion.conf.j2" conf
+check_source "ob-builder's embedded configs carry only known keys" \
+    "$ROOT_DIR/admin-builder/ob-builder" heredoc
 
 # The generators' own keys must also survive a round trip through the parser's
 # unknown-key branch: assert the five that nothing reads back are listed, so a
