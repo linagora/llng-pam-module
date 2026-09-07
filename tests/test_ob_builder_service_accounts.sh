@@ -390,6 +390,14 @@ test_rendered_artifacts() {
     grep -q '@@' "$out" && bad="$bad placeholder-left-in-artifact"
     bash -n "$out" 2>/dev/null || bad="$bad artifact-does-not-parse"
     grep -q 'service-accounts.d/${_sa_name}.pub' "$out" || bad="$bad no-key-deploy"
+    # Reachable, not merely present: disabling the guard leaves every line of
+    # the block in the file, so a text grep stays green while nothing deploys.
+    # Anchored on the KEYS block -- the conf block a few lines above has the
+    # same shape, and matching that one made this assertion pass on a mutant
+    # that had disabled the keys guard.
+    grep -B3 '_sa_keep=""' "$out" \
+        | grep -qE '^[[:space:]]*if \[ -n "[A-Za-z0-9+/=]+" \]; then' \
+        || bad="$bad key-block-unreachable"
     grep -q 'Removed stale' "$out"        || bad="$bad no-stale-cleanup"
     grep -q 'enable-service-keys' "$out"  || bad="$bad setup-flag-not-passed"
     grep -q 'chmod 0711 /etc/open-bastion' "$out" || bad="$bad parent-not-traversable"

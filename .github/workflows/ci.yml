@@ -312,6 +312,50 @@ jobs:
         scandir: './scripts'
         severity: warning
 
+  mutation:
+    name: Mutation (every control must be able to fail)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    # A container so the run is root: some controls can only be isolated with
+    # privilege, and OB_MUTATION_STRICT below turns "not exercised here" into an
+    # error rather than letting it read as a pass.
+    container: debian:trixie
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          build-essential cmake pkg-config git jq curl python3 openssh-client \
+          libcurl4-openssl-dev libjson-c-dev libpam0g-dev libssl-dev libkeyutils-dev
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+        cmake --build build -j"$(nproc)"
+
+    # Removes each control in tests/mutation/catalogue and requires the suite
+    # that guards it to fail. A surviving mutant means a green suite that checks
+    # nothing -- which is what several reviews found by hand during 0.7.0, one
+    # PR at a time.
+    - name: Mutation
+      run: OB_MUTATION_STRICT=1 bash tests/test_ob_mutation.sh
+      timeout-minutes: 20
+
+    # A mutant left behind would be invisible to every later job.
+    - name: The tree must be clean afterwards
+      run: |
+        git config --global --add safe.directory "$PWD"
+        git diff --exit-code || {
+          echo "::error::the mutation run left the working tree modified"
+          exit 1
+        }
+
   integration-test:
     name: Integration Tests (Docker)
     runs-on: ubuntu-latest

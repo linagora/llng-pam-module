@@ -1,0 +1,128 @@
+# Mutation catalogue — one security control per stanza.
+#
+# Each entry names a control, the exact text that implements it, what to replace
+# it with to REMOVE it, and the test suite that must then fail. The runner
+# applies one mutant at a time, runs that suite, and requires it to fail. A
+# mutant that SURVIVES means the suite reports success with the control gone --
+# the failure mode this whole file exists to make impossible.
+#
+# Why a curated catalogue rather than a generic mutation engine: what matters is
+# not that some arbitrary line change is detected, but that the checks the EBIOS
+# study credits with reducing a risk are actually exercised. Every entry here is
+# a control a risk sheet or an issue depends on.
+#
+# Format: five ||-separated fields, one stanza per block, blank lines and #
+# comments ignored.
+#   id        || short name, used in the report
+#   file      || path relative to the repository root
+#   search    || literal text to find (must occur EXACTLY once)
+#   replace   || what to put in its place
+#   suite     || the test that must fail once the mutant is applied
+#   needs     || (optional) an environment this entry requires: "root" when the
+#                control cannot be isolated otherwise. Not exercised locally;
+#                OB_MUTATION_STRICT=1, which CI sets, makes it an error instead
+#                of letting it read as a pass
+#   create    || (optional) instead of editing a file, CREATE this path with the
+#                "replace" text as its content. For controls of the form "this
+#                must not exist", where deleting a line cannot express the
+#                mutation -- mutating the CHECK would prove nothing, so the
+#                situation it refuses is put back instead
+#
+# Adding a control without adding it here is allowed; adding one and finding
+# that no suite fails is the signal to write the missing test.
+
+id      || fp-daemon-anchor-owner
+file    || src/ob-fp-daemon.c
+search  || if (ast.st_uid != OB_FP_PRIV_UID) {
+replace || if (0) {
+suite   || tests/test_ob_fp_daemon.sh
+why     || #249: the sshd anchor must be a root-owned process, or a local user
+why     || can put a process named sshd-session in their own ancestry and choose
+why     || which drop is read.
+
+id      || service-keys-root-owner
+file    || scripts/ob-service-account-keys
+search  || [ "$owner" = "0" ] || exit 0
+replace || :
+suite   || tests/test_ob_service_account_keys.sh
+why     || #263: the key file must be root-owned, or any writer of the directory
+why     || chooses who authenticates.
+
+id      || service-keys-name-validation
+file    || scripts/ob-service-account-keys
+search  || *[!a-z0-9_-]*) exit 0 ;;
+replace || *[!a-z0-9_-]*) : ;;
+suite   || tests/test_ob_service_account_keys.sh
+needs   || root
+why     || The username reaches the filesystem; without this a crafted name
+why     || escapes the keys directory.
+
+id      || session-monitor-unknown-verdict
+file    || scripts/ob-session-monitor
+search  || 401|403)\n            # Our credentials, not the user's status.
+replace || __never_matches__)\n            #
+suite   || tests/test_ob_session_monitor.sh
+why     || #257: a portal refusing OUR credentials must not read as "the user
+why     || was revoked" and terminate their sessions.
+
+id      || session-monitor-jq-errexit
+file    || scripts/ob-session-monitor
+search  || end' 2>/dev/null) || true
+replace || end' 2>/dev/null)
+suite   || tests/test_ob_session_monitor.sh
+why     || #257: jq's exit status must not skip the "unknown" branch under
+why     || set -e.
+
+id      || enroll-no-openssl-hmac
+file    || scripts/ob-enroll
+search  || if ! jwt=$(printf '%s' "$client_secret" \
+replace || if ! jwt=$(echo x | openssl dgst -sha256 -hmac "$client_secret" \
+suite   || tests/test_ob_request_signing.sh
+why     || #256: the OIDC client secret must never reach a command line.
+
+id      || service-keys-foreign-command
+file    || scripts/ob-bastion-setup
+search  || if foreign=$(_ob_foreign_authorized_keys_command); then
+replace || if false; then
+suite   || tests/test_ob_service_account_keys.sh
+why     || #263: enabling the flag must refuse rather than silently override a
+why     || key server the host already runs.
+
+id      || service-keys-cleanup
+file    || scripts/ob-bastion-setup
+search  || \n        _ob_drop_service_keys_dropin\n        return 0
+replace || \n        return 0
+suite   || tests/test_ob_service_account_keys.sh
+why     || #263: the flag must not be one-way; a run without it removes the
+why     || drop-in it generated.
+
+id      || exposeauthinfo-guard
+file    || scripts/ob-bastion-setup
+search  || configure_max_security_sshd() {
+replace || configure_max_security_sshd() {\n    cat >/dev/null <<X\nExposeAuthInfo yes\nX
+suite   || tests/test_ob_service_account_keys.sh
+why     || #263: no unconditional ExposeAuthInfo write; every one is behind an
+why     || opt-in guard.
+
+id      || builder-fingerprint-mismatch
+file    || admin-builder/ob-builder
+search  || if [ "$fp" != "$derived" ]; then
+replace || if false; then
+suite   || tests/test_ob_builder_service_accounts.sh
+why     || #263: a key_fingerprint that does not describe public_key must stop
+why     || the build, not ship and fail at login.
+
+id      || builder-key-deployment
+file    || admin-builder/templates/shell/installer.sh.in
+search  || if [ -n "@@SERVICE_ACCOUNT_KEYS_B64@@" ]; then
+replace || if false; then
+suite   || tests/test_ob_builder_service_accounts.sh
+why     || #263: the bundle must deploy <name>.pub, or the account cannot log in.
+
+id      || systemd-units-one-place
+create  || debian/open-bastion-mutant.service
+replace || [Unit]\nDescription=a duplicate unit, as before #254
+suite   || tests/test_ob_systemd_units.sh
+why     || #254: unit content must live only in systemd/. Mutating the check
+why     || itself would prove nothing -- this puts the duplicate back, which is
+why     || the situation the check exists to refuse.
