@@ -55,9 +55,23 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   log in.
 
   Opt-in, per this project's rule for changes to system-wide behaviour: it
-  alters sshd for every session on the host. `fingerprint_required` is a
-  separate decision — it applies to every SSH login, not only service accounts
-  — so the flag reports whether it is set rather than setting it.
+  alters sshd for every session on the host. It **refuses** rather than
+  overriding an `AuthorizedKeysCommand` that is already configured — sshd keeps
+  the first value it sees and the drop-in is read before `sshd_config`, so
+  enabling it on a host running its own key server would have made that command
+  dead and taken every user who authenticates through it with it. Running
+  without the flag removes the drop-in again, but only one carrying our own
+  header; a hand-written file is left alone and reported. The generated
+  configuration is validated with `sshd -t` and rolled back if sshd rejects it,
+  because `configure_sshd`'s own check runs before this step.
+
+  `fingerprint_required` is a separate decision — it applies to every SSH login,
+  not only service accounts — so the flag reports whether it is set, in its
+  output and in the end-of-run summary, rather than setting it. **And it is now
+  preserved across setup runs**: `render_openbastion_conf` rewrites
+  `openbastion.conf` wholesale and never emitted this key, so an operator's
+  deliberate setting was dropped by the next run — by the very run that then
+  warned it was missing.
 
 - **`--enable-sudo-fresh-otp`** on `ob-bastion-setup` and `ob-backend-setup`
   (#178). `sudo`'s own credential cache (`timestamp_timeout`, 15 min, idle) makes
