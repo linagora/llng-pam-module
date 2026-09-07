@@ -38,6 +38,19 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   systemd units of #254 drifted apart.
 - **`ob-client-jwt`(8)** builds `ob-enroll`'s `client_secret_jwt` assertion with
   the secret on stdin (#256). See Security below.
+- **`ob-builder` deploys the service-account key** (#263). A `service_accounts:`
+  entry takes `public_key` or `public_key_file`, and the generated bundle —
+  shell installer and Ansible role alike — writes
+  `/etc/open-bastion/service-accounts.d/<name>.pub`. `service-accounts.conf`
+  told `pam_openbastion` what fingerprint to expect and gave sshd nothing to
+  accept, so the deployment looked complete while the account could not log in.
+
+  `key_fingerprint` is now **derived** from the key. Supplying both cross-checks
+  them, and a mismatch stops the build: two values maintained apart is how a
+  login gets refused with a key that looks correct in every listing. Neither
+  artefact can turn on the `AuthorizedKeysCommand` itself — that is host-wide,
+  and stays with `--enable-service-keys` — so both report when they find none.
+
 - **`--enable-service-keys`** on `ob-bastion-setup` and `ob-backend-setup`
   (#263). Writes the sshd drop-in that makes a service account able to log in —
   `AuthorizedKeysCommand` pointing at `ob-service-account-keys`,
