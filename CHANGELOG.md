@@ -70,6 +70,13 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   with no sheets at all. Owner names, dates and acceptance decisions are left as
   `À COMPLÉTER`: they belong to the homologation authority. Start at
   [doc/security/README.md](doc/security/README.md).
+- **`tests/test_ob_ci_coverage.sh`** fails when a test file exists that no CI
+  job runs. `tests/test_backend_cert_acceptance.sh` — the e2e guard for "a
+  backend accepts a hop only from its allowlisted bastion" — sat outside the
+  `tests/test_ob_*.sh` loop and was named by no job, so it had been exiting 1
+  in silence. `tests/test_integration_token_svc.sh` was in the same position.
+  Both are now wired into the Docker job. A test nobody runs is worse than a
+  missing one: it looks like coverage in review and in an audit.
 - **`tests/test_ob_upgrade.sh`** upgrades a host staged from the `v0.6.2` tag
   and checks it converges. Every other suite tests the new code against a clean
   host, and nobody upgrades a clean host: the real one has a `0700 nobody`

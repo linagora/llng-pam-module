@@ -21,24 +21,25 @@
 
 set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BACKEND_SETUP="$SCRIPT_DIR/scripts/ob-backend-setup"
+BACKEND_HELPER="$SCRIPT_DIR/share/ob-ssh-principals.backend"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "SKIP: docker not available"
     exit 0
 fi
-if [ ! -f "$BACKEND_SETUP" ]; then
-    echo "FAIL: $BACKEND_SETUP not found"
+if [ ! -f "$BACKEND_HELPER" ]; then
+    echo "FAIL: $BACKEND_HELPER not found"
     exit 1
 fi
 
-# Extract the ob-ssh-principals helper from ob-backend-setup (single source).
+# The shipped helper. It used to be extracted from a heredoc inside
+# ob-backend-setup; since ob-post-upgrade it is data in share/, installed to
+# /usr/lib/open-bastion and used by both setup scripts and that command.
 HELPER=$(mktemp)
 trap 'rm -f "$HELPER"' EXIT
-awk "/cat > \"\\\$script_path\" << 'PRINCIPALS'/{f=1;next} /^PRINCIPALS\$/{f=0} f" \
-    "$BACKEND_SETUP" > "$HELPER"
+cp "$BACKEND_HELPER" "$HELPER"
 if [ ! -s "$HELPER" ]; then
-    echo "FAIL: could not extract ob-ssh-principals helper from ob-backend-setup"
+    echo "FAIL: $BACKEND_HELPER is empty"
     exit 1
 fi
 

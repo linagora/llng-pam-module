@@ -332,6 +332,18 @@ jobs:
         ./tests/test_integration_docker.sh --verbose
       timeout-minutes: 15
 
+    # These two need docker and are not matched by the tests/test_ob_*.sh loop
+    # in the build job, so nothing ran them at all until now -- and one of them
+    # had been silently broken. tests/test_ob_ci_coverage.sh fails if another
+    # test file ends up in the same position.
+    - name: Backend certificate acceptance
+      run: bash tests/test_backend_cert_acceptance.sh
+      timeout-minutes: 15
+
+    - name: Service-account token integration
+      run: bash tests/test_integration_token_svc.sh
+      timeout-minutes: 15
+
     - name: Show container logs on failure
       if: failure()
       run: |

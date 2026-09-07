@@ -416,8 +416,12 @@ test_setup_scripts_own_the_spool_as_root() {
     local bad=""
     for f in scripts/ob-bastion-setup scripts/ob-backend-setup scripts/ob-post-upgrade; do
         grep -qE 'chown[[:space:]]+nobody(:[a-z]+)?' "$ROOT_DIR/$f" && bad="$bad $f"
-        grep -qE '(install -d -m 0700 -o root|chmod 0700 "\$SPOOL_DIR")' "$ROOT_DIR/$f" \
-            || bad="$bad $f(no-0700-root)"
+        # Anchored on the spool directory itself, not on "an 0700 somewhere in
+        # the file": the point is that THIS directory is root's, and an
+        # assertion that accepts any 0700 install would pass on a script that
+        # stopped touching it.
+        grep -qE '(install -d -m 0700 -o root -g root "?\$(spool_dir|SPOOL_DIR)"?|chmod 0700 "\$(spool_dir|SPOOL_DIR)")' \
+            "$ROOT_DIR/$f" || bad="$bad $f(spool-not-0700-root)"
     done
     # And the boot-time rule, now shipped once rather than written twice.
     grep -q 'd /run/open-bastion/ssh-fp   0700 root root' \

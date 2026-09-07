@@ -53,11 +53,29 @@ test_helper_has_one_home() {
     # No script may carry the helper inline again. The shebang plus the
     # helper's own banner is the signature; a script that installs the shipped
     # file never contains it.
-    local f
-    for f in "$ROOT_DIR"/scripts/*; do
+    # scripts/ AND tests/: a test that still extracts the helper from a heredoc
+    # is how tests/test_backend_cert_acceptance.sh ended up silently broken --
+    # it was the third consumer, and this check only looked at scripts/.
+    # scripts/ AND tests/: a test that still extracts the helper from a heredoc
+    # in the working tree is how tests/test_backend_cert_acceptance.sh ended up
+    # silently broken -- it was the third consumer, and this check only looked
+    # at scripts/.
+    #
+    # Two things are deliberately not flagged. This file, which carries the
+    # patterns as search strings. And an extraction that goes through
+    # `git show <tag>:` -- tests/test_ob_upgrade.sh stages a host from v0.6.2
+    # and must keep reading the heredoc as it was then; history is not a second
+    # copy to maintain.
+    local f self
+    self="$(basename "$0")"
+    for f in "$ROOT_DIR"/scripts/* "$ROOT_DIR"/tests/*; do
         [ -f "$f" ] || continue
+        [ "$(basename "$f")" = "$self" ] && continue
         if grep -q 'ob-ssh-principals — sshd AuthorizedPrincipalsCommand helper' "$f"; then
             bad="$bad inline-copy-in:$(basename "$f")"
+        fi
+        if grep -q "<< 'PRINCIPALS'" "$f" && ! grep -q 'git .*show' "$f"; then
+            bad="$bad extracts-working-tree-heredoc-in:$(basename "$f")"
         fi
     done
     if [ -z "$bad" ]; then
@@ -207,6 +225,69 @@ test_dockerfiles_ship_share() {
     fi
 }
 
+# ── 10. sshd must already pass %t and %k, or the command refuses ────────────
+#
+# The v1 helper reads the key type and blob from argv 3 and 4. A host set up
+# before 0.7.0 has a two-token line (%u %f) that no package upgrade rewrites,
+# so installing the v1 helper there writes no .key drop -- and with
+# ssh_key_policy_enabled = true the module denies every SSH login fail-closed.
+#
+# Worse, it would silence the warning that caught this: the postinst's
+# "ACTION REQUIRED" fires only while the helper is pre-v1, and after this
+# command the helper IS v1 while sshd has not moved.
+test_refuses_stale_sshd_line() {
+    local d="$WORK/sshd-old" bad=""
+    mkdir -p "$d"
+    printf 'node_role = bastion\n' > "$WORK/ob.conf"
+
+    printf 'AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %%u %%f\n' \
+        > "$d/00-open-bastion-bastion.conf"
+    if OB_CONFIG="$WORK/ob.conf" OB_SSHD_CONFIG_DIR="$d" \
+       "$SCRIPT" --dry-run >/dev/null 2>&1; then
+        bad="$bad accepted-2-token-line"
+    fi
+
+    printf 'AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %%u %%f %%t %%k\n' \
+        > "$d/00-open-bastion-bastion.conf"
+    OB_CONFIG="$WORK/ob.conf" OB_SSHD_CONFIG_DIR="$d" \
+        "$SCRIPT" --dry-run >/dev/null 2>&1 || bad="$bad refused-4-token-line"
+
+    if [ -z "$bad" ]; then
+        pass "a pre-0.7.0 AuthorizedPrincipalsCommand line is refused, a current one accepted"
+    else
+        fail "a pre-0.7.0 AuthorizedPrincipalsCommand line is refused, a current one accepted" "$bad"
+    fi
+}
+
+# ── 11. The role comes from the sshd drop-in, not from node_role ────────────
+#
+# node_role is a reporting label: `ob-backend-setup --node-role bastion` is a
+# valid invocation. Trusting it would install the BASTION helper on a backend --
+# no vouching, allowlist ignored, a direct SSO certificate accepted -- under a
+# reassuring "[DONE] installed the bastion helper".
+test_role_prefers_the_sshd_dropin() {
+    local d="$WORK/sshd-role" bad=""
+    mkdir -p "$d"
+    printf 'AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %%u %%f %%i %%t %%k\n' \
+        > "$d/00-open-bastion-backend.conf"
+    # The lie: a backend labelled as a bastion.
+    printf 'node_role = bastion\n' > "$WORK/ob.conf"
+
+    # Capture, then grep. Piping the script straight into `grep -q` gives it
+    # SIGPIPE the moment grep matches, and `set -o pipefail` up top turns that
+    # 141 into a failed pipeline -- the assertion would report a miss on the
+    # very output that matched.
+    local out
+    out=$(OB_CONFIG="$WORK/ob.conf" OB_SSHD_CONFIG_DIR="$d" "$SCRIPT" --dry-run 2>&1)
+    printf '%s' "$out" | grep -q 'role: backend' || bad="$bad node_role-won"
+
+    if [ -z "$bad" ]; then
+        pass "a backend mislabelled node_role=bastion still gets the backend helper"
+    else
+        fail "a backend mislabelled node_role=bastion still gets the backend helper" "$bad"
+    fi
+}
+
 run_test test_helper_has_one_home
 run_test test_all_installers_use_share
 run_test test_never_enrols
@@ -216,6 +297,8 @@ run_test test_refuses_unconfigured_host
 run_test test_dry_run_is_inert
 run_test test_helpers_are_sound
 run_test test_dockerfiles_ship_share
+run_test test_refuses_stale_sshd_line
+run_test test_role_prefers_the_sshd_dropin
 
 echo
 echo "Tests run: $((TESTS_PASSED + TESTS_FAILED)), passed: $TESTS_PASSED, failed: $TESTS_FAILED"

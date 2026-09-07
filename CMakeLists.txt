@@ -200,21 +200,22 @@ install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-cert-lib.sh
 # Shared request-signing library, sourced by every shell caller of a /pam/
 # endpoint (ob-heartbeat, ob-bastion-id, ob-enroll, ob-session-monitor). Same
 # fixed path as ob-cert-lib.sh, which the scripts look up.
+install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-sign-lib.sh
+    DESTINATION lib/open-bastion
+)
+
 # The generated sshd principals helper, and the tmpfiles rule that recreates its
 # spool at boot. One copy, installed as data: ob-bastion-setup, ob-backend-setup
 # and ob-post-upgrade all read these rather than each carrying a heredoc (#254).
+#
+# Plain lib/, not CMAKE_INSTALL_LIBDIR: that expands to the multiarch
+# lib/x86_64-linux-gnu on Debian, and both the .install file and the scripts'
+# OB_DATA_DIR default name /usr/lib/open-bastion. Same as the two libraries
+# above.
 install(FILES
     ${CMAKE_SOURCE_DIR}/share/ob-ssh-principals.bastion
     ${CMAKE_SOURCE_DIR}/share/ob-ssh-principals.backend
     ${CMAKE_SOURCE_DIR}/share/ob-fp-spool.tmpfiles
-    # Plain lib/, not CMAKE_INSTALL_LIBDIR: that expands to the multiarch
-    # lib/x86_64-linux-gnu on Debian, and the .install file (and the scripts'
-    # OB_DATA_DIR default) name /usr/lib/open-bastion. Matches ob-sign-lib.sh
-    # just below.
-    DESTINATION lib/open-bastion
-)
-
-install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-sign-lib.sh
     DESTINATION lib/open-bastion
 )
 

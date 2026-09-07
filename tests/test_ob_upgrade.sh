@@ -102,6 +102,11 @@ STAGE
 cat > "$WORK/run.sh" <<'RUNNER'
 set -u
 . /tmp/stage.sh
+# stage.sh runs under `set -e` so a staging failure stops the run. The checks
+# below must NOT: they report a return code, and with errexit still on
+# `echo "### opu-rc: $?"` can only ever print 0 -- the assertion on it would be
+# vacuous.
+set +e
 
 echo "### staged: $(stat -c '%U %a' /run/open-bastion/ssh-fp)"
 

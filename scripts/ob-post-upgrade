@@ -36,6 +36,9 @@ VERSION="1.0.0"
 PROG_NAME=$(basename "$0")
 
 CONFIG_FILE="${OB_CONFIG:-/etc/open-bastion/openbastion.conf}"
+# Overridable for the test suite only, like OB_CONFIG above. On a real host
+# this is where both setup scripts write their drop-in.
+SSHD_CONFIG_DIR="${OB_SSHD_CONFIG_DIR:-/etc/ssh/sshd_config.d}"
 HELPER_PATH="/usr/local/sbin/ob-ssh-principals"
 SPOOL_DIR="/run/open-bastion/ssh-fp"
 SPOOL_PARENT="/run/open-bastion"
@@ -114,7 +117,29 @@ read_conf() {
         "$CONFIG_FILE" | tail -1 | sed 's/[[:space:]]*$//'
 }
 
+#
+# The sshd drop-in first, node_role only as a fallback.
+#
+# node_role is a reporting label: both setup scripts accept
+# `--node-role bastion|standalone|backend` and write whatever they are given.
+# `ob-backend-setup --node-role standalone` is a valid, accepted invocation, and
+# trusting node_role there would install the BASTION helper on a backend --
+# which does no vouching and ignores allowed_bastions, so a direct SSO
+# certificate would be accepted. Silently, under a reassuring "[DONE] installed
+# the bastion helper".
+#
+# Which script configured this host is written where it cannot be relabelled:
+# the name of the sshd drop-in it wrote. debian/open-bastion.postinst already
+# keys off exactly these two files.
 detect_role() {
+    local f
+    for f in "$SSHD_CONFIG_DIR"/*-open-bastion-backend.conf; do
+        [ -f "$f" ] && { echo backend; return; }
+    done
+    for f in "$SSHD_CONFIG_DIR"/*-open-bastion-bastion.conf; do
+        [ -f "$f" ] && { echo bastion; return; }
+    done
+
     local role
     role=$(read_conf node_role 2>/dev/null || true)
     case "$role" in
@@ -131,6 +156,57 @@ detect_role() {
             ;;
         *) echo "unknown:$role" ;;
     esac
+}
+
+# ── The sshd line has to pass %t and %k, and only sshd_config says so ────────
+#
+# The v1 helper reads the key type and blob from its 3rd and 4th arguments. A
+# host set up before 0.7.0 has a two-token line (`%u %f`), which the package
+# never rewrites -- so installing the v1 helper there leaves the .key drop
+# empty. On a host with ssh_key_policy_enabled = true that is not a degradation
+# but a lockout: the module denies fail-closed when it cannot identify the key.
+#
+# Worse, it would DISARM the warning that used to catch this. The postinst's
+# "ACTION REQUIRED" fires only while the helper is pre-v1; after this command
+# the helper IS v1, so the check goes quiet while sshd has not moved.
+#
+# Reading sshd_config is not writing it: the rule this command keeps is that it
+# never edits a file carrying a decision. Refusing loudly is the most it can do
+# without guessing, and it is enough.
+check_sshd_tokens() {
+    local f found="" bad=""
+    for f in "$SSHD_CONFIG_DIR"/*-open-bastion-*.conf; do
+        [ -f "$f" ] || continue
+        grep -q '^[[:space:]]*AuthorizedPrincipalsCommand[[:space:]]' "$f" || continue
+        found=yes
+        grep -E '^[[:space:]]*AuthorizedPrincipalsCommand[[:space:]].*%t([[:space:]]|$)' "$f" \
+            | grep -q '%k' || bad="$bad $f"
+    done
+
+    if [ -z "$found" ]; then
+        warn "No AuthorizedPrincipalsCommand found under $SSHD_CONFIG_DIR/."
+        warn "If this host authenticates with SSH certificates, its sshd was not"
+        warn "configured by ob-bastion-setup / ob-backend-setup and the fingerprint"
+        warn "binding will not work. Nothing here can fix that."
+        return 0
+    fi
+    [ -z "$bad" ] && { ok "sshd passes the key type and blob to the helper"; return 0; }
+
+    error "sshd still calls the principals helper without %t and %k:"
+    for f in $bad; do error "    $f"; done
+    error ""
+    error "The helper installed here reads the key type and blob from those"
+    error "tokens. Without them no .key drop is written, and on a host with"
+    error "ssh_key_policy_enabled = true the PAM module denies every SSH login"
+    error "fail-closed rather than authorize a key it cannot identify."
+    error ""
+    error "This command does not edit sshd_config. Re-run the setup script for"
+    error "this host, which rewrites the line:"
+    error "    ob-bastion-setup     (bastion)"
+    error "    ob-backend-setup     (backend)"
+    error "or add '%t %k' to the AuthorizedPrincipalsCommand line yourself and"
+    error "reload sshd."
+    return 1
 }
 
 if [ ! -r "$CONFIG_FILE" ]; then
@@ -156,7 +232,45 @@ echo "Open Bastion post-upgrade repair — role: $ROLE"
 [ "$DRY_RUN" = "true" ] && info "dry run: nothing will be changed"
 echo
 
-# ── 1. The generated principals helper ───────────────────────────────────────
+# ── 1. sshd must already pass %t and %k ─────────────────────────────────────
+# First, because it is the one thing this command cannot repair: better to stop
+# before touching anything than to leave a half-migrated host.
+check_sshd_tokens || exit 1
+
+# ── 2. The fingerprint sink socket ──────────────────────────────────────────
+# Before the helper, deliberately. The helper installed below deposits into the
+# socket and nowhere else; the one it replaces writes the spool directly. If
+# enabling the socket fails after the swap, the host is left worse than it
+# started -- pam_openbastion accepts a nobody-owned spool with a warning, it
+# does not reject it, so before this command the binding still worked.
+#
+# is-enabled as well as is-active: a socket started by hand but never enabled
+# passes is-active and is gone at the next boot.
+socket_ready() {
+    systemctl is-active --quiet ob-fp.socket 2>/dev/null \
+        && systemctl is-enabled --quiet ob-fp.socket 2>/dev/null
+}
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not available — enable ob-fp.socket yourself"
+elif socket_ready; then
+    ok "ob-fp.socket is enabled and active"
+elif [ "$DRY_RUN" = "true" ]; then
+    info "would enable and start ob-fp.socket"
+elif systemctl enable --now ob-fp.socket >/dev/null 2>&1 && socket_ready; then
+    act "enabled ob-fp.socket"
+else
+    error "Could not enable ob-fp.socket."
+    error "Without it the helper has nowhere to deposit: logins still succeed,"
+    error "but with no SSH fingerprint binding. On a host with"
+    error "fingerprint_required = true, or against a portal with"
+    error "pamAccessRequireFingerprint, those logins are refused instead."
+    error ""
+    error "Nothing was changed. The host keeps the binding it had."
+    exit 1
+fi
+
+# ── 3. The generated principals helper ──────────────────────────────────────
 if [ ! -r "$HELPER_SRC" ]; then
     error "Missing $HELPER_SRC (reinstall the open-bastion package)"
     exit 1
@@ -174,7 +288,7 @@ else
     fi
 fi
 
-# ── 2. The tmpfiles rule that recreates the spool after a reboot ─────────────
+# ── 4. The tmpfiles rule that recreates the spool after a reboot ─────────────
 if [ -e "$TMPFILES_CONF" ] && cmp -s "$TMPFILES_SRC" "$TMPFILES_CONF"; then
     ok "$TMPFILES_CONF is current"
 elif [ "$DRY_RUN" = "true" ]; then
@@ -184,25 +298,7 @@ else
     act "installed $TMPFILES_CONF"
 fi
 
-# ── 3. The fingerprint sink socket ───────────────────────────────────────────
-if ! command -v systemctl >/dev/null 2>&1; then
-    warn "systemctl not available — enable ob-fp.socket yourself"
-elif systemctl is-active --quiet ob-fp.socket 2>/dev/null; then
-    ok "ob-fp.socket is active"
-elif [ "$DRY_RUN" = "true" ]; then
-    info "would enable and start ob-fp.socket"
-elif systemctl enable --now ob-fp.socket >/dev/null 2>&1; then
-    act "enabled ob-fp.socket"
-else
-    error "Could not enable ob-fp.socket."
-    error "Without it the helper has nowhere to deposit: logins still succeed,"
-    error "but with no SSH fingerprint binding. On a host with"
-    error "fingerprint_required = true, or against a portal with"
-    error "pamAccessRequireFingerprint, those logins are refused instead."
-    exit 1
-fi
-
-# ── 4. The spool directory itself ────────────────────────────────────────────
+# ── 5. The spool directory itself ────────────────────────────────────────────
 # Before #249 this was 0700 nobody, because the helper wrote the drops itself.
 # The daemon re-asserts root ownership on its first deposit, so a host converges
 # on its next SSH login anyway -- but converging now is what makes the log line
