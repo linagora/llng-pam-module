@@ -38,6 +38,12 @@ MAX_SSO_UNREACHABLE=3600    # 1 hour
 
 # State
 sso_unreachable_since=0
+# Separate from sso_unreachable_since on purpose (#257): check_portal() resets
+# that one every time the front end answers, so a working /desktop/login would
+# wipe the counter each cycle and a permanently broken /pam/userinfo would never
+# converge on any bound at all.
+userinfo_unusable_since=0
+userinfo_unusable=false
 
 # Verify required dependencies
 for cmd in curl jq loginctl; do
@@ -136,6 +142,26 @@ check_network() {
 }
 
 # Check if a user is still valid on LLNG
+# Ask the portal whether a user is still valid.
+#
+# THREE outcomes, not two (#257). "The portal says this user is gone" and "we
+# could not ask the portal" are different answers, and the caller terminates
+# live sessions on the first one:
+#
+#   0  valid    -- the portal answered, found: true
+#   1  revoked  -- the portal answered, and the answer is not "found"
+#   2  unknown  -- we could not ask, or could not understand the reply
+#
+# Until #257 every failure returned 1. `curl -sf` fails on a connection error, a
+# DNS or TLS failure, the timeout AND on any HTTP status >= 400, so a portal
+# returning 500, a rate limit, or an expired SERVER_TOKEN answering 401 all
+# terminated every offline session while logging "no longer valid on LLNG" --
+# a statement that was not true. The reachability probe in the main loop does
+# not cover this: it fetches /desktop/login, a different endpoint, so a healthy
+# front end says nothing about /pam/userinfo.
+#
+# `-f` is therefore gone: we need to tell an HTTP error apart from a transport
+# failure, and from a 200 that genuinely says the user is revoked.
 check_user_valid() {
     local user="$1"
     local auth_header=""
@@ -154,28 +180,56 @@ check_user_valid() {
     # shellcheck disable=SC2034
     OB_SIGN_CONFIG="$CONFIG_FILE"
     if ! ob_sign_request POST /pam/userinfo "$payload"; then
-        # "we could not ask" is not "the user is gone": a non-zero return here
-        # reaches the caller as an invalid user and terminates live sessions.
-        # A local signing misconfiguration must not do that.
-        log_warn "$OB_SIGN_ERROR -- treating $user as still valid"
-        return 0
+        log_warn "$OB_SIGN_ERROR -- cannot ask about $user"
+        return 2
     fi
 
-    local response
-    response=$(curl -sf -m 10 \
+    local raw curl_rc=0
+    raw=$(curl -s -m 10 -w '\n%{http_code}' \
         -H "Content-Type: application/json" \
         ${auth_header:+-H "$auth_header"} \
         "${SIGN_HEADERS[@]}" \
         -d "$payload" \
-        "${PORTAL_URL}/pam/userinfo" 2>/dev/null) || return 1
+        "${PORTAL_URL}/pam/userinfo" 2>/dev/null) || curl_rc=$?
 
-    # Check if user is found
-    local found
-    found=$(echo "$response" | jq -r '.found // empty' 2>/dev/null)
-    if [ "$found" = "true" ]; then
-        return 0
+    if [ "$curl_rc" -ne 0 ]; then
+        log_warn "cannot reach ${PORTAL_URL}/pam/userinfo (curl exit $curl_rc) -- $user left alone"
+        return 2
     fi
-    return 1
+
+    local http_code body
+    http_code=${raw##*$'\n'}
+    body=${raw%$'\n'*}
+
+    case "$http_code" in
+        200) ;;
+        401|403)
+            # Our credentials, not the user's status. A SERVER_TOKEN that died
+            # overnight because the heartbeat timer was not armed is a bug this
+            # project has shipped before (#159); it must not read as "every user
+            # was revoked".
+            log_crit "portal refused our own credentials on /pam/userinfo (HTTP $http_code): check the server token and the heartbeat timer -- $user left alone"
+            return 2 ;;
+        *)
+            log_warn "/pam/userinfo answered HTTP $http_code -- $user left alone"
+            return 2 ;;
+    esac
+
+    # NOT `.found // empty`: jq's alternative operator treats `false` as empty,
+    # so a genuine "found": false would come back indistinguishable from a
+    # missing field. That did not matter while every non-true answer meant the
+    # same thing; with three verdicts it would turn every revocation into
+    # "unknown" and the user would keep their session forever.
+    local found
+    found=$(echo "$body" | jq -r 'if has("found") then (.found|tostring) else "missing" end' 2>/dev/null)
+    case "$found" in
+        true)  return 0 ;;
+        false) return 1 ;;
+        *)
+            # A 200 we cannot parse is not a verdict either.
+            log_warn "/pam/userinfo returned an answer without a usable 'found' field -- $user left alone"
+            return 2 ;;
+    esac
 }
 
 # Get age of offline credential cache for a user
@@ -197,6 +251,7 @@ get_cache_age() {
 
 # Revalidate all offline sessions
 revalidate_sessions() {
+    userinfo_unusable=false
     if [ ! -d "$MARKER_DIR" ]; then
         return
     fi
@@ -242,8 +297,19 @@ revalidate_sessions() {
             continue
         fi
 
-        # Check if user is still valid on LLNG
-        if check_user_valid "$user"; then
+        # Check if user is still valid on LLNG. Three outcomes (#257): the
+        # `unknown` one must not terminate anything.
+        local verdict=0
+        check_user_valid "$user" || verdict=$?
+        if [ "$verdict" -eq 2 ]; then
+            # We could not ask. Leave the session alone, but remember it: a
+            # /pam/userinfo that stays unusable is still a reason to stop
+            # trusting offline sessions eventually -- see the counter below,
+            # which mirrors Part D's bound rather than tolerating it forever.
+            userinfo_unusable=true
+            continue
+        fi
+        if [ "$verdict" -eq 0 ]; then
             log_debug "User $user is valid on LLNG"
 
             # Check cache age
@@ -277,6 +343,60 @@ revalidate_sessions() {
             # Clean up marker
             rm -f "$MARKER_DIR/$user"
         fi
+    done
+}
+
+# /pam/userinfo unusable while the portal front end answers (#257).
+#
+# Mirrors Part D's bound rather than inventing a new one: leaving a session
+# alive forever because the endpoint that would revoke it is broken is the same
+# hole Part D exists to close, just reached by a different route. The message is
+# deliberately different from Part D's, because the operator has to look in a
+# different place -- the portal is up, it is the pam-access route or our own
+# credentials that are not.
+handle_userinfo_unusable() {
+    local now
+    now=$(date +%s)
+
+    if [ "$userinfo_unusable_since" -eq 0 ]; then
+        userinfo_unusable_since=$now
+        log_warn "/pam/userinfo is unusable although the portal answers; sessions left alone for now"
+        return
+    fi
+
+    local duration=$(( now - userinfo_unusable_since ))
+    if [ "$duration" -lt "$MAX_SSO_UNREACHABLE" ]; then
+        log_warn "/pam/userinfo unusable for ${duration}s (max: ${MAX_SSO_UNREACHABLE}s)"
+        return
+    fi
+
+    log_crit "/pam/userinfo unusable for ${duration}s, terminating all offline sessions"
+    if [ ! -d "$MARKER_DIR" ]; then
+        return
+    fi
+    local marker_path
+    for marker_path in "$MARKER_DIR"/*; do
+        [ -e "$marker_path" ] || continue
+        local user_file
+        user_file=$(basename "$marker_path")
+        case "$user_file" in
+            *.* ) continue ;;
+        esac
+
+        local user="$user_file"
+        log_crit "Terminating offline session for $user (/pam/userinfo unusable for ${duration}s)"
+
+        while IFS= read -r line; do
+            local session_id
+            session_id=$(echo "$line" | awk '{print $1}')
+            local session_user
+            session_user=$(loginctl show-session "$session_id" -p Name --value 2>/dev/null) || continue
+            if [ "$session_user" = "$user" ]; then
+                loginctl terminate-session "$session_id" 2>/dev/null || true
+            fi
+        done < <(loginctl list-sessions --no-legend 2>/dev/null)
+
+        rm -f "$MARKER_DIR/$user"
     done
 }
 
@@ -376,6 +496,12 @@ main() {
         if [ "$network_up" = "true" ] && [ "$sso_up" = "true" ]; then
             # Network and SSO both up: revalidate offline sessions
             revalidate_sessions
+            if [ "$userinfo_unusable" = "true" ]; then
+                handle_userinfo_unusable
+            elif [ "$userinfo_unusable_since" -gt 0 ]; then
+                log_info "/pam/userinfo is usable again"
+                userinfo_unusable_since=0
+            fi
         elif [ "$network_up" = "true" ] && [ "$sso_up" = "false" ]; then
             # Network up but SSO down: potential firewall bypass (Part D)
             handle_sso_unreachable

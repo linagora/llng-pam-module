@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`ob-session-monitor` no longer terminates sessions because it failed to
+  reach the portal (#257).** `check_user_valid()` ended its call with
+  `curl -sf ... || return 1`, and the caller reads a non-zero return as "this
+  user was revoked" — it runs `loginctl terminate-session` on their live
+  sessions and deletes their offline marker. But `curl -sf` fails on a
+  connection error, a DNS or TLS failure, the 10-second timeout **and on any
+  HTTP status >= 400**, so a portal answering 500, a rate limit, or a
+  `SERVER_TOKEN` that expired overnight and got a 401 all terminated every
+  offline session while logging "no longer valid on LLNG" — which was not true.
+
+  The reachability probe in the main loop did not cover this: `check_portal()`
+  fetches `/desktop/login?check=1`, so a healthy front end says nothing about
+  whether `/pam/userinfo` works. Nor did the one-hour `MAX_SSO_UNREACHABLE`
+  grace period, which this path skipped entirely.
+
+  `check_user_valid()` now has three outcomes — valid, revoked, unknown — and
+  only a portal that actually answered `found: false` can terminate anything. A
+  `/pam/userinfo` that stays unusable still converges on the same one-hour bound
+  as Part D, through its own counter: the existing one is reset by
+  `check_portal()` on every cycle, so sharing it would have meant never
+  converging at all. A 401 or 403 is logged as our own credentials being
+  refused, naming the server token and the heartbeat timer, rather than as a
+  generic failure.
+
 - **The SSH fingerprint spool no longer trusts `nobody` (#249).**
   `pam_openbastion` recovers the fingerprint of the key that authenticated a
   session from `/run/open-bastion/ssh-fp/<anchor>.fp`, because OpenSSH does not
