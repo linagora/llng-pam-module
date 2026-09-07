@@ -99,10 +99,20 @@ run_stanza() {
     fi
 
     # The suite must be GREEN before the mutation, or the result means nothing.
-    if ! ( cd "$ROOT_DIR" && bash "$suite" ) >/dev/null 2>&1; then
+    local pre
+    pre=$( cd "$ROOT_DIR" && bash "$suite" 2>&1 ) || {
         fail "$id" "$suite already fails before the mutation; nothing can be concluded"
         return
-    fi
+    }
+    # And it must actually RUN. A suite that skips exits 0 before and after, so
+    # the mutant looks survived when in truth nothing was executed -- a missing
+    # dependency reported as a coverage failure. Found in CI, where the job had
+    # no socat and the fingerprint-spool suite skipped.
+    case "$pre" in
+        *SKIP*)
+            fail "$id" "$suite SKIPPED here (missing dependency); it can neither confirm nor refute — install what it needs in this job"
+            return ;;
+    esac
 
     # An entry that cannot be exercised here must not read as a pass. In CI,
     # where the requirement is met, OB_MUTATION_STRICT makes it an error.
@@ -206,14 +216,26 @@ run_stanza
 restore_all
 # Prove the tree is as it was: a runner that leaves a mutant behind is worse
 # than no runner.
-# shellcheck disable=SC2086  # RESTORE_LIST is a space-separated path list
-if [ -n "$RESTORE_LIST" ] \
-   && ! ( cd "$ROOT_DIR" && git diff --quiet -- $RESTORE_LIST 2>/dev/null ); then
-    echo
-    echo "  FAIL: the working tree still differs after restoration:"
-    # shellcheck disable=SC2086
-    ( cd "$ROOT_DIR" && git diff --stat -- $RESTORE_LIST )
-    TESTS_FAILED=$((TESTS_FAILED + 1))
+if [ -n "$RESTORE_LIST" ]; then
+    git_rc=0
+    # shellcheck disable=SC2086  # RESTORE_LIST is a space-separated path list
+    ( cd "$ROOT_DIR" && git diff --quiet -- $RESTORE_LIST ) 2>/dev/null || git_rc=$?
+    case "$git_rc" in
+        0) : ;;
+        1)
+            echo
+            echo "  FAIL: the working tree still differs after restoration:"
+            # shellcheck disable=SC2086
+            ( cd "$ROOT_DIR" && git diff --stat -- $RESTORE_LIST )
+            TESTS_FAILED=$((TESTS_FAILED + 1)) ;;
+        *)
+            # git itself failed -- dubious ownership in a container, no repo,
+            # whatever. That is not "the tree is dirty", and reporting it as
+            # such is the conflation #257 was about. Say which it is.
+            echo
+            echo "  WARN: could not verify the tree with git (exit $git_rc);"
+            echo "        restoration was performed but not confirmed." ;;
+    esac
 fi
 
 echo

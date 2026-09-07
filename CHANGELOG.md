@@ -151,7 +151,10 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
   A mutation that does not apply is a hard error, never a pass; C mutants are
   rebuilt before the suite runs, since an uncompiled mutant would pass for the
-  wrong reason; and the runner verifies the tree is unchanged afterwards.
+  wrong reason; a suite that **skips** is refused rather than read as a
+  surviving mutant, because it exits 0 both before and after and can neither
+  confirm nor refute; and the runner verifies the tree is unchanged afterwards,
+  distinguishing "the tree differs" from "git could not tell us".
 
 - **`tests/test_ob_ci_coverage.sh`** fails when a test file exists that no CI
   job runs. `tests/test_backend_cert_acceptance.sh` — the e2e guard for "a
