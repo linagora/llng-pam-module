@@ -177,6 +177,36 @@ test_helpers_are_sound() {
     fi
 }
 
+# ── 9. Every image that builds from source ships the data scripts/ reads ────
+#
+# share/ was added for this command, and eleven Dockerfiles that COPY a subset
+# of the tree into /src/open-bastion did not know about it: `make install`
+# failed inside the image and both docker suites went red in CI, twenty minutes
+# after a local run that could not see the problem.
+#
+# The invariant is narrow on purpose. A generic "every directory CMake installs
+# from" check would need to model the conditionals -- these images build with
+# BUILD_BUILDER=OFF, INSTALL_DESKTOP=OFF and INSTALL_SYSTEMD=OFF, so
+# admin-builder/, lightdm/ and systemd/ are legitimately absent. What is not
+# conditional is that the setup scripts in scripts/ install data from share/:
+# the two are one unit, and an image with one and not the other cannot build.
+test_dockerfiles_ship_share() {
+    local missing="" f
+    while read -r f; do
+        [ -n "$f" ] || continue
+        grep -q "COPY share/ " "$f" \
+            || missing="$missing ${f#"$ROOT_DIR"/}"
+    done < <(grep -rl "COPY scripts/ /src/open-bastion/scripts/" \
+                  --include=Dockerfile "$ROOT_DIR")
+
+    if [ -z "$missing" ]; then
+        pass "every image that builds scripts/ from source also ships share/"
+    else
+        fail "every image that builds scripts/ from source also ships share/" \
+             "missing COPY share/:$missing"
+    fi
+}
+
 run_test test_helper_has_one_home
 run_test test_all_installers_use_share
 run_test test_never_enrols
@@ -185,6 +215,7 @@ run_test test_role_detection
 run_test test_refuses_unconfigured_host
 run_test test_dry_run_is_inert
 run_test test_helpers_are_sound
+run_test test_dockerfiles_ship_share
 
 echo
 echo "Tests run: $((TESTS_PASSED + TESTS_FAILED)), passed: $TESTS_PASSED, failed: $TESTS_FAILED"

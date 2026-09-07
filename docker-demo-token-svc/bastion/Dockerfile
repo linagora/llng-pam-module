@@ -40,6 +40,7 @@ COPY src/ /src/open-bastion/src/
 COPY include/ /src/open-bastion/include/
 COPY nss/ /src/open-bastion/nss/
 COPY scripts/ /src/open-bastion/scripts/
+COPY share/ /src/open-bastion/share/
 COPY config/ /src/open-bastion/config/
 COPY README.md /src/open-bastion/README.md
 COPY man/ /src/open-bastion/man/

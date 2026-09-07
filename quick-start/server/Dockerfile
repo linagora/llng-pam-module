@@ -31,6 +31,7 @@ COPY src/ /src/open-bastion/src/
 COPY include/ /src/open-bastion/include/
 COPY nss/ /src/open-bastion/nss/
 COPY scripts/ /src/open-bastion/scripts/
+COPY share/ /src/open-bastion/share/
 WORKDIR /src/open-bastion
 RUN mkdir -p build && cd build && \
     cmake -DBUILD_TESTING=OFF .. && \
