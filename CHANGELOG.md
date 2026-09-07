@@ -582,9 +582,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`doc/offline-mode.md` now states what actually works during a portal outage
   (#165).** A ten-row matrix derived from the code and the generated `sshd`
   configurations: what keeps working (user resolution, certificate logins,
-  service-account `sudo`), what does not (`sudo` for SSO users — the cache is an
-  *authorization* cache, not an authentication one — `ob-ssh`/`ob-scp`/`ob-sftp`,
-  enrolment, revocation), and the two cache TTLs that must be sized together.
+  service-account `sudo`), what does not (`ob-ssh`/`ob-scp`/`ob-sftp`, enrolment,
+  revocation), and the two cache TTLs that must be sized together.
+
+  `sudo` for an SSO user is the row that needed splitting rather than a ❌. The
+  cache is an _authorization_ cache, not an authentication one, so the `auth`
+  phase cannot be served offline — but `sudo` only runs that phase when its own
+  credential has lapsed (`timestamp_timeout`, 15 min, idle-based). While it is
+  valid `sudo` never calls `pam_authenticate()`, and the `account` phase answers
+  `sudo_allowed` from the authorization cache. A user who elevated recently
+  therefore keeps elevating during an outage. Conversely, `--enable-sudo-fresh-otp`
+  (#178) sets `timestamp_timeout=0` and so removes the window entirely: on such a
+  host no SSO user can `sudo` at all while the portal is down. The same
+  correction is applied to `doc/security/02-ssh-connection.md`, whose "les
+  escalades sudo sont refusées" was an assumption R-S17 rests on.
 
   It also answers a question that comes up on every deployment: can a user keep a
   **personal SSH key on the bastion** as an outage fallback? In Mode E, no — the

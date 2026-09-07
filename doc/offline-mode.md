@@ -34,18 +34,38 @@ Before the configuration details: this is the honest matrix of what an operator
 can and cannot do while the LLNG portal is unreachable. It is derived from the
 code, not from intent.
 
-| Operation                                                 | Portal down                                 | Why                                                                                                                                     |
-| --------------------------------------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **Resolve a user** (`getent passwd`)                      | ✅ while the NSS cache holds                | `libnss_openbastion` caches lookups; `cache_ttl` in `nss_openbastion.conf`                                                              |
-| **SSH login with a valid certificate**                    | ✅ while the auth cache holds               | sshd validates the certificate against `TrustedUserCAKeys` locally; PAM `account` falls back to the authorization cache                 |
-| **SSH login with a plain key** (`~/.ssh/authorized_keys`) | ✅ **only in key modes** — never in Mode E  | Mode E sets `AuthorizedKeysFile none`; sshd rejects a plain key before PAM runs                                                         |
-| **`sudo` for an SSO user**                                | ❌                                          | The `auth` phase needs a fresh one-time token from `/pam/verify`. The cache is an _authorization_ cache, not an authentication one      |
-| **`sudo` for a service account**                          | ✅                                          | Rights come from `service-accounts.conf`, read locally, with no portal call                                                             |
-| **`ob-ssh` / `ob-scp` / `ob-sftp` to a backend**          | ❌                                          | Each mints an ephemeral certificate through `/pam/bastion-cert`. There is no offline path, and the per-session voucher is not cacheable |
-| **Plain `ssh user@backend` from the bastion**             | ✅ **only in key modes** — never in Mode E  | See the row above; the backend's own PAM `account` then falls back to its authorization cache                                           |
-| **Enrolling a new server**                                | ❌                                          | The RFC 8628 device flow needs the portal and a human approval                                                                          |
-| **Refreshing the KRL**                                    | ❌ (the last downloaded KRL stays in force) | `RevokedKeys` is a local file; it simply stops being updated                                                                            |
-| **Revoking a user**                                       | ❌ — and this is the point that matters     | Revocation is a portal-side action. While the portal is down, a cached authorization keeps working until its TTL expires                |
+| Operation                                                                  | Portal down                                   | Why                                                                                                                                                                                  |
+| -------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Resolve a user** (`getent passwd`)                                       | ✅ while the NSS cache holds                  | `libnss_openbastion` caches lookups; `cache_ttl` in `nss_openbastion.conf`                                                                                                           |
+| **SSH login with a valid certificate**                                     | ✅ while the auth cache holds                 | sshd validates the certificate against `TrustedUserCAKeys` locally; PAM `account` falls back to the authorization cache                                                              |
+| **SSH login with a plain key** (`~/.ssh/authorized_keys`)                  | ✅ **only in key modes** — never in Mode E    | Mode E sets `AuthorizedKeysFile none`; sshd rejects a plain key before PAM runs                                                                                                      |
+| **`sudo` for an SSO user** — first one, or after the sudo timestamp lapses | ❌                                            | The `auth` phase needs a fresh one-time token from `/pam/verify`. The cache is an _authorization_ cache, not an authentication one                                                   |
+| **`sudo` for an SSO user** — while sudo's own timestamp is still valid     | ⚠️ works, if the authorization is also cached | sudo skips `pam_authenticate()` entirely while its credential is fresh, so no token is asked for; the `account` phase then falls back to the authorization cache. See the note below |
+| **`sudo` for a service account**                                           | ✅                                            | Rights come from `service-accounts.conf`, read locally, with no portal call                                                                                                          |
+| **`ob-ssh` / `ob-scp` / `ob-sftp` to a backend**                           | ❌                                            | Each mints an ephemeral certificate through `/pam/bastion-cert`. There is no offline path, and the per-session voucher is not cacheable                                              |
+| **Plain `ssh user@backend` from the bastion**                              | ✅ **only in key modes** — never in Mode E    | Same reason as the "SSH login with a plain key" row above; the backend's own PAM `account` then falls back to its authorization cache                                                |
+| **Enrolling a new server**                                                 | ❌                                            | The RFC 8628 device flow needs the portal and a human approval                                                                                                                       |
+| **Refreshing the KRL**                                                     | ❌ (the last downloaded KRL stays in force)   | `RevokedKeys` is a local file; it simply stops being updated                                                                                                                         |
+| **Revoking a user**                                                        | ❌ — and this is the point that matters       | Revocation is a portal-side action. While the portal is down, a cached authorization keeps working until its TTL expires                                                             |
+
+> **The `sudo` rows deserve their nuance.** Saying flatly that an SSO user
+> cannot `sudo` during an outage is not what the code does. `sudo` keeps its own
+> credential (`timestamp_timeout`, 15 minutes by default, idle-based and rearmed
+> on each use), and while it is valid `sudo` does not run the PAM `auth` phase at
+> all — `pam_openbastion` is never asked for a one-time token. The `account`
+> phase still runs, and with the portal down it answers from the authorization
+> cache (`sudo_allowed` is stored there). So during an outage an SSO user who
+> elevated recently keeps elevating; the failure lands on the first `sudo` after
+> the timestamp lapses.
+>
+> This cuts the other way too. `ob-bastion-setup` /
+> `ob-backend-setup --enable-sudo-fresh-otp` (#178) sets
+> `timestamp_timeout=0` for the SSO group precisely so that every elevation goes
+> through the `auth` phase. On a host configured that way, **no SSO user can
+> `sudo` at all while the portal is down** — the ⚠️ row above becomes a ❌. That
+> is the intended trade: a fresh proof per elevation, paid for in availability.
+> Break-glass service accounts (`sudo` read from `service-accounts.conf`) are the
+> designed answer, and they are unaffected either way.
 
 Two caches are involved and they must be sized together:
 
