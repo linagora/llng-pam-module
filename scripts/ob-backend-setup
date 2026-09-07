@@ -38,6 +38,7 @@ KRL_REFRESH_INTERVAL=30
 # bastion) this backend accepts certs from. Empty = accept any vouched bastion
 # (still rejects direct user SSO certs, which carry no bastion= key-id).
 BASTION_ALLOWED_IDS=""
+ALLOW_ANY_BASTION=false
 # nobody-readable allowlist consumed by the AuthorizedPrincipalsCommand helper
 # (openbastion.conf is 0600 root, so the helper cannot read the list from there).
 OB_ALLOWED_BASTIONS_FILE="/etc/open-bastion/allowed_bastions"
@@ -311,6 +312,15 @@ if [ "$enforce" = 1 ]; then
             "allowed_bastions is empty: accepting a voucher from bastion '$bid' for user '$USERNAME' without checking which bastion it is" \
             2>/dev/null || :
     fi
+else
+    # Legacy non-enforcing mode: no allowlist file at all, so this accepts a
+    # DIRECT SSO certificate too -- a broader hole than the empty list above,
+    # and until now the only silent one. A backend set up by any current
+    # version has the file; reaching this means an old setup that was never
+    # re-run, which is exactly what should be visible in the logs (#182).
+    logger -t ob-ssh-principals -p authpriv.warning \
+        "$ALLOWED_FILE is absent: legacy non-enforcing mode, accepting a certificate for user '$USERNAME' without requiring a bastion voucher (re-run ob-backend-setup)" \
+        2>/dev/null || :
 fi
 
 # Record the fingerprint keyed by the per-connection sshd anchor PID. OpenSSH
@@ -1253,8 +1263,15 @@ prompt_required_settings() {
 # allowlist matching nothing (every hop denied, with no explanation), and a
 # whitespace-only value would silently mean "any bastion" while looking set.
 normalize_allowed_bastions() {
-    local raw normalized entry
+    local raw normalized entry had_noglob
     raw=$(printf '%s' "$BASTION_ALLOWED_IDS" | tr ',;' '  ')
+    # Splitting $raw also runs PATHNAME EXPANSION, which would defeat the
+    # validation below instead of triggering it: an entry containing a glob
+    # metacharacter that happens to match a file in the current directory is
+    # rewritten to the match ('b[1]' -> the file 'b1'), so a typo is silently
+    # accepted as a different, valid-looking id. Split with globbing off.
+    case $- in *f*) had_noglob=1 ;; *) had_noglob=0 ;; esac
+    set -f
     normalized=""
     for entry in $raw; do
         case "$entry" in
@@ -1266,6 +1283,7 @@ normalize_allowed_bastions() {
         esac
         normalized="${normalized:+$normalized }$entry"
     done
+    [ "$had_noglob" = 1 ] || set +f
     BASTION_ALLOWED_IDS="$normalized"
 }
 
@@ -1281,19 +1299,39 @@ normalize_allowed_bastions() {
 # Non-interactive runs keep the empty default (an upgrade must not start
 # refusing hops that worked yesterday); they get the warning at the end of
 # install_principals_helper, and the helper logs one on every hop.
+#
+# An INTERACTIVE run is not an upgrade path, so there is nothing to preserve:
+# leaving the list empty there has to be a decision the operator took, not the
+# one they get for pressing Enter. Pressing Enter re-asks, with the exposure
+# spelled out, and only a "y" to "accept ANY bastion" leaves it empty.
+# --allow-any-bastion states that answer up front (a lab, or a host whose
+# bastion is not enrolled yet).
 prompt_allowed_bastions() {
     [ -n "$BASTION_ALLOWED_IDS" ] && return 0
     [ "$NON_INTERACTIVE" = "true" ] && return 0
+    [ "$ALLOW_ANY_BASTION" = "true" ] && return 0
 
     local input
     printf "\n" >&2
     warn "Which bastions may hop to this backend?"
-    warn "Leave empty to accept ANY bastion enrolled in the project (the"
-    warn "current default, and a standing risk if any other host in the project"
-    warn "is compromised). Run 'ob-bastion-id' on each bastion to get its id."
-    printf "Allowed bastion ids (comma-separated, empty = any): " >&2
-    IFS= read -r input
-    BASTION_ALLOWED_IDS="$input"
+    warn "Run 'ob-bastion-id' on each bastion to get its id."
+    while :; do
+        printf "Allowed bastion ids (comma-separated): " >&2
+        IFS= read -r input
+        if [ -n "$input" ]; then
+            BASTION_ALLOWED_IDS="$input"
+            return 0
+        fi
+        printf "\n" >&2
+        warn "An empty list accepts a hop voucher from ANY host enrolled in the"
+        warn "project that can declare itself a bastion to the SSO -- not only"
+        warn "from the bastions you operate (#182). It is the residual defence"
+        warn "behind an SSO-side gap, and this is the only place it gets set."
+        if confirm "Accept a hop from ANY bastion?"; then
+            return 0
+        fi
+        printf "\n" >&2
+    done
 }
 
 # Interactive prompt after an enrollment failure (typically invalid_client).
@@ -1863,6 +1901,18 @@ Options:
                           when --yes is used.
       --node-role ROLE    Node role recorded in the config and reported to the
                           SSO: bastion|standalone|backend (default: backend).
+      --allowed-bastions IDS
+                          Comma/space-separated bastion_id allowlist: only these
+                          bastions may hop to this backend. Get an id by running
+                          'ob-bastion-id' on the bastion. Prompted interactively
+                          if omitted. An EMPTY list accepts a hop from any host
+                          enrolled in the project that can declare itself a
+                          bastion to the SSO -- see SECURITY.md.
+      --allow-any-bastion Answer the prompt above with "any bastion", without
+                          being asked. Same (weaker) result as an empty list;
+                          the point is that it is written down. Non-interactive
+                          runs (--yes) already default to it, so that an upgrade
+                          does not start refusing hops that worked yesterday.
   -t, --token-file FILE   Read server token from file (use - for stdin)
   -c, --client-id ID      OIDC client_id for enrollment. Prompted interactively
                           if omitted (suggested: pam-access); required when
@@ -1956,6 +2006,13 @@ parse_args() {
                 fi
                 BASTION_ALLOWED_IDS="$2"
                 shift 2
+                ;;
+            --allow-any-bastion)
+                # Say up front that the empty list is the intended answer, so an
+                # interactive run does not stop to ask. Does not change what an
+                # empty list MEANS -- only who is on record for choosing it.
+                ALLOW_ANY_BASTION=true
+                shift
                 ;;
             -t|--token-file)
                 if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then

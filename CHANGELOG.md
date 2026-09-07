@@ -449,18 +449,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Three changes, none of which can break an existing fleet on upgrade:
 
   - `ob-backend-setup` **asks** for the list when run interactively, alongside
-    the other required settings, and shows it in the pre-flight banner;
+    the other required settings, and shows it in the pre-flight banner. Pressing
+    Enter is not an answer: it re-asks with the exposure spelled out, and leaves
+    the list empty only on an explicit `y` to "Accept a hop from ANY bastion?".
+    `--allow-any-bastion` states that answer up front, for a lab or a host whose
+    bastion is not enrolled yet;
   - leaving it empty prints a loud multi-line warning naming the exposure and
     the fix, instead of the previous one-line `info`;
   - `ob-ssh-principals` logs an `authpriv.warning` **on every hop** it accepts
     without checking which bastion it came from, so a running fleet shows the
-    condition in its logs rather than only in a setup transcript.
+    condition in its logs rather than only in a setup transcript. The same is
+    true of legacy mode (the allowlist file absent), which skips vouching
+    entirely and so accepts a direct SSO certificate — broader than an empty
+    list, and until now the only path that said nothing at all.
 
-  The empty-means-any semantic is deliberately unchanged: inverting it would
-  deny every hop the moment a backend upgrades. The list is now validated
-  (`[A-Za-z0-9._-]`, comma/semicolon/space separated) and normalised, so a typo
-  is refused at setup instead of silently matching nothing, and a
-  whitespace-only value no longer looks configured while meaning "any".
+  The empty-means-any semantic is deliberately unchanged, and a
+  **non-interactive** run (`--yes`, i.e. Ansible) still defaults to it:
+  inverting it, or making the list mandatory there, would deny every hop the
+  moment a backend upgrades. An unattended deployment that wants the protection
+  passes `--allowed-bastions` (Ansible: `ob_bastion_allowed_bastions`). Both
+  options are now in `--help`, where neither was.
+
+  The list is validated (`[A-Za-z0-9._-]`, comma/semicolon/space separated) and
+  normalised, so a typo is refused at setup instead of silently matching
+  nothing, and a whitespace-only value no longer looks configured while meaning
+  "any". The split is done with globbing off: word-splitting the raw list also
+  ran pathname expansion, so an entry containing a glob metacharacter that
+  matched a file in the current directory was rewritten to the match (`b[1]` →
+  the file `b1`) — the typo was accepted as a different, valid-looking id
+  instead of triggering the validation.
 
 ### Changed
 

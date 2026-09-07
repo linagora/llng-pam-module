@@ -211,11 +211,31 @@ If the file is present but empty, any vouched bastion is accepted. If the file i
 > user. The second defence,
 > `pamAccessBastionCertPinSourceAddress`, is also off by default.
 >
-> `ob-backend-setup` now asks for the list when run interactively, warns loudly
-> when it is left empty, and `ob-ssh-principals` logs an `authpriv.warning` on
-> every hop it accepts without checking which bastion it came from. The empty
-> semantic itself is unchanged: inverting it would deny every hop on an existing
-> fleet the moment it upgrades.
+> `ob-backend-setup` asks for the list when run interactively, and pressing
+> Enter is not an answer: it re-asks, and takes the empty list only on an
+> explicit `y` to _"Accept a hop from ANY bastion?"_ (or `--allow-any-bastion`,
+> which states the same answer up front). `ob-ssh-principals` then logs an
+> `authpriv.warning` on every hop it accepts without checking which bastion it
+> came from, so a running fleet shows the condition in its logs and not only in
+> a setup transcript.
+>
+> The empty semantic itself is unchanged, and a **non-interactive** run
+> (`--yes`, i.e. Ansible) still defaults to it: inverting it, or making the list
+> mandatory there, would deny every hop on an existing fleet the moment it
+> upgrades. An unattended deployment that wants the protection has to pass
+> `--allowed-bastions` (Ansible: `ob_bastion_allowed_bastions`).
+>
+> **Legacy mode is not a quieter version of this.** With
+> `/etc/open-bastion/allowed_bastions` _absent_ — a backend set up by a version
+> that predates vouching and never re-run — the helper skips vouching entirely
+> and accepts a direct SSO certificate, which is broader than an empty list.
+> That path also logs an `authpriv.warning` on every accepted connection; the
+> fix is to re-run `ob-backend-setup`.
+>
+> A **standalone** host (its own bastion, `--node-role standalone`) legitimately
+> has nothing to list, so it will warn on every hop. Either accept the log
+> volume or pass its own id from `ob-bastion-id`; a lab is the one place where
+> `--allow-any-bastion` is the honest answer.
 
 Required sshd settings (no `AcceptEnv` needed):
 
