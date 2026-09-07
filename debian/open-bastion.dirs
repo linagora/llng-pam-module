@@ -2,3 +2,4 @@ var/lib/open-bastion
 var/cache/open-bastion
 var/cache/nss_llng
 var/cache/nss_llng/byname
+etc/open-bastion/service-accounts.d
