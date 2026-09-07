@@ -91,6 +91,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **systemd units live in one place (#254).** Every unit came from `systemd/`
+  except the socket files, which the Debian packaging kept a second copy of as
+  `debian/open-bastion.ob-<name>.socket` for `dh_installsystemd`'s
+  `package.NAME.socket` form. The two copies drifted: `a9a28d8` added
+  `UMask=0077`, `SystemCallFilter=@system-service` and
+  `SystemCallErrorNumber=EPERM` to the `@.service` templates in `systemd/`, and
+  the `debian/` copies — last touched three months earlier — never got them.
+
+  No shipped unit was actually missing the hardening, because the templates are
+  installed from `systemd/` by `debian/open-bastion.install` and only the
+  `.socket` files came from `debian/`. The damage was that two files looked
+  authoritative while being silently wrong, and nothing would have caught the
+  next edit landing on the copy that does nothing.
+
+  All six now install from `systemd/` through `debian/open-bastion.install`, the
+  same path `ob-heartbeat.timer` has always used; `dh_installsystemd` finds them
+  already staged and still generates its enable/cleanup blocks.
+  `tests/test_ob_systemd_units.sh` fails if unit content reappears under
+  `debian/`, if a unit named in `debian/rules` is not staged by an `.install`
+  file, if an `@.service` template loses its socket, or if a socket-activated
+  service loses one of the hardening directives above.
+
 - **Request signing has one implementation and a test that pins it to the
   portal's (#247).** The nonce and HMAC generators move out of `ob_client.c`
   into `src/ob_sign.c`, shared by the PAM module, `ob-cert-daemon` and

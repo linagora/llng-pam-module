@@ -89,11 +89,21 @@ systemd/ob-heartbeat.service lib/systemd/system/
 systemd/ob-session-prune.timer lib/systemd/system/
 systemd/ob-session-prune.service lib/systemd/system/
 
-# Socket-activated template units. dh_installsystemd installs the .socket units
-# and their enable blocks (see debian/rules) but does not auto-install the named
-# @.service templates; a template is never "enabled" (the .socket spawns
-# instances), it just needs to be present. Without it the socket cannot start an
-# instance ("Connection refused"). Install them next to the sockets.
+# Socket-activated units, sockets and their @.service templates alike, installed
+# from systemd/ like every other unit in this package (#254).
+#
+# The .socket files used to come from debian/open-bastion.ob-<name>.socket
+# instead -- a second copy of the same content, which drifted: the hardening
+# added to systemd/ in a9a28d8 never reached them. dh_installsystemd finds a
+# unit already staged in the package tree (that is how ob-heartbeat.timer has
+# always worked), so it still generates the enable/cleanup blocks from
+# debian/rules; it just no longer needs its own copy of the file.
+#
+# The @.service templates are never "enabled" -- the .socket spawns instances --
+# but must be present, or the socket cannot start one ("Connection refused").
+systemd/ob-cert.socket usr/lib/systemd/system/
 systemd/ob-cert@.service usr/lib/systemd/system/
+systemd/ob-record.socket usr/lib/systemd/system/
 systemd/ob-record@.service usr/lib/systemd/system/
+systemd/ob-fp.socket usr/lib/systemd/system/
 systemd/ob-fp@.service usr/lib/systemd/system/
