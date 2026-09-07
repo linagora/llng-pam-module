@@ -38,6 +38,41 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   systemd units of #254 drifted apart.
 - **`ob-client-jwt`(8)** builds `ob-enroll`'s `client_secret_jwt` assertion with
   the secret on stdin (#256). See Security below.
+- **`--enable-service-keys`** on `ob-bastion-setup` and `ob-backend-setup`
+  (#263). Writes the sshd drop-in that makes a service account able to log in —
+  `AuthorizedKeysCommand` pointing at `ob-service-account-keys`,
+  `AuthorizedKeysCommandUser nobody`, and `ExposeAuthInfo yes` — and creates
+  `service-accounts.d`. `service-accounts.conf` alone never sufficed: without
+  an authorized key sshd refuses at the protocol layer and PAM never runs, and
+  the manual assembly is what a field report got half-right.
+
+  `ExposeAuthInfo` is written by the flag rather than left to Mode E on
+  purpose. It is what puts `SSH_USER_AUTH` in the PAM environment, and without
+  it the fingerprint check has nothing to read for a plain public key — the
+  drop-in would let sshd accept the key while `key_fingerprint` was never
+  verified. Mode E writes `ExposeAuthInfo` but _not_ the
+  `AuthorizedKeysCommand`, so it alone still leaves a service account unable to
+  log in.
+
+  Opt-in, per this project's rule for changes to system-wide behaviour: it
+  alters sshd for every session on the host. It **refuses** rather than
+  overriding an `AuthorizedKeysCommand` that is already configured — sshd keeps
+  the first value it sees and the drop-in is read before `sshd_config`, so
+  enabling it on a host running its own key server would have made that command
+  dead and taken every user who authenticates through it with it. Running
+  without the flag removes the drop-in again, but only one carrying our own
+  header; a hand-written file is left alone and reported. The generated
+  configuration is validated with `sshd -t` and rolled back if sshd rejects it,
+  because `configure_sshd`'s own check runs before this step.
+
+  `fingerprint_required` is a separate decision — it applies to every SSH login,
+  not only service accounts — so the flag reports whether it is set, in its
+  output and in the end-of-run summary, rather than setting it. **And it is now
+  preserved across setup runs**: `render_openbastion_conf` rewrites
+  `openbastion.conf` wholesale and never emitted this key, so an operator's
+  deliberate setting was dropped by the next run — by the very run that then
+  warned it was missing.
+
 - **`--enable-sudo-fresh-otp`** on `ob-bastion-setup` and `ob-backend-setup`
   (#178). `sudo`'s own credential cache (`timestamp_timeout`, 15 min, idle) makes
   it skip the PAM `auth` phase, so "a fresh SSO re-authentication for each
