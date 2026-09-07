@@ -130,6 +130,36 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   with no sheets at all. Owner names, dates and acceptance decisions are left as
   `À COMPLÉTER`: they belong to the homologation authority. Start at
   [doc/security/README.md](doc/security/README.md).
+- **Mutation testing runs in CI** (`tests/test_ob_mutation.sh`, catalogue in
+  `tests/mutation/`). Each entry removes one security control and requires the
+  suite that guards it to fail; a surviving mutant means a green suite that
+  checks nothing.
+
+  It exists because that is what the 0.7.0 reviews kept finding, one PR at a
+  time: a `grep` matching the comment above a rule instead of the rule, an
+  assertion that passed because the probed file was absent rather than because
+  the check refused it, a `grep -q` whose SIGPIPE under `pipefail` turned a
+  match into a miss. None were coverage gaps — the tests existed, ran, and were
+  green.
+
+  Writing the catalogue immediately found four more: three of its own entries
+  proved nothing (a mutation that added an unreachable branch instead of
+  removing one, two whose search text matched twice, one that mutated the test
+  rather than its subject), and one real gap — the rendered installer was
+  checked for the presence of the key-deployment text, which survives disabling
+  the block that runs it.
+
+  A mutation that does not apply is a hard error, never a pass; C mutants are
+  rebuilt before the suite runs, since an uncompiled mutant would pass for the
+  wrong reason; a suite that **skips** is refused rather than read as a
+  surviving mutant, because it exits 0 both before and after and can neither
+  confirm nor refute; an entry declares whether it needs `root` or `nonroot` and
+  the runner switches privilege for it, since a control whose expected owner is
+  root is vacuously satisfied in a root run and one that guards a path only
+  bites in a privileged one — running everything at one level reports the other
+  half as surviving; and the runner verifies the tree is unchanged afterwards,
+  distinguishing "the tree differs" from "git could not tell us".
+
 - **`tests/test_ob_ci_coverage.sh`** fails when a test file exists that no CI
   job runs. `tests/test_backend_cert_acceptance.sh` — the e2e guard for "a
   backend accepts a hop only from its allowlisted bastion" — sat outside the

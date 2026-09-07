@@ -312,6 +312,50 @@ jobs:
         scandir: './scripts'
         severity: warning
 
+  mutation:
+    name: Mutation (every control must be able to fail)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    # A container so the run is root: some controls can only be isolated with
+    # privilege, and OB_MUTATION_STRICT below turns "not exercised here" into an
+    # error rather than letting it read as a pass.
+    container: debian:trixie
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          build-essential cmake pkg-config git jq curl python3 openssh-client \
+          socat util-linux \
+          libcurl4-openssl-dev libjson-c-dev libpam0g-dev libssl-dev libkeyutils-dev
+
+    # The suites the catalogue drives must be able to RUN here: one that skips
+    # for a missing dependency is green before and after the mutation, and the
+    # runner now refuses to conclude from that rather than calling it a
+    # surviving mutant. socat is what tests/test_ob_fp_daemon.sh needs.
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+        cmake --build build -j"$(nproc)"
+
+    # Removes each control in tests/mutation/catalogue and requires the suite
+    # that guards it to fail. A surviving mutant means a green suite that checks
+    # nothing -- which is what several reviews found by hand during 0.7.0, one
+    # PR at a time.
+    # The repository must be readable by the unprivileged user the runner drops
+    # to for `needs: nonroot` entries (setpriv, from util-linux above).
+    - name: Mutation
+      run: |
+        chmod -R a+rX .
+        OB_MUTATION_STRICT=1 bash tests/test_ob_mutation.sh
+      timeout-minutes: 20
+
   integration-test:
     name: Integration Tests (Docker)
     runs-on: ubuntu-latest
