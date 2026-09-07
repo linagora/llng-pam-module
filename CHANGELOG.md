@@ -45,6 +45,18 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   told `pam_openbastion` what fingerprint to expect and gave sshd nothing to
   accept, so the deployment looked complete while the account could not log in.
 
+  When any account carries a key the bundle passes `--enable-service-keys` to
+  the setup it runs (`service_keys:` overrides), and `/etc/open-bastion` is left
+  traversable. Without either, the feature could not work: the setup run removed
+  the drop-in the bundle had just deployed, and at `0700` the
+  `AuthorizedKeysCommandUser` could not reach the keys — both silently, with
+  everything looking deployed.
+
+  Keys are also removed when an account is dropped from the configuration.
+  `ob-service-account-keys` serves any `.pub` present without consulting
+  `service-accounts.conf`, so a write-only deployment meant revocation did not
+  revoke.
+
   `key_fingerprint` is now **derived** from the key. Supplying both cross-checks
   them, and a mismatch stops the build: two values maintained apart is how a
   login gets refused with a key that looks correct in every listing. Neither
