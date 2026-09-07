@@ -452,6 +452,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the other required settings, and shows it in the pre-flight banner. Pressing
     Enter is not an answer: it re-asks with the exposure spelled out, and leaves
     the list empty only on an explicit `y` to "Accept a hop from ANY bastion?".
+    Neither is an answer made only of whitespace or separators (`,,`, `" ; , "`),
+    which the normaliser collapses to the empty list just the same;
     `--allow-any-bastion` states that answer up front, for a lab or a host whose
     bastion is not enrolled yet;
   - leaving it empty prints a loud multi-line warning naming the exposure and

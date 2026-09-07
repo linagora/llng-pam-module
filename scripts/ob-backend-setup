@@ -1318,7 +1318,11 @@ prompt_allowed_bastions() {
     while :; do
         printf "Allowed bastion ids (comma-separated): " >&2
         IFS= read -r input
-        if [ -n "$input" ]; then
+        # Not [ -n "$input" ]: normalize_allowed_bastions collapses whitespace
+        # AND the separators to nothing, so "   ", ",," or " ; , " would all
+        # reach the empty list -- the very thing the explicit "y" below exists
+        # to gate -- while looking like an answer.
+        if [ -n "${input//[[:space:],;]/}" ]; then
             BASTION_ALLOWED_IDS="$input"
             return 0
         fi

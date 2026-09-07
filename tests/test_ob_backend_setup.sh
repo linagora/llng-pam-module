@@ -446,6 +446,23 @@ test_allowed_bastions_empty_is_explicit() {
     grep -q 'RESULT=\[b1\]' <<<"$out" \
         || { ok=0; echo "    (declining 'any bastion' did not re-ask: $out)"; }
 
+    # A separators-only answer must not slip past the gate either: the
+    # normaliser collapses whitespace AND ',;' to nothing, so each of these
+    # reaches the empty list while looking like an answer (#236 review).
+    local blank
+    for blank in '   ' ',,' ' ; , '; do
+        out=$(
+            source_script "ob-backend-setup"
+            NON_INTERACTIVE=false
+            ALLOW_ANY_BASTION=false
+            BASTION_ALLOWED_IDS=""
+            prompt_allowed_bastions >/dev/null 2>&1 <<<"$blank"$'\nn\nb1'
+            printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+        )
+        grep -q 'RESULT=\[b1\]' <<<"$out" \
+            || { ok=0; echo "    (blank answer '$blank' bypassed the gate: $out)"; }
+    done
+
     # Enter, then "y": empty, on the record.
     out=$(
         source_script "ob-backend-setup"
