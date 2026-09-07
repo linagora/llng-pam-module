@@ -38,6 +38,27 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   systemd units of #254 drifted apart.
 - **`ob-client-jwt`(8)** builds `ob-enroll`'s `client_secret_jwt` assertion with
   the secret on stdin (#256). See Security below.
+- **`--enable-service-keys`** on `ob-bastion-setup` and `ob-backend-setup`
+  (#263). Writes the sshd drop-in that makes a service account able to log in —
+  `AuthorizedKeysCommand` pointing at `ob-service-account-keys`,
+  `AuthorizedKeysCommandUser nobody`, and `ExposeAuthInfo yes` — and creates
+  `service-accounts.d`. `service-accounts.conf` alone never sufficed: without
+  an authorized key sshd refuses at the protocol layer and PAM never runs, and
+  the manual assembly is what a field report got half-right.
+
+  `ExposeAuthInfo` is written by the flag rather than left to Mode E on
+  purpose. It is what puts `SSH_USER_AUTH` in the PAM environment, and without
+  it the fingerprint check has nothing to read for a plain public key — the
+  drop-in would let sshd accept the key while `key_fingerprint` was never
+  verified. Mode E writes `ExposeAuthInfo` but _not_ the
+  `AuthorizedKeysCommand`, so it alone still leaves a service account unable to
+  log in.
+
+  Opt-in, per this project's rule for changes to system-wide behaviour: it
+  alters sshd for every session on the host. `fingerprint_required` is a
+  separate decision — it applies to every SSH login, not only service accounts
+  — so the flag reports whether it is set rather than setting it.
+
 - **`--enable-sudo-fresh-otp`** on `ob-bastion-setup` and `ob-backend-setup`
   (#178). `sudo`'s own credential cache (`timestamp_timeout`, 15 min, idle) makes
   it skip the PAM `auth` phase, so "a fresh SSO re-authentication for each
