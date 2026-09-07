@@ -24,6 +24,7 @@ usr/sbin/ob-cert-daemon
 usr/sbin/ob-fp-daemon
 usr/sbin/ob-fp-submit
 usr/sbin/ob-sign-request
+usr/sbin/ob-client-jwt
 usr/sbin/ob-record-sink
 usr/sbin/ob-cache-admin
 usr/sbin/ob-session-prune
@@ -61,6 +62,7 @@ usr/share/man/man8/ob-fp-daemon.8
 usr/share/man/man8/ob-fp-submit.8
 usr/share/man/man8/ob-record-sink.8
 usr/share/man/man8/ob-sign-request.8
+usr/share/man/man8/ob-client-jwt.8
 
 # Audit trace templates (deployed by `ob-bastion-setup --enable-audit-trace`)
 usr/share/open-bastion/audit/rules.d/open-bastion.rules

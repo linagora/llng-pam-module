@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`ob-enroll` no longer puts the OIDC client secret on a command line
+  (#256).** It authenticates to the token endpoint with a `client_secret_jwt`
+  assertion, and signed that assertion in shell with
+  `openssl dgst -sha256 -hmac "$client_secret"`. OpenSSL takes the HMAC key as
+  a command-line argument and has no form that reads it from a file, a
+  descriptor or the environment, so for the lifetime of each `openssl` process
+  the host's client secret was readable by any local user through the
+  world-readable `/proc/<pid>/cmdline` — the same defect #247 fixed for the
+  request-signing secret.
+
+  It was not a one-shot exposure: the call sits inside the device-grant polling
+  loop, so the secret landed in `argv` once every five seconds for up to the
+  device-code lifetime — of the order of sixty times over five minutes, during
+  exactly the interval when an operator has been sent to a browser to approve
+  the grant and someone else is most likely to be on the host.
+
+  A new `ob-client-jwt`(8) builds the assertion instead, reading the secret on
+  stdin; a pipe has no `/proc` entry. It does not read the secret from
+  `openbastion.conf` the way `ob-sign-request`(8) does, because `ob-enroll` may
+  hold it from the environment, from `--client-secret`, or from a config file
+  that on a first enrolment does not exist yet — so `ob-enroll` decides and
+  hands it over, rather than two implementations of that precedence having to
+  agree forever. The signing itself is the `generate_client_jwt()` the PAM
+  module already uses, so the shell stops carrying a second implementation of
+  the same assertion. There is deliberately no fallback to the `openssl` path:
+  a missing helper stops enrolment with an error rather than silently going
+  back to leaking the secret.
+
+  The guard in `tests/test_ob_request_signing.sh` that asserted "no HMAC key on
+  a command line" named `ob-heartbeat` and `ob-bastion-id` explicitly, which is
+  why it had nothing to say about `ob-enroll`; it now scans every script under
+  `scripts/`. `tests/test_ob_client_jwt.sh` checks the property from outside the
+  process, by reading `/proc/<pid>/cmdline` of the running helper, and proves
+  the probe is not vacuous by catching the old `openssl` invocation with it.
+
 - **`ob-session-monitor` no longer terminates sessions because it failed to
   reach the portal (#257).** `check_user_valid()` ended its call with
   `curl -sf ... || return 1`, and the caller reads a non-zero return as "this
