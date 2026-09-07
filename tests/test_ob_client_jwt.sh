@@ -116,15 +116,31 @@ test_fresh_jti() {
     fi
 }
 
-# ── 4. THE POINT: the secret is not in the helper's argv ─────────────────────
+# ── 4. THE POINT: the secret is not visible in any process's argv ────────────
 #
-# Read from outside, the way any local user would. A slow secret producer keeps
-# the helper alive long enough to sample /proc/<pid>/cmdline and /proc/<pid>/environ.
-# This fails if anyone ever "simplifies" the helper into taking --secret.
+# Read from outside, the way any local user would: a slow secret producer keeps
+# the helper alive long enough to sample /proc.
+#
+# The scan is over EVERY process, not just the helper's own pid. Scanning only
+# the helper would miss the regression that actually threatens this -- a helper
+# that shells out to `openssl dgst -hmac "$secret"` leaks from a *child*, and
+# the helper's own cmdline stays clean. That is precisely the code this change
+# removed, so it is precisely the shape a regression would take.
+#
+# (An interface change -- teaching the helper to take --secret -- is caught by
+# the refusals test below instead, since it means accepting an option that does
+# not exist. It cannot be caught here: the shipped invocation only ever feeds
+# stdin, so no mutation of the helper alone puts the marker on this cmdline.)
 test_secret_never_in_proc() {
     local marker="MARKER-$$-do-not-appear-in-proc"
     local fifo="${TMPDIR:-/tmp}/objwt.$$.fifo"
-    mkfifo "$fifo" || { fail "the secret never appears in /proc" "mkfifo"; return; }
+    local pat="${TMPDIR:-/tmp}/objwt.$$.pat"
+    mkfifo "$fifo" || { fail "the secret never reaches any process's argv" "mkfifo"; return; }
+    # The marker goes in a file, and every scan uses -f. Putting it in a grep
+    # argument would plant it in the scanner's own argv, and a scan that starts
+    # while a previous one is still exiting then finds it and reports a leak
+    # that is entirely the test's own doing. That happened; this is the fix.
+    printf '%s\n' "$marker" > "$pat"
 
     # Feed the secret slowly so the helper is still running when we look.
     ( exec >"$fifo"; printf '%s' "$marker"; sleep 2 ) &
@@ -139,29 +155,31 @@ test_secret_never_in_proc() {
     for _ in $(seq 1 20); do
         local cl="" en=""
         { cl=$(tr '\0' ' ' < "/proc/$hpid/cmdline"); } 2>/dev/null
+        [ -n "$cl" ] && observed=yes
+
+        # Every process, so a leak from a child (the openssl shape) is caught.
+        if grep -rlFf "$pat" /proc/[0-9]*/cmdline 2>/dev/null | grep -q .; then
+            seen="cmdline"
+        fi
         # environ is 0400 owner-only, unlike world-readable cmdline; this test
         # runs as the owner, so it sees the worst case.
         { en=$(tr '\0' '\n' < "/proc/$hpid/environ"); } 2>/dev/null
-        if [ -n "$cl" ]; then
-            observed=yes
-            printf '%s' "$cl" | grep -qF "$marker" && seen="cmdline"
-            printf '%s' "$en" | grep -qF "$marker" && seen="$seen environ"
-            [ -n "$seen" ] && break
-        fi
+        printf '%s' "$en" | grep -qFf "$pat" && seen="$seen environ"
+        [ -n "$seen" ] && break
         sleep 0.1
     done
 
     wait "$feeder" 2>/dev/null
     wait "$hpid" 2>/dev/null
-    rm -f "$fifo"
+    rm -f "$fifo" "$pat"
 
     if [ -z "$observed" ]; then
-        fail "the secret never appears in the helper's /proc/<pid>/cmdline or environ" \
+        fail "the secret never reaches any process's argv, the helper's or a child's" \
              "never caught the helper running, so nothing was actually checked"
     elif [ -z "$seen" ]; then
-        pass "the secret never appears in the helper's /proc/<pid>/cmdline or environ"
+        pass "the secret never reaches any process's argv, the helper's or a child's"
     else
-        fail "the secret never appears in the helper's /proc/<pid>/cmdline or environ" \
+        fail "the secret never reaches any process's argv, the helper's or a child's" \
              "found in: $seen"
     fi
 }
@@ -174,19 +192,28 @@ test_secret_never_in_proc() {
 test_probe_catches_the_old_leak() {
     command -v openssl >/dev/null 2>&1 || { pass "(skipped: no openssl to demonstrate the leak)"; return; }
     local marker="MARKER-$$-old-leak"
-    # The line as it was in ob-enroll before #256.
-    ( echo -n "msg" | openssl dgst -sha256 -hmac "$marker" -binary >/dev/null 2>&1; sleep 2 ) &
+    local pat="${TMPDIR:-/tmp}/objwt.$$.leak.pat"
+    printf '%s\n' "$marker" > "$pat"
+
+    # The line as it was in ob-enroll before #256. openssl is fed from a slow
+    # pipe so it is still alive to be sampled: it hashes in microseconds, and an
+    # earlier version of this test put the `sleep` after it instead, so the
+    # process was always gone before the first sample. That version passed --
+    # on the test's own `grep "$marker"` argv, which is why the marker now
+    # lives in a file.
+    ( printf 'msg'; sleep 2 ) | openssl dgst -sha256 -hmac "$marker" -binary >/dev/null 2>&1 &
     local wrapper=$!
 
     local found=""
     for _ in $(seq 1 20); do
-        # openssl is a child of the subshell; scan every live process.
-        if grep -rlF "$marker" /proc/[0-9]*/cmdline 2>/dev/null | head -1 | grep -q .; then
+        # Same scan as test 4, marker from a file for the same reason.
+        if grep -rlFf "$pat" /proc/[0-9]*/cmdline 2>/dev/null | grep -q .; then
             found=yes; break
         fi
         sleep 0.1
     done
     wait "$wrapper" 2>/dev/null
+    rm -f "$pat"
 
     if [ -n "$found" ]; then
         pass "the probe does catch the openssl -hmac leak it is aimed at"
@@ -223,24 +250,30 @@ test_refusals() {
 # `printf '%s'` and `echo` must produce the same assertion, or an operator who
 # pipes the secret from a file gets bad_client_credentials with no clue why.
 test_trailing_newline() {
-    local a b
-    a=$(printf '%s'   "$SECRET" | "$HELPER" --client-id "$CID" --audience "$AUD" | cut -d. -f3)
-    b=$(printf '%s\n' "$SECRET" | "$HELPER" --client-id "$CID" --audience "$AUD" | cut -d. -f3)
-    # Same key, but jti/iat differ, so compare by re-verifying b's own signature
-    # against the un-newlined secret rather than comparing signatures directly.
-    local jwt
-    jwt=$(printf '%s\n' "$SECRET" | "$HELPER" --client-id "$CID" --audience "$AUD")
-    if [ -n "$a" ] && [ -n "$b" ] && python3 - "$SECRET" "$jwt" <<'PY'
+    local bad="" form jwt
+    # No newline, LF and CRLF must all key the HMAC with the same secret. An
+    # operator whose secret file came from a Windows editor otherwise gets
+    # bad_client_credentials with nothing to go on.
+    for form in '%s' '%s\n' '%s\r\n'; do
+        # shellcheck disable=SC2059  # the format is ours, not user input
+        jwt=$(printf "$form" "$SECRET" | "$HELPER" --client-id "$CID" --audience "$AUD")
+        if [ -z "$jwt" ]; then
+            bad="$bad no-output-for[$form]"
+            continue
+        fi
+        python3 - "$SECRET" "$jwt" <<'VERIFY' || bad="$bad wrong-key-for[$form]"
 import sys, hmac, hashlib, base64
 secret, jwt = sys.argv[1], sys.argv[2]
 h, p, sig = jwt.split('.')
 mac = hmac.new(secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest()
 sys.exit(0 if base64.urlsafe_b64encode(mac).decode().rstrip('=') == sig else 1)
-PY
-    then
-        pass "a trailing newline on the secret is stripped, not signed"
+VERIFY
+    done
+
+    if [ -z "$bad" ]; then
+        pass "no newline, LF and CRLF on the secret all key the same HMAC"
     else
-        fail "a trailing newline on the secret is stripped, not signed"
+        fail "no newline, LF and CRLF on the secret all key the same HMAC" "$bad"
     fi
 }
 

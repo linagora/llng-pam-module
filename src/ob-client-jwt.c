@@ -38,9 +38,9 @@
  * has no /proc entry and no name in the filesystem; nothing but the two
  * processes can see it.
  *
- * The signing itself is the C generate_client_jwt() that pam_openbastion and
- * ob-heartbeat already use (src/jwt_utils.c), so the shell stops carrying a
- * second implementation of the same assertion.
+ * The signing itself is the C generate_client_jwt() that pam_openbastion
+ * already uses (src/jwt_utils.c, via token_manager.c and ob_client.c), so the
+ * shell stops carrying a second implementation of the same assertion.
  *
  * Usage:
  *     ob-client-jwt --client-id ID --audience URL < secret
@@ -80,10 +80,10 @@ static void usage(FILE *out)
 }
 
 /*
- * Read the secret from stdin. It is one line: a trailing newline is stripped
- * so that both `printf '%s'` and `echo` callers produce the same key, and a
- * bare newline is the only thing stripped -- everything else is part of the
- * secret, including spaces, which some issuers do generate.
+ * Read the secret from stdin. It is one line: every trailing CR and LF is
+ * stripped, so `printf '%s'`, `echo` and a secret read from a CRLF file all
+ * produce the same key. Nothing else is stripped -- leading and interior
+ * spaces are part of the secret, and some issuers do generate them.
  */
 static char *read_secret(size_t *len_out)
 {
@@ -105,7 +105,10 @@ static char *read_secret(size_t *len_out)
         if (used == MAX_SECRET) {
             /* Distinguish "exactly full" from "truncated": one more read. */
             char probe;
-            ssize_t extra = read(STDIN_FILENO, &probe, 1);
+            ssize_t extra;
+            do {
+                extra = read(STDIN_FILENO, &probe, 1);
+            } while (extra < 0 && errno == EINTR);
             if (extra > 0) {
                 explicit_bzero(&probe, sizeof(probe));
                 fprintf(stderr, "ob-client-jwt: secret larger than %d bytes\n", MAX_SECRET);

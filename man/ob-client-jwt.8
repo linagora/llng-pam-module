@@ -81,11 +81,11 @@ Becomes the
 .B aud
 claim.
 .SH INPUT
-The client secret on standard input. One trailing newline is stripped, so
-.B printf
-and
+The client secret on standard input. Every trailing CR and LF is stripped, so
+.BR printf ,
 .B echo
-callers produce the same key; everything else is part of the secret. A secret
+and a secret read from a CRLF file all produce the same key; nothing else is
+stripped, and leading or interior spaces are part of the secret. A secret
 containing a NUL byte is refused rather than silently truncated, since the HMAC
 is keyed by string length.
 .SH EXIT STATUS
