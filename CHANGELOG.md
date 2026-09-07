@@ -107,7 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   All six now install from `systemd/` through `debian/open-bastion.install`, the
   same path `ob-heartbeat.timer` has always used; `dh_installsystemd` finds them
-  already staged and still generates its enable/cleanup blocks.
+  already staged and still generates its enable/cleanup blocks. Two further dead
+  copies go with them: `debian/open-bastion.service` and
+  `debian/open-bastion.timer` were byte-identical duplicates of
+  `systemd/ob-heartbeat.{service,timer}` left behind by the rename in `b915a19`,
+  installed by nothing.
   `tests/test_ob_systemd_units.sh` fails if unit content reappears under
   `debian/`, if a unit named in `debian/rules` is not staged by an `.install`
   file, if an `@.service` template loses its socket, or if a socket-activated

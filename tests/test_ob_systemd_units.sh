@@ -41,15 +41,17 @@ test_no_duplicate_unit_files() {
     local dupes=""
     local f
     # Anything in debian/ that looks like a unit: the package.NAME.unit form
-    # dh_installsystemd accepts, and bare unit files.
+    # dh_installsystemd accepts, and the bare debian/<package>.<type> form.
+    #
+    # No exemptions. An earlier draft of this test exempted
+    # debian/open-bastion.{service,timer} as "the package's own unit" -- they
+    # were not: they were byte-identical dead copies of
+    # systemd/ob-heartbeat.{service,timer}, left behind by the rename in
+    # b915a19, installed by nothing. Exempting them would have frozen into the
+    # test exactly the situation it exists to prevent.
     for f in "$ROOT_DIR"/debian/*.service "$ROOT_DIR"/debian/*.socket \
              "$ROOT_DIR"/debian/*.timer "$ROOT_DIR"/debian/*.mount; do
         [ -e "$f" ] || continue
-        case "$(basename "$f")" in
-            # debian/<package>.service and <package>.timer are the sysv-ish
-            # names for the package's own unit, not copies of a systemd/ file.
-            open-bastion.service|open-bastion.timer) continue ;;
-        esac
         dupes="$dupes $(basename "$f")"
     done
     if [ -z "$dupes" ]; then
