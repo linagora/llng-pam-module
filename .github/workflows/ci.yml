@@ -341,7 +341,6 @@ jobs:
     # surviving mutant. socat is what tests/test_ob_fp_daemon.sh needs.
     - name: Build
       run: |
-        git config --global --add safe.directory "$PWD"
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
         cmake --build build -j"$(nproc)"
 
@@ -356,15 +355,6 @@ jobs:
         chmod -R a+rX .
         OB_MUTATION_STRICT=1 bash tests/test_ob_mutation.sh
       timeout-minutes: 20
-
-    # A mutant left behind would be invisible to every later job.
-    - name: The tree must be clean afterwards
-      run: |
-        git config --global --add safe.directory "$PWD"
-        git diff --exit-code || {
-          echo "::error::the mutation run left the working tree modified"
-          exit 1
-        }
 
   integration-test:
     name: Integration Tests (Docker)

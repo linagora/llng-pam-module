@@ -44,6 +44,7 @@ RESTORE_LIST=""
 # Restore everything, always. A mutant left behind would be committed by the
 # next person to run `git add -u`.
 CREATED_LIST=""
+REBUILD_NEEDED=0
 restore_all() {
     local f
     for f in $CREATED_LIST; do rm -f "$ROOT_DIR/$f"; done
@@ -53,7 +54,17 @@ restore_all() {
         cp "$BACKUP/$(echo "$f" | tr '/' '_')" "$ROOT_DIR/$f"
     done
 }
-trap 'restore_all; rm -rf "$BACKUP"' EXIT INT TERM
+cleanup() {
+    restore_all
+    # A source restored without a rebuild leaves the MUTATED BINARY in place --
+    # invisible, and it would poison every test run on this machine afterwards.
+    # An interrupt is exactly when that happens, so it belongs in the trap.
+    if [ "$REBUILD_NEEDED" = "1" ] && [ -d "$ROOT_DIR/build" ]; then
+        ( cd "$ROOT_DIR" && cmake --build build -j"$(nproc)" ) >/dev/null 2>&1
+    fi
+    rm -rf "$BACKUP"
+}
+trap cleanup EXIT INT TERM
 
 backup_file() {
     local f="$1" flat
@@ -175,6 +186,7 @@ run_stanza() {
         # the previous binary and pass for the wrong reason.
         case "$file" in
             *.c|*.h)
+                REBUILD_NEEDED=1
                 # No build tree: the mutant could not be compiled, so the suite
                 # would run the previous binary and pass for the wrong reason.
                 # Report it rather than let it look caught.
@@ -237,30 +249,25 @@ run_stanza
 restore_all
 # Prove the tree is as it was: a runner that leaves a mutant behind is worse
 # than no runner.
-if [ -n "$RESTORE_LIST" ] \
-   && ( cd "$ROOT_DIR" && git rev-parse --is-inside-work-tree ) >/dev/null 2>&1; then
-    git_rc=0
-    # shellcheck disable=SC2086  # RESTORE_LIST is a space-separated path list
-    ( cd "$ROOT_DIR" && git diff --quiet -- $RESTORE_LIST ) 2>/dev/null || git_rc=$?
-    case "$git_rc" in
-        0) : ;;
-        1)
-            echo
-            echo "  FAIL: the working tree still differs after restoration:"
-            # shellcheck disable=SC2086
-            ( cd "$ROOT_DIR" && git diff --stat -- $RESTORE_LIST )
-            TESTS_FAILED=$((TESTS_FAILED + 1)) ;;
-        *)
-            # git itself failed -- dubious ownership in a container, no repo,
-            # whatever. That is not "the tree is dirty", and reporting it as
-            # such is the conflation #257 was about. Say which it is.
-            echo
-            echo "  WARN: could not verify the tree with git (exit $git_rc);"
-            echo "        restoration was performed but not confirmed." ;;
-    esac
-elif [ -n "$RESTORE_LIST" ]; then
+# Verify restoration against the copies taken before each mutation, not against
+# git. The backups ARE the ground truth, they are already in hand, and the check
+# then works with no repository at all -- which matters: actions/checkout with
+# no git preinstalled downloads a tarball, so the container job has no .git and
+# the previous git-based check reported "not a git repository" as a failure.
+# Reaching for git here was habit; the exact answer was already on disk.
+dirty=""
+for f in $RESTORE_LIST; do
+    flat=$(echo "$f" | tr '/' '_')
+    [ -f "$BACKUP/$flat" ] || continue
+    cmp -s "$BACKUP/$flat" "$ROOT_DIR/$f" || dirty="$dirty $f"
+done
+for f in $CREATED_LIST; do
+    [ -e "$ROOT_DIR/$f" ] && dirty="$dirty $f(created)"
+done
+if [ -n "$dirty" ]; then
     echo
-    echo "  WARN: not a git work tree here; restoration was performed but not confirmed."
+    echo "  FAIL: these files are not what they were before the run:$dirty"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 echo
