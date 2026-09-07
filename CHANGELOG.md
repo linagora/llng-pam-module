@@ -623,6 +623,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the setup scripts write it there, but it is read only from
   `nss_openbastion.conf`, by the NSS module.
 
+- **`doc/offline-mode.md` now states what actually works during a portal outage
+  (#165).** A ten-row matrix derived from the code and the generated `sshd`
+  configurations: what keeps working (user resolution, certificate logins,
+  service-account `sudo`), what does not (`ob-ssh`/`ob-scp`/`ob-sftp`, enrolment,
+  revocation), and the two cache TTLs that must be sized together.
+
+  `sudo` for an SSO user is the row that needed splitting rather than a ❌. The
+  cache is an _authorization_ cache, not an authentication one, so the `auth`
+  phase cannot be served offline — but `sudo` only runs that phase when its own
+  credential has lapsed (`timestamp_timeout`, 15 min, idle-based). While it is
+  valid `sudo` never calls `pam_authenticate()`, and the `account` phase answers
+  `sudo_allowed` from the authorization cache. A user who elevated recently
+  therefore keeps elevating during an outage. Conversely, `--enable-sudo-fresh-otp`
+  (#178) sets `timestamp_timeout=0` and so removes the window entirely: on such a
+  host no SSO user can `sudo` at all while the portal is down. The same
+  correction is applied to `doc/security/02-ssh-connection.md`, whose "les
+  escalades sudo sont refusées" was an assumption R-S17 rests on.
+
+  It also answers a question that comes up on every deployment: can a user keep a
+  **personal SSH key on the bastion** as an outage fallback? In Mode E, no — the
+  backends set `AuthorizedKeysFile none` and `sshd` refuses a plain key before
+  PAM is consulted. In the key modes, yes, under four stated conditions — and the
+  documentation says what it costs: a long-lived private key on the bastion, not
+  bounded by a certificate TTL and not revocable through the portal, and a hop
+  that is no longer vouched. One assumption is corrected: the audit trail
+  **survives**, because a plain `ssh` run from inside a recorded bastion session
+  is captured by the pty recorder; what is not recorded is a `ssh -J bastion`
+  ProxyJump from a workstation.
+
+  The EBIOS risk R-S17 (total lockout) gains the same note in French, and
+  `doc/pam-modes.md` points Mode C at the matrix. The key-mode path is labelled
+  as analysis, not as a tested procedure: the end-to-end lab validation the issue
+  asks for has not been done.
+
 - **A world- or group-readable `/etc/open-bastion/cache.key` is now rejected
   instead of used with a warning** (offline auth cache, desktop SSO). Versions
   up to 0.6.2 accepted such a key and merely logged a warning. `SECURITY.md`

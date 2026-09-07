@@ -1099,6 +1099,30 @@ L'enregistrement de session est streamé vers le puits root `ob-record-sink` (so
 
 > **Automatisation bootstrap :** Le paquet `open-bastion-linagora` prend en charge la configuration initiale de `securetty`, du compte de service `linagora` et de `PermitRootLogin no`. Ces éléments n'ont pas besoin d'être configurés manuellement sur les déploiements utilisant ce paquet.
 
+> **Écarter la « clé SSH personnelle sur le bastion » comme filet.** Une réponse
+> souvent proposée à ce risque est de laisser chaque administrateur déposer une
+> clé SSH personnelle dans son `~/.ssh` sur le bastion, pour continuer à
+> rebondir vers les backends pendant une panne du portail. **En Mode E, c'est
+> impossible par construction** : les backends posent `AuthorizedKeysFile none`
+> et n'acceptent qu'un certificat signé par la CA dont le key-id porte
+> `bastion=<id>;user=<u>` — `sshd` refuse une clé nue avant même que PAM ne soit
+> consulté, et `ob-ssh` ne peut pas aider puisque l'émission du certificat
+> éphémère exige le portail.
+>
+> Hors Mode E (modes « clé »), c'est techniquement possible et cela déplace le
+> risque plutôt qu'il ne le réduit : une clé privée de longue durée réside alors
+> sur le bastion, non bornée par un TTL de certificat et non révocable par le
+> portail, et le rebond cesse d'être vouché (`allowed_bastions`, épinglage
+> d'adresse source et TTL de voucher ne s'y appliquent plus). La traçabilité,
+> elle, survit : un `ssh` lancé **depuis une session de bastion enregistrée** est
+> capturé par l'enregistreur de pty — ce qui ne l'est pas, c'est un
+> `ssh -J bastion` depuis le poste de travail (canal `direct-tcpip`, cf. R-S25).
+>
+> Les deux mesures conçues pour cette panne restent le **compte de service de
+> secours** et l'**accès console hors-bande** ci-dessus. Voir
+> [doc/offline-mode.md](../offline-mode.md) pour la matrice complète de ce qui
+> fonctionne hors ligne.
+
 **Remédiation infrastructure :**
 
 - LLNG en haute disponibilité (réduit la probabilité de panne prolongée)
@@ -1590,10 +1614,27 @@ cache_rate_limit_max_lockout_sec = 3600 # 1 heure max
 En mode offline, le cache mémorise les autorisations mais **pas** les tokens sudo. Une panne LLNG signifie :
 
 - Les connexions SSH des utilisateurs précédemment autorisés continuent (cache hit)
-- Les escalades sudo sont **refusées** (token LLNG non vérifiable)
+- Les escalades sudo **qui traversent la phase `auth`** sont refusées (token LLNG
+  non vérifiable)
 - Les nouveaux utilisateurs ne peuvent pas se connecter
 
 Ce comportement est intentionnel : l'escalade de privilèges requiert toujours une vérification en ligne.
+
+> **Nuance vérifiée au code.** Toute escalade ne traverse pas la phase `auth`.
+> `sudo` conserve son propre timestamp (`timestamp_timeout`, 15 min par défaut,
+> réarmé à chaque usage) et, tant qu'il est valide, n'appelle pas
+> `pam_authenticate()` : aucun token n'est demandé. La phase `account`, elle,
+> s'exécute bien, et pendant une panne elle répond depuis le cache
+> d'autorisation (`sudo_allowed` y est stocké). Un utilisateur SSO qui vient
+> d'élever ses privilèges continue donc de le faire pendant la panne ; le refus
+> tombe à la première élévation après expiration du timestamp.
+>
+> L'option `--enable-sudo-fresh-otp` (`timestamp_timeout=0`, cf. #178) supprime
+> cette fenêtre : chaque élévation traverse la phase `auth`, donc **aucun sudo
+> SSO n'est possible pendant une panne** sur un hôte ainsi configuré. C'est le
+> compromis assumé — une preuve fraîche par élévation, payée en disponibilité —
+> et c'est une hypothèse dont R-S17 dépend. Les comptes de service de secours
+> ne sont affectés dans aucun des deux cas.
 
 ---
 
