@@ -112,7 +112,13 @@ it with [A1](#a1-re-run-the-setup-script) before the portal moves.
 ### B3. Turn on request signing, in this order
 
 Plugin 0.6.0 can require every `/pam/*` call to be signed. All of Open Bastion's
-callers sign from 0.7.0. The order is not negotiable:
+callers sign from 0.7.0.
+
+An older portal has no signature check at all, so it accepts the headers and
+ignores them: setting `request_signing_secret` on your hosts buys nothing until
+the portal is upgraded. It costs nothing either — do it whenever suits you.
+
+Once you are on 0.6.0, the order is not negotiable:
 
 1. Upgrade every host to 0.7.0.
 2. Set `pamAccessRequestSigningMode = optional` on the portal. This already
