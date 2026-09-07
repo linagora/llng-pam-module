@@ -381,12 +381,13 @@ PY_EOF
 # silently, so assert it against the shipped scripts.
 test_helpers_do_not_write_the_spool() {
     local offenders=""
-    for f in scripts/ob-bastion-setup scripts/ob-backend-setup; do
-        # Look only inside the PRINCIPALS heredoc, which is the helper itself.
-        # Strip comments first: the helper's own header still NAMES the spool
-        # path, and matching that would flag documentation as a direct write.
-        if awk '/<< .PRINCIPALS./,/^PRINCIPALS$/' "$ROOT_DIR/$f" \
-             | sed 's/[[:space:]]*#.*$//' \
+    # The helpers are shipped data since ob-post-upgrade: one copy in share/,
+    # installed to /usr/lib/open-bastion, used by both setup scripts and by
+    # ob-post-upgrade. Strip comments first: the helper's own header still
+    # NAMES the spool path, and matching that would flag documentation as a
+    # direct write.
+    for f in share/ob-ssh-principals.bastion share/ob-ssh-principals.backend; do
+        if sed 's/[[:space:]]*#.*$//' "$ROOT_DIR/$f" \
              | grep -qE '(mv|cp|tee|mktemp)[^|]*(\$\{?SPOOL_DIR|/run/open-bastion/ssh-fp/)'; then
             offenders="$offenders $f"
         fi
@@ -400,9 +401,8 @@ test_helpers_do_not_write_the_spool() {
 
 test_helpers_deposit_via_submit() {
     local missing=""
-    for f in scripts/ob-bastion-setup scripts/ob-backend-setup; do
-        awk '/<< .PRINCIPALS./,/^PRINCIPALS$/' "$ROOT_DIR/$f" \
-            | grep -q 'ob-fp-submit' || missing="$missing $f"
+    for f in share/ob-ssh-principals.bastion share/ob-ssh-principals.backend; do
+        grep -q 'ob-fp-submit' "$ROOT_DIR/$f" || missing="$missing $f"
     done
     if [ -z "$missing" ]; then
         pass "both principals helpers deposit through ob-fp-submit"
@@ -414,12 +414,18 @@ test_helpers_deposit_via_submit() {
 # ── 7. The shipped spool is root-owned ───────────────────────────────────────
 test_setup_scripts_own_the_spool_as_root() {
     local bad=""
-    for f in scripts/ob-bastion-setup scripts/ob-backend-setup; do
-        grep -qE 'chown[[:space:]]+nobody(:[a-z]+)?[[:space:]]+"\$spool_dir"' \
-            "$ROOT_DIR/$f" && bad="$bad $f"
-        grep -q 'd /run/open-bastion/ssh-fp   0700 root root' "$ROOT_DIR/$f" \
-            || bad="$bad $f(tmpfiles)"
+    for f in scripts/ob-bastion-setup scripts/ob-backend-setup scripts/ob-post-upgrade; do
+        grep -qE 'chown[[:space:]]+nobody(:[a-z]+)?' "$ROOT_DIR/$f" && bad="$bad $f"
+        # Anchored on the spool directory itself, not on "an 0700 somewhere in
+        # the file": the point is that THIS directory is root's, and an
+        # assertion that accepts any 0700 install would pass on a script that
+        # stopped touching it.
+        grep -qE '(install -d -m 0700 -o root -g root "?\$(spool_dir|SPOOL_DIR)"?|chmod 0700 "\$(spool_dir|SPOOL_DIR)")' \
+            "$ROOT_DIR/$f" || bad="$bad $f(spool-not-0700-root)"
     done
+    # And the boot-time rule, now shipped once rather than written twice.
+    grep -q 'd /run/open-bastion/ssh-fp   0700 root root' \
+        "$ROOT_DIR/share/ob-fp-spool.tmpfiles" || bad="$bad tmpfiles"
     if [ -z "$bad" ]; then
         pass "both setups create the spool 0700 root, in place and at boot"
     else

@@ -204,6 +204,21 @@ install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-sign-lib.sh
     DESTINATION lib/open-bastion
 )
 
+# The generated sshd principals helper, and the tmpfiles rule that recreates its
+# spool at boot. One copy, installed as data: ob-bastion-setup, ob-backend-setup
+# and ob-post-upgrade all read these rather than each carrying a heredoc (#254).
+#
+# Plain lib/, not CMAKE_INSTALL_LIBDIR: that expands to the multiarch
+# lib/x86_64-linux-gnu on Debian, and both the .install file and the scripts'
+# OB_DATA_DIR default name /usr/lib/open-bastion. Same as the two libraries
+# above.
+install(FILES
+    ${CMAKE_SOURCE_DIR}/share/ob-ssh-principals.bastion
+    ${CMAKE_SOURCE_DIR}/share/ob-ssh-principals.backend
+    ${CMAKE_SOURCE_DIR}/share/ob-fp-spool.tmpfiles
+    DESTINATION lib/open-bastion
+)
+
 # Bastion-to-backend SSH / SCP / SFTP connectors (cert vouching).
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-ssh
     DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -218,6 +233,12 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-sftp
 # Bastion identity helper (used when configuring backend whitelists)
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-bastion-id
     DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Post-upgrade repair. Takes no configuration and never enrols, so an operator
+# who no longer remembers the setup arguments can still finish an upgrade.
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-post-upgrade
+    DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Install SSH proxy config example
@@ -517,6 +538,7 @@ install(FILES
     ${CMAKE_SOURCE_DIR}/man/ob-record-sink.8
     ${CMAKE_SOURCE_DIR}/man/ob-sign-request.8
     ${CMAKE_SOURCE_DIR}/man/ob-client-jwt.8
+    ${CMAKE_SOURCE_DIR}/man/ob-post-upgrade.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
 )
 

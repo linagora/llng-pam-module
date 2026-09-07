@@ -1,0 +1,56 @@
+#!/bin/sh
+# ob-ssh-principals — sshd AuthorizedPrincipalsCommand helper.
+# spool-format: v1 (fingerprint drop + key-metadata drop)
+# Args: <username> <fingerprint> <key-type> <key-blob-base64>
+# Outputs the username if known (to NSS/local passwd), and deposits the key
+# with ob-fp-daemon, which writes /run/open-bastion/ssh-fp/<anchor>.{fp,key}:
+#   .fp  - the SHA256 fingerprint, forwarded to LLNG during pam_acct_mgmt
+#   .key - the key type and the base64 key/certificate blob, used by
+#          pam_openbastion to enforce ssh_key_policy_* (issue #181). sshd does
+#          not expose SSH_USER_AUTH to PAM during pam_acct_mgmt, so this is the
+#          only way the module can see which key was actually presented.
+# Since #249 this helper does not write the spool itself: it runs as the
+# unprivileged AuthorizedPrincipalsCommandUser, and the spool is 0700 root.
+
+USERNAME="$1"
+FINGERPRINT="$2"
+KEYTYPE="$3"
+KEYBLOB="$4"
+
+# Hand the fingerprint to ob-fp-daemon, which writes the spool (#249).
+# This helper runs as AuthorizedPrincipalsCommandUser (nobody) because sshd
+# demands an unprivileged user, so it must NOT own the spool: a shared,
+# low-trust account holding the integrity of the fingerprint binding is the
+# whole problem #249 fixes. ob-fp-submit hands the values to a root daemon over
+# /run/open-bastion/ssh-fp.sock; the daemon derives the sshd anchor from THIS
+# process's own /proc ancestry, so nothing here can name the session it is
+# depositing for, and the spool is 0700 root.
+case "$FINGERPRINT" in
+    SHA256:[A-Za-z0-9+/]*) : ;;
+    *) FINGERPRINT="" ;;
+esac
+# Reject anything that is not a plausible OpenSSH algorithm name / base64 blob
+# before it leaves this process (the daemon re-validates; this is defence in
+# depth and keeps the deposit parseable).
+case "$KEYTYPE" in
+    ""|*[!A-Za-z0-9@._-]*) KEYTYPE="" ;;
+esac
+case "$KEYBLOB" in
+    ""|*[!A-Za-z0-9+/=]*) KEYBLOB="" ;;
+esac
+if [ -n "$FINGERPRINT" ]; then
+    # OB_FP_SUBMIT is for the test suite; on a real host this is the packaged
+    # path. Failure is never fatal: losing the binding removes an extra check,
+    # it must not refuse a login sshd has already accepted. pam_openbastion
+    # reports the missing drop itself (#192).
+    _ob_submit="${OB_FP_SUBMIT:-/usr/sbin/ob-fp-submit}"
+    if [ -x "$_ob_submit" ]; then
+        printf '%s\n%s\n%s\n' "$FINGERPRINT" "$KEYTYPE" "$KEYBLOB" \
+            | "$_ob_submit" || :
+    fi
+fi
+
+# Emit the username as allowed principal if it can be resolved
+if getent passwd "$USERNAME" >/dev/null 2>&1; then
+    echo "$USERNAME"
+fi

@@ -21,6 +21,21 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
 ### Added
 
+- **`ob-post-upgrade`(8)** finishes a package upgrade on a host without asking
+  for anything. The sshd principals helper is generated on the host, not
+  shipped, so an upgrade replaces the daemon it talks to and leaves the helper
+  as it was — and the only cure was "re-run the setup script with the arguments
+  you used before", which an operator who deployed through `ob-builder` months
+  ago does not have. This command needs none of them: the helper text, the
+  tmpfiles rule, the socket and the spool ownership are all derivable from the
+  host. It reads `openbastion.conf` for `node_role` alone, to pick the bastion
+  or backend helper, and writes nothing back. It deliberately does **not**
+  enrol — re-enrolling mints a new device id that no backend allowlist
+  contains, so it is the one repair that breaks more than it fixes — and does
+  not touch the server token, `sshd_config` or any PAM stack, which carry
+  decisions it cannot know. The helper text moved to `share/`, installed as
+  data, because a third inline copy alongside the two setup scripts is how the
+  systemd units of #254 drifted apart.
 - **`ob-client-jwt`(8)** builds `ob-enroll`'s `client_secret_jwt` assertion with
   the secret on stdin (#256). See Security below.
 - **`--enable-sudo-fresh-otp`** on `ob-bastion-setup` and `ob-backend-setup`
@@ -55,6 +70,26 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   with no sheets at all. Owner names, dates and acceptance decisions are left as
   `À COMPLÉTER`: they belong to the homologation authority. Start at
   [doc/security/README.md](doc/security/README.md).
+- **`tests/test_ob_ci_coverage.sh`** fails when a test file exists that no CI
+  job runs. `tests/test_backend_cert_acceptance.sh` — the e2e guard for "a
+  backend accepts a hop only from its allowlisted bastion" — sat outside the
+  `tests/test_ob_*.sh` loop and was named by no job, so it had been exiting 1
+  in silence. `tests/test_integration_token_svc.sh` was in the same position.
+  Both are now wired into the Docker job. A test nobody runs is worse than a
+  missing one: it looks like coverage in review and in an audit.
+- **`tests/test_ob_upgrade.sh`** upgrades a host staged from the `v0.6.2` tag
+  and checks it converges. Every other suite tests the new code against a clean
+  host, and nobody upgrades a clean host: the real one has a `0700 nobody`
+  spool and a helper that writes it, generated months ago. Both halves are
+  pinned — that installing the package **does not** migrate it (the claim
+  `UPGRADE-NOTES.md` rests on, and the reason `ob-post-upgrade` exists at all),
+  and that `ob-post-upgrade` then does. The old artefacts are extracted from
+  the tag rather than imitated.
+- **The legacy portal image is pinned** (`docker-demo-cert`). `ob-bastion-id`'s
+  fallback to the removed `/pam/bastion-token` probe is exercised by exactly
+  one thing in the tree, and only because the portal that demo runs happens to
+  be old. On `:latest` that coverage would vanish the day an image ships the
+  0.6.0 plugins — silently, with the suite still green.
 - **`tests/test_ob_bastion_id.sh`** replays `ob-bastion-id` against a mock portal
   in every shape it must survive, including LemonLDAP::NG's catch-all HTML. The
   migration below had no coverage: the docker test only exercises whichever path

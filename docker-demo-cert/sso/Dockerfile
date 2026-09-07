@@ -3,7 +3,21 @@
 # This extends the standard LLNG portal image to pre-create
 # server tokens at startup for bastion and backend.
 
-FROM yadd/lemonldap-ng-portal:latest-non-root
+# Pinned, not :latest, on purpose.
+#
+# ob-bastion-id asks POST /pam/whoami and falls back to the legacy
+# /pam/bastion-token probe on portals that predate it. This demo is the only
+# thing in the tree that exercises that fallback, and it does so only because
+# the portal it runs happens to be old. The day :latest ships the 0.6.0
+# plugins, the fallback would lose its coverage silently -- the suite would
+# stay green while testing the other path.
+#
+# 2.23.3-3 is a portal generation without /pam/whoami, without request-signature
+# verification and without pamAccessRequireFingerprint, which is exactly the
+# shape the fallback exists for. Point another demo at :latest to cover the new
+# generation when an image carrying it is published; this one stays here.
+ARG PORTAL_IMAGE=yadd/lemonldap-ng-portal:2.23.3-3-non-root
+FROM ${PORTAL_IMAGE}
 
 # Create SSH directory for SSHCA plugin (must be done as root during build)
 USER root
