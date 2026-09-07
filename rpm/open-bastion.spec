@@ -102,6 +102,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_sbindir}/ob-sign-request
 %{_sbindir}/ob-client-jwt
 %{_sbindir}/ob-post-upgrade
+%{_sbindir}/ob-service-account-keys
 %{_sbindir}/ob-record-sink
 %{_sbindir}/ob-cache-admin
 %{_sbindir}/ob-session-prune

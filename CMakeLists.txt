@@ -235,6 +235,20 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-bastion-id
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# sshd AuthorizedKeysCommand helper for service accounts. It serves a public key
+# from /etc/open-bastion/service-accounts.d/<name>.pub without needing the Unix
+# account to exist yet, which is what makes a service account usable in Mode E
+# (AuthorizedKeysFile none) and on any host where the account is NSS-resolved.
+#
+# It was in the tree but in none of the three packaging paths (#263), so there
+# was no copy on a host to point AuthorizedKeysCommand at -- and everyone who
+# needed it installed their own: /usr/local/bin/ in two demos,
+# /usr/local/sbin/ in the lab and in the documentation. /usr/sbin/ is the
+# packaged home: a package must not write under /usr/local (Debian policy 9.1.2).
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-service-account-keys
+    DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
 # Post-upgrade repair. Takes no configuration and never enrols, so an operator
 # who no longer remembers the setup arguments can still finish an upgrade.
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-post-upgrade

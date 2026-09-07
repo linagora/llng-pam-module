@@ -231,6 +231,30 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
 ### Fixed
 
+- **`ob-service-account-keys` is now shipped** (#263). The
+  `AuthorizedKeysCommand` helper that makes a service account usable existed in
+  the tree and was installed by **none** of the three packaging paths — not
+  CMake, not the `.deb`, not the RPM. So there was no copy on a host to point
+  `AuthorizedKeysCommand` at, and everyone who needed one installed their own at
+  a path of their choosing: `/usr/local/bin/` in two demos, `/usr/local/sbin/`
+  in the lab and in the documentation. It now installs to
+  `/usr/sbin/ob-service-account-keys` (a package must not write under
+  `/usr/local`), and every shipped reference uses that path.
+
+  Two passages of `doc/service-accounts.md` were actively misleading, and they
+  are the ones an operator reads before deploying. Of Mode E it said _"No
+  `authorized_keys` file is required"_ — literally true and read as "nothing
+  else is needed", when in fact sshd rejects at the protocol layer and
+  `pam_openbastion` never runs; the fingerprint check it describes is a
+  re-validation, not an authorisation. And it said `ExposeAuthInfo yes` is
+  written by "the setups", which happens only inside
+  `configure_max_security_sshd()` — never on a host that is not in Mode E. Both
+  corrected, and `tests/test_ob_service_account_keys.sh` fails if either claim
+  comes back or if the helper leaves the packaging again.
+
+  Reported from the field with a complete reproduction; the deployment still
+  requires the sshd drop-in to be written by hand, which is tracked separately.
+
 - **The SSH key policy is now actually enforced, fail-closed** (#181).
   `ssh_key_policy_enabled` was documented as implemented and enforced nothing:
   the check read `SSH_USER_AUTH`, which sshd does not export during
