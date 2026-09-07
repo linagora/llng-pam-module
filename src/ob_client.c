@@ -170,7 +170,17 @@ static int add_signing_headers(struct curl_slist **headers,
                                const char *path,
                                const char *body)
 {
-    if (!signing_secret) {
+    /*
+     * Empty counts as absent, exactly as ob_sign_load_secret() treats it.
+     * config_load() strdup's whatever follows the '=', so a degenerate
+     * `request_signing_secret =` reaches here as "" rather than NULL. HMAC
+     * with a zero-length key is well defined and worthless -- anyone can
+     * compute it -- so signing with it would ship a request that merely looks
+     * signed, and would disagree with the shell and daemon callers on the same
+     * host, which send that config unsigned. Unsigned is the honest answer: a
+     * portal in `required` refuses it visibly.
+     */
+    if (!signing_secret || !*signing_secret) {
         return 0;
     }
 

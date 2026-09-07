@@ -224,11 +224,7 @@ test_helper_contract() {
     local conf out rc
     conf=$(write_conf 1 "$SECRET")
 
-    out=$(printf '%s' '{"a":1}' | ob-sign-request --method POST --path /pam/heartbeat -c "$conf" 2>&1); rc=$?
-    if [ "$rc" != "0" ]; then
-        # -c is not the helper's spelling; --config is. Check the real one.
-        out=$(printf '%s' '{"a":1}' | ob-sign-request --method POST --path /pam/heartbeat --config "$conf" 2>&1); rc=$?
-    fi
+    out=$(printf '%s' '{"a":1}' | ob-sign-request --method POST --path /pam/heartbeat --config "$conf" 2>&1); rc=$?
     if [ "$rc" = "0" ] \
        && echo "$out" | grep -qE '^X-Timestamp: [0-9]+$' \
        && echo "$out" | grep -qE '^X-Nonce: [0-9A-Za-z._:-]+$' \
@@ -236,6 +232,17 @@ test_helper_contract() {
         pass "ob-sign-request prints the three headers"
     else
         fail "ob-sign-request prints the three headers" "rc=$rc out=$(echo "$out" | tr '\n' ' ')"
+    fi
+
+    # --config is the only spelling. ob-sign-lib.sh passes exactly this, so an
+    # unknown option must be refused rather than ignored -- a helper that
+    # skipped it would fall back to the default config path and sign with a
+    # secret the caller never asked for.
+    out=$(printf '%s' '{"a":1}' | ob-sign-request --method POST --path /pam/heartbeat -c "$conf" 2>&1); rc=$?
+    if [ "$rc" = "1" ]; then
+        pass "ob-sign-request refuses an unknown option"
+    else
+        fail "ob-sign-request refuses an unknown option" "rc=$rc out=$out"
     fi
 
     # Exit 3, not an error and not a signature: nothing is configured.

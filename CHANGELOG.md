@@ -22,11 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take the whole fleet down hours later, together, as the tokens still in hand
   expired.
 
-  Two call sites were missing from the issue's own inventory and are signed
-  here as well: `ob-enroll` verifies the enrolment through `/pam/authorize`, and
-  `/pam/userinfo` — recorded as having no caller — is called by
-  `ob-session-monitor`, whose loop terminates sessions for users the portal no
-  longer knows. `tests/test_ob_request_signing.sh` now walks the tree for
+  Three call sites were missing from the issue's own inventory and are signed
+  here as well: the `ob-heartbeat` timer, which is the shell half of
+  `/pam/heartbeat` and the one that runs forever; `ob-enroll`, which verifies
+  the enrolment through `/pam/authorize`; and `/pam/userinfo` — recorded as
+  having no caller — which is called by `ob-session-monitor`, whose loop
+  terminates sessions for users the portal no longer knows. `tests/test_ob_request_signing.sh` now walks the tree for
   anything that builds a `/pam/` URL and fails if it is not in the signed
   inventory, so a new caller cannot creep back in unsigned.
 

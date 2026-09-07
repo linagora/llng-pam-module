@@ -137,6 +137,16 @@ static void test_failures_are_empty(void)
     ob_sign_compute(NULL, 1, NONCE, "POST", "/x", "", sig, sizeof(sig));
     CHECK(sig[0] == '\0', "no secret yields an empty signature");
 
+    /*
+     * config_load() strdup's whatever follows the '=', so `request_signing_secret =`
+     * reaches the PAM module as "" and not NULL. An empty HMAC key is forgeable
+     * by anyone; refusing it here is what keeps the module, the daemon and the
+     * shell callers from disagreeing about the same degenerate config.
+     */
+    memset(sig, 'A', sizeof(sig));
+    ob_sign_compute("", 1, NONCE, "POST", "/x", "", sig, sizeof(sig));
+    CHECK(sig[0] == '\0', "an empty secret counts as absent, not as a key");
+
     memset(sig, 'A', sizeof(sig));
     ob_sign_compute(SECRET, 1, "", "POST", "/x", "", sig, sizeof(sig));
     CHECK(sig[0] == '\0', "empty nonce yields an empty signature");

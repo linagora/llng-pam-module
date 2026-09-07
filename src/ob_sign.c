@@ -83,7 +83,13 @@ void ob_sign_compute(const char *secret,
                      char *signature,
                      size_t sig_size)
 {
-    if (!secret || !nonce || !*nonce || !method || !path
+    /*
+     * `!*secret` as well as `!secret`: an empty key is not a secret. HMAC over
+     * a zero-length key is well defined and forgeable by anyone, so the single
+     * rule across this file is "empty counts as absent" -- the same answer
+     * ob_sign_load_secret() gives for `request_signing_secret =`.
+     */
+    if (!secret || !*secret || !nonce || !*nonce || !method || !path
         || !signature || sig_size < OB_SIGN_SIGNATURE_SIZE) {
         if (signature && sig_size > 0) signature[0] = '\0';
         return;
