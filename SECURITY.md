@@ -201,6 +201,42 @@ This writes `/etc/open-bastion/allowed_bastions` (0644 inside a 0711 directory) 
 If the file is present but empty, any vouched bastion is accepted. If the file is unreadable,
 `ob-ssh-principals` fails closed (denies the connection).
 
+> **Set this list.** An empty allowlist accepts a hop voucher from **any** host
+> enrolled in the project, and that allowlist is the residual defence behind a
+> real gap on the SSO side: the pam-access plugin performs no RP/audience
+> binding on `/pam/*` tokens, and when `pamAccessServerGroups` is empty — the
+> configuration recommended for multi-group projects — it takes `server_group`
+> straight from the request body. Any compromised enrolled host in the project
+> can therefore declare itself a bastion and mint a 12-hour hop voucher for a
+> user. The second defence,
+> `pamAccessBastionCertPinSourceAddress`, is also off by default.
+>
+> `ob-backend-setup` asks for the list when run interactively, and pressing
+> Enter is not an answer: it re-asks, and takes the empty list only on an
+> explicit `y` to _"Accept a hop from ANY bastion?"_ (or `--allow-any-bastion`,
+> which states the same answer up front). `ob-ssh-principals` then logs an
+> `authpriv.warning` on every hop it accepts without checking which bastion it
+> came from, so a running fleet shows the condition in its logs and not only in
+> a setup transcript.
+>
+> The empty semantic itself is unchanged, and a **non-interactive** run
+> (`--yes`, i.e. Ansible) still defaults to it: inverting it, or making the list
+> mandatory there, would deny every hop on an existing fleet the moment it
+> upgrades. An unattended deployment that wants the protection has to pass
+> `--allowed-bastions` (Ansible: `ob_bastion_allowed_bastions`).
+>
+> **Legacy mode is not a quieter version of this.** With
+> `/etc/open-bastion/allowed_bastions` _absent_ — a backend set up by a version
+> that predates vouching and never re-run — the helper skips vouching entirely
+> and accepts a direct SSO certificate, which is broader than an empty list.
+> That path also logs an `authpriv.warning` on every accepted connection; the
+> fix is to re-run `ob-backend-setup`.
+>
+> A **standalone** host (its own bastion, `--node-role standalone`) legitimately
+> has nothing to list, so it will warn on every hop. Either accept the log
+> volume or pass its own id from `ob-bastion-id`; a lab is the one place where
+> `--allow-any-bastion` is the honest answer.
+
 Required sshd settings (no `AcceptEnv` needed):
 
 ```bash

@@ -238,6 +238,79 @@ test_backend_wrong_bastion_denied() {
     fi
 }
 
+# ── Test 9b: an empty allowlist still accepts, but says so on every hop ──
+#
+# Empty means "any vouched bastion" (#182). That semantic is kept -- inverting
+# it would deny every hop on a fleet that upgrades -- but it must no longer be
+# invisible: the helper logs a warning to authpriv for each accepted hop.
+test_backend_empty_allowlist_warns() {
+    reset_spool
+    : > "$CONF_DIR/allowed_bastions"
+
+    # Capture what the helper would send to syslog by shadowing logger(1).
+    local bindir="$TMP/bin" logged="$TMP/logged"
+    mkdir -p "$bindir"
+    rm -f "$logged"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$logged" > "$bindir/logger"
+    chmod 755 "$bindir/logger"
+
+    local out
+    out=$(PATH="$bindir:$PATH" run_helper "$BACKEND_HELPER" "$USER_NAME" "$FP" \
+            "bastion=whatever;user=$USER_NAME;target=host" "ssh-ed25519" "$BLOB")
+
+    if [ "$out" != "$USER_NAME" ]; then
+        fail "Empty allowlist still accepts a vouched cert" "got '$out'"
+        return
+    fi
+    # The claim is not just "a warning": the log has to identify WHICH hop was
+    # let through unchecked, or it cannot be acted on in a running fleet.
+    if [ -s "$logged" ] \
+       && grep -q 'allowed_bastions is empty' "$logged" \
+       && grep -q "'whatever'" "$logged" \
+       && grep -q "'$USER_NAME'" "$logged" \
+       && grep -q 'authpriv.warning' "$logged"; then
+        pass "Empty allowlist accepts but logs a warning naming the bastion and user"
+    else
+        fail "Empty allowlist warning names the bastion and user" "logged: $(cat "$logged" 2>/dev/null)"
+    fi
+}
+
+# ── Test 9c: legacy mode (no allowlist file) is no longer the silent one ──
+#
+# With the file absent the helper skips vouching entirely, so it accepts a
+# DIRECT SSO certificate -- broader than the empty list of 9b, and until the
+# #236 review the only path that said nothing at all. Any backend set up by a
+# current version has the file; reaching this means a setup never re-run.
+test_backend_legacy_mode_warns() {
+    reset_spool
+    rm -f "$CONF_DIR/allowed_bastions"
+
+    local bindir="$TMP/bin" logged="$TMP/logged"
+    mkdir -p "$bindir"
+    rm -f "$logged"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$logged" > "$bindir/logger"
+    chmod 755 "$bindir/logger"
+
+    # A direct SSO cert: no "bastion=" key-id at all. Legacy mode accepts it.
+    local out
+    out=$(PATH="$bindir:$PATH" run_helper "$BACKEND_HELPER" "$USER_NAME" "$FP" \
+            "user@example.com" "ssh-ed25519" "$BLOB")
+
+    : > "$CONF_DIR/allowed_bastions"   # restore for any later test
+
+    if [ "$out" != "$USER_NAME" ]; then
+        fail "Legacy mode still accepts (semantic unchanged)" "got '$out'"
+        return
+    fi
+    if [ -s "$logged" ] \
+       && grep -q 'legacy non-enforcing mode' "$logged" \
+       && grep -q "'$USER_NAME'" "$logged"; then
+        pass "Missing allowlist file accepts but logs a legacy-mode warning"
+    else
+        fail "Missing allowlist file logs a warning" "logged: $(cat "$logged" 2>/dev/null)"
+    fi
+}
+
 # ── Test 10: both sshd_config templates pass %t and %k ──
 test_sshd_config_tokens() {
     local bastion_line backend_line
@@ -275,6 +348,8 @@ run_test test_legacy_invocation
 run_test test_backend_vouched
 run_test test_backend_unvouched_denied
 run_test test_backend_wrong_bastion_denied
+run_test test_backend_empty_allowlist_warns
+run_test test_backend_legacy_mode_warns
 run_test test_sshd_config_tokens
 run_test test_spool_format_marker
 

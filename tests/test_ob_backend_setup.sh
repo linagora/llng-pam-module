@@ -331,6 +331,189 @@ test_sudo_fresh_otp_optin() {
     fi
 }
 
+# ── The allowed-bastions list is validated and normalised (#182) ──
+#
+# The list is written to a world-readable file consumed by the principals
+# helper, which compares each entry against a bastion_id it has already
+# restricted to [A-Za-z0-9._-]. A typo outside that charset would sit there
+# matching nothing (every hop denied, unexplained), and a whitespace-only value
+# would silently mean "any bastion" while looking configured.
+test_allowed_bastions_normalised() {
+    local rc1 rc2 rc3
+    (
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="b1, b2 ;b3"
+        normalize_allowed_bastions
+        [ "$BASTION_ALLOWED_IDS" = "b1 b2 b3" ] && exit 0 || exit 1
+    )
+    rc1=$?
+    (
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="   "
+        normalize_allowed_bastions
+        [ -z "$BASTION_ALLOWED_IDS" ] && exit 0 || exit 1
+    )
+    rc2=$?
+    (
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="ok,bad id!"
+        normalize_allowed_bastions 2>/dev/null
+    )
+    rc3=$?
+    if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$rc3" -ne 0 ]; then
+        pass "allowed-bastions list normalised, blank collapses, junk rejected"
+    else
+        fail "allowed-bastions validation" "rc=$rc1/$rc2/$rc3"
+    fi
+}
+
+# ── A glob in the list must be refused, not silently rewritten (#236 review) ──
+#
+# Splitting the raw list runs pathname expansion as well as word splitting, so
+# 'b[1]' used to become whichever file matched in the CURRENT DIRECTORY -- the
+# typo was accepted as a different, valid-looking id instead of being refused.
+# The test runs from a directory seeded with files that the globs match, which
+# is the only condition under which the bug is observable.
+test_allowed_bastions_no_glob() {
+    local tmp rc out ok=1
+    tmp=$(mktemp -d)
+    : > "$tmp/b1"
+    : > "$tmp/b2"
+
+    # 'b[1]' matches the file b1; must still be rejected as an invalid id.
+    out=$(
+        cd "$tmp" || exit 99
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="b[1]"
+        normalize_allowed_bastions 2>&1
+        printf 'RESULT=%s\n' "$BASTION_ALLOWED_IDS"
+    )
+    rc=$?
+    [ "$rc" -ne 0 ] || { ok=0; echo "    (glob 'b[1]' accepted, rc=$rc: $out)"; }
+    grep -q 'RESULT=b1' <<<"$out" && { ok=0; echo "    (glob 'b[1]' rewritten to the file b1)"; }
+
+    # 'b*' matches two files; must not turn into a two-entry allowlist.
+    out=$(
+        cd "$tmp" || exit 99
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="b*"
+        normalize_allowed_bastions 2>&1
+        printf 'RESULT=%s\n' "$BASTION_ALLOWED_IDS"
+    )
+    rc=$?
+    [ "$rc" -ne 0 ] || { ok=0; echo "    (glob 'b*' accepted, rc=$rc: $out)"; }
+    grep -q 'RESULT=b1 b2' <<<"$out" && { ok=0; echo "    (glob 'b*' expanded to the cwd)"; }
+
+    # A legitimate list must still normalise with globbing restored afterwards.
+    out=$(
+        cd "$tmp" || exit 99
+        source_script "ob-backend-setup"
+        BASTION_ALLOWED_IDS="b1,b2"
+        normalize_allowed_bastions
+        printf 'RESULT=%s|GLOB=%s\n' "$BASTION_ALLOWED_IDS" "$(case $- in *f*) echo off ;; *) echo on ;; esac)"
+    )
+    grep -q 'RESULT=b1 b2|GLOB=on' <<<"$out" \
+        || { ok=0; echo "    (valid list broken, or globbing left disabled: $out)"; }
+
+    rm -rf "$tmp"
+    if [ "$ok" -eq 1 ]; then
+        pass "globs in the allowed-bastions list are refused, not expanded"
+    else
+        fail "globs in the allowed-bastions list are refused, not expanded"
+    fi
+}
+
+# ── An empty list must be an explicit interactive choice (#236 review) ──
+#
+# Pressing Enter used to accept "any bastion" -- the exposure #182 is about --
+# as the path of least resistance. It now re-asks and takes only an explicit
+# "y". Non-interactive runs keep the empty default: an upgrade must not start
+# refusing hops that worked yesterday.
+test_allowed_bastions_empty_is_explicit() {
+    local out ok=1
+
+    # Enter, then "n", then a real id: the empty answer must not stick.
+    out=$(
+        source_script "ob-backend-setup"
+        NON_INTERACTIVE=false
+        ALLOW_ANY_BASTION=false
+        BASTION_ALLOWED_IDS=""
+        # NOT a pipe: a pipeline would run the function in a subshell and
+        # throw away the assignment this test is about.
+        prompt_allowed_bastions >/dev/null 2>&1 <<<$'\nn\nb1'
+        printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+    )
+    grep -q 'RESULT=\[b1\]' <<<"$out" \
+        || { ok=0; echo "    (declining 'any bastion' did not re-ask: $out)"; }
+
+    # A separators-only answer must not slip past the gate either: the
+    # normaliser collapses whitespace AND ',;' to nothing, so each of these
+    # reaches the empty list while looking like an answer (#236 review).
+    local blank
+    for blank in '   ' ',,' ' ; , '; do
+        out=$(
+            source_script "ob-backend-setup"
+            NON_INTERACTIVE=false
+            ALLOW_ANY_BASTION=false
+            BASTION_ALLOWED_IDS=""
+            prompt_allowed_bastions >/dev/null 2>&1 <<<"$blank"$'\nn\nb1'
+            printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+        )
+        grep -q 'RESULT=\[b1\]' <<<"$out" \
+            || { ok=0; echo "    (blank answer '$blank' bypassed the gate: $out)"; }
+    done
+
+    # Enter, then "y": empty, on the record.
+    out=$(
+        source_script "ob-backend-setup"
+        NON_INTERACTIVE=false
+        ALLOW_ANY_BASTION=false
+        BASTION_ALLOWED_IDS=""
+        prompt_allowed_bastions >/dev/null 2>&1 <<<$'\ny'
+        printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+    )
+    grep -q 'RESULT=\[\]' <<<"$out" \
+        || { ok=0; echo "    (explicit 'y' did not leave the list empty: $out)"; }
+
+    # --allow-any-bastion answers up front, without a prompt (no stdin at all).
+    out=$(
+        source_script "ob-backend-setup"
+        NON_INTERACTIVE=false
+        ALLOW_ANY_BASTION=true
+        BASTION_ALLOWED_IDS=""
+        prompt_allowed_bastions >/dev/null 2>&1 </dev/null
+        printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+    )
+    grep -q 'RESULT=\[\]' <<<"$out" \
+        || { ok=0; echo "    (--allow-any-bastion still prompted: $out)"; }
+
+    # A non-interactive run keeps the legacy empty default, unprompted.
+    out=$(
+        source_script "ob-backend-setup"
+        NON_INTERACTIVE=true
+        ALLOW_ANY_BASTION=false
+        BASTION_ALLOWED_IDS=""
+        prompt_allowed_bastions >/dev/null 2>&1 </dev/null
+        printf 'RESULT=[%s]\n' "$BASTION_ALLOWED_IDS"
+    )
+    grep -q 'RESULT=\[\]' <<<"$out" \
+        || { ok=0; echo "    (--yes run no longer keeps the empty default: $out)"; }
+
+    # Both options must be discoverable, since the prompt now depends on them.
+    local help
+    help=$(bash "$SCRIPT_DIR/ob-backend-setup" --help 2>&1)
+    grep -q -- '--allowed-bastions' <<<"$help" \
+        || { ok=0; echo "    (--allowed-bastions missing from --help)"; }
+    grep -q -- '--allow-any-bastion' <<<"$help" \
+        || { ok=0; echo "    (--allow-any-bastion missing from --help)"; }
+
+    if [ "$ok" -eq 1 ]; then
+        pass "empty allowed-bastions is an explicit choice, and both flags documented"
+    else
+        fail "empty allowed-bastions is an explicit choice, and both flags documented"
+    fi
+}
+
 # ── Test 18: the generated sshd PAM auth stack is fail-closed (#180) ──
 # A bare "auth required pam_permit.so" made pam_authenticate() succeed for any
 # password if sshd ever ran the stack (PasswordAuthentication /
@@ -379,6 +562,9 @@ run_test test_trailing_slash
 run_test test_max_security
 run_test test_node_role_default
 run_test test_node_role_override
+run_test test_allowed_bastions_normalised
+run_test test_allowed_bastions_no_glob
+run_test test_allowed_bastions_empty_is_explicit
 
 run_test test_sudo_fresh_otp_optin
 run_test test_pam_sshd_fail_closed
