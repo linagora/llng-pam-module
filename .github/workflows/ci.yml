@@ -172,6 +172,12 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+      with:
+        # tests/test_ob_upgrade.sh stages a host from the v0.6.2 tag; the
+        # default shallow checkout has no tags and the suite would SKIP --
+        # which reads as a pass, which is the whole thing the guard below
+        # exists to prevent.
+        fetch-depth: 0
 
     - name: Install dependencies
       run: |
@@ -193,6 +199,21 @@ jobs:
       run: |
         cd build
         cpack -G DEB
+
+    # Upgrades a host staged from the v0.6.2 tag and checks it converges.
+    # It needs docker and a package, which only this job has; on the build jobs
+    # it SKIPs, and a skip reads as a pass -- so here it must actually run.
+    - name: The upgrade suite must actually run
+      run: |
+        # cpack emits two packages here; the builder one carries no
+        # ob-post-upgrade, so name the main one rather than take the newest.
+        deb=$(ls -t build/open-bastion-*-Linux.deb | head -1)
+        out=$(OB_DEB="$deb" bash tests/test_ob_upgrade.sh 2>&1); echo "$out"
+        case "$out" in
+          *SKIP*)
+            echo "::error::tests/test_ob_upgrade.sh skipped; it must run here"
+            exit 1 ;;
+        esac
 
     - name: Upload Debian package
       uses: actions/upload-artifact@v7

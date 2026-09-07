@@ -70,6 +70,19 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   with no sheets at all. Owner names, dates and acceptance decisions are left as
   `À COMPLÉTER`: they belong to the homologation authority. Start at
   [doc/security/README.md](doc/security/README.md).
+- **`tests/test_ob_upgrade.sh`** upgrades a host staged from the `v0.6.2` tag
+  and checks it converges. Every other suite tests the new code against a clean
+  host, and nobody upgrades a clean host: the real one has a `0700 nobody`
+  spool and a helper that writes it, generated months ago. Both halves are
+  pinned — that installing the package **does not** migrate it (the claim
+  `UPGRADE-NOTES.md` rests on, and the reason `ob-post-upgrade` exists at all),
+  and that `ob-post-upgrade` then does. The old artefacts are extracted from
+  the tag rather than imitated.
+- **The legacy portal image is pinned** (`docker-demo-cert`). `ob-bastion-id`'s
+  fallback to the removed `/pam/bastion-token` probe is exercised by exactly
+  one thing in the tree, and only because the portal that demo runs happens to
+  be old. On `:latest` that coverage would vanish the day an image ships the
+  0.6.0 plugins — silently, with the suite still green.
 - **`tests/test_ob_bastion_id.sh`** replays `ob-bastion-id` against a mock portal
   in every shape it must survive, including LemonLDAP::NG's catch-all HTML. The
   migration below had no coverage: the docker test only exercises whichever path
