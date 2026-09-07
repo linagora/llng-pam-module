@@ -153,7 +153,11 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   rebuilt before the suite runs, since an uncompiled mutant would pass for the
   wrong reason; a suite that **skips** is refused rather than read as a
   surviving mutant, because it exits 0 both before and after and can neither
-  confirm nor refute; and the runner verifies the tree is unchanged afterwards,
+  confirm nor refute; an entry declares whether it needs `root` or `nonroot` and
+  the runner switches privilege for it, since a control whose expected owner is
+  root is vacuously satisfied in a root run and one that guards a path only
+  bites in a privileged one — running everything at one level reports the other
+  half as surviving; and the runner verifies the tree is unchanged afterwards,
   distinguishing "the tree differs" from "git could not tell us".
 
 - **`tests/test_ob_ci_coverage.sh`** fails when a test file exists that no CI

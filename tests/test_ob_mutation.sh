@@ -89,6 +89,14 @@ run_stanza() {
     [ -n "$id" ] || return 0
     TESTS_RUN=$((TESTS_RUN + 1))
 
+    # How to run the suite for this entry. Some controls only bite as root (a
+    # name that must not reach the filesystem), others only as an ordinary user
+    # (an ownership check whose expected owner IS root: as root the check is
+    # vacuously satisfied, so removing it changes nothing). Running everything
+    # at one privilege level reports the other half as surviving mutants --
+    # which is what CI did, for src/ob-fp-daemon.c.
+    local as=""
+
     if [ -z "$create" ] && [ ! -f "$ROOT_DIR/$file" ]; then
         fail "$id" "no such file: $file"
         return
@@ -100,7 +108,7 @@ run_stanza() {
 
     # The suite must be GREEN before the mutation, or the result means nothing.
     local pre
-    pre=$( cd "$ROOT_DIR" && bash "$suite" 2>&1 ) || {
+    pre=$( cd "$ROOT_DIR" && $as bash "$suite" 2>&1 ) || {
         fail "$id" "$suite already fails before the mutation; nothing can be concluded"
         return
     }
@@ -118,6 +126,19 @@ run_stanza() {
     # where the requirement is met, OB_MUTATION_STRICT makes it an error.
     if [ -n "$needs" ]; then
         case "$needs" in
+            nonroot)
+                if [ "$(id -u)" = "0" ]; then
+                    if command -v setpriv >/dev/null 2>&1; then
+                        as="setpriv --reuid=65534 --regid=65534 --clear-groups"
+                    elif [ "${OB_MUTATION_STRICT:-0}" = "1" ]; then
+                        fail "$id" "needs an unprivileged run and setpriv is unavailable (strict mode)"
+                        return
+                    else
+                        echo "  ---- $id: needs an unprivileged run; not exercised here"
+                        TESTS_RUN=$((TESTS_RUN - 1))
+                        return
+                    fi
+                fi ;;
             root)
                 if [ "$(id -u)" != "0" ]; then
                     if [ "${OB_MUTATION_STRICT:-0}" = "1" ]; then
@@ -177,7 +198,7 @@ run_stanza() {
     fi
 
     local src=0
-    ( cd "$ROOT_DIR" && bash "$suite" ) >/dev/null 2>&1 || src=$?
+    ( cd "$ROOT_DIR" && $as bash "$suite" ) >/dev/null 2>&1 || src=$?
     restore_all
     # Put the real binaries back before judging the next entry.
     case "$file" in
@@ -216,7 +237,8 @@ run_stanza
 restore_all
 # Prove the tree is as it was: a runner that leaves a mutant behind is worse
 # than no runner.
-if [ -n "$RESTORE_LIST" ]; then
+if [ -n "$RESTORE_LIST" ] \
+   && ( cd "$ROOT_DIR" && git rev-parse --is-inside-work-tree ) >/dev/null 2>&1; then
     git_rc=0
     # shellcheck disable=SC2086  # RESTORE_LIST is a space-separated path list
     ( cd "$ROOT_DIR" && git diff --quiet -- $RESTORE_LIST ) 2>/dev/null || git_rc=$?
@@ -236,6 +258,9 @@ if [ -n "$RESTORE_LIST" ]; then
             echo "  WARN: could not verify the tree with git (exit $git_rc);"
             echo "        restoration was performed but not confirmed." ;;
     esac
+elif [ -n "$RESTORE_LIST" ]; then
+    echo
+    echo "  WARN: not a git work tree here; restoration was performed but not confirmed."
 fi
 
 echo

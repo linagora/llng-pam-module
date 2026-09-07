@@ -332,7 +332,8 @@ jobs:
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
           build-essential cmake pkg-config git jq curl python3 openssh-client \
-          socat libcurl4-openssl-dev libjson-c-dev libpam0g-dev libssl-dev libkeyutils-dev
+          socat util-linux \
+          libcurl4-openssl-dev libjson-c-dev libpam0g-dev libssl-dev libkeyutils-dev
 
     # The suites the catalogue drives must be able to RUN here: one that skips
     # for a missing dependency is green before and after the mutation, and the
@@ -348,8 +349,12 @@ jobs:
     # that guards it to fail. A surviving mutant means a green suite that checks
     # nothing -- which is what several reviews found by hand during 0.7.0, one
     # PR at a time.
+    # The repository must be readable by the unprivileged user the runner drops
+    # to for `needs: nonroot` entries (setpriv, from util-linux above).
     - name: Mutation
-      run: OB_MUTATION_STRICT=1 bash tests/test_ob_mutation.sh
+      run: |
+        chmod -R a+rX .
+        OB_MUTATION_STRICT=1 bash tests/test_ob_mutation.sh
       timeout-minutes: 20
 
     # A mutant left behind would be invisible to every later job.

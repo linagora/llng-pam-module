@@ -36,6 +36,7 @@ file    || src/ob-fp-daemon.c
 search  || if (ast.st_uid != OB_FP_PRIV_UID) {
 replace || if (0) {
 suite   || tests/test_ob_fp_daemon.sh
+needs   || nonroot
 why     || #249: the sshd anchor must be a root-owned process, or a local user
 why     || can put a process named sshd-session in their own ancestry and choose
 why     || which drop is read.
