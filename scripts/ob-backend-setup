@@ -251,13 +251,14 @@ install_principals_helper() {
 # direct user SSO cert (no "bastion=" key-id) is therefore denied here, before
 # PAM runs. Combined with the cert's source-address critical option (sshd
 # refuses it off the bastion IP), this is the "only this bastion" enforcement.
-# Also drops the SSH key fingerprint to the spool for pam_openbastion.
+# Also deposits the SSH key fingerprint with ob-fp-daemon for pam_openbastion.
+# Since #249 it does not write the spool itself: it runs as the unprivileged
+# AuthorizedPrincipalsCommandUser, and the spool is 0700 root.
 USERNAME="$1"
 FINGERPRINT="$2"
 KEYID="$3"
 KEYTYPE="$4"
 KEYBLOB="$5"
-SPOOL_DIR="/run/open-bastion/ssh-fp"
 ALLOWED_FILE="/etc/open-bastion/allowed_bastions"
 OB_DIR="/etc/open-bastion"
 
@@ -323,70 +324,36 @@ else
         2>/dev/null || :
 fi
 
-# Record the fingerprint keyed by the per-connection sshd anchor PID. OpenSSH
-# >= 9.8 has TWO processes named "sshd-session" per connection (the privileged
-# monitor and an unprivileged child); this helper and pam_openbastion may run
-# under either, so both MUST converge on the same one. We anchor on the OUTERMOST
-# contiguous sshd-session (the monitor, whose parent is the "sshd" listener) —
-# pam_openbastion's find_sshd_session_ancestor() does the same. Pre-split OpenSSH
-# (<9.8, e.g. Rocky 9) has no "sshd-session"; fall back to the first "sshd".
-# (Mirrors the bastion helper in ob-bastion-setup; keep the two in sync.)
+# Hand the fingerprint to ob-fp-daemon, which writes the spool (#249).
+# This helper runs as AuthorizedPrincipalsCommandUser (nobody) because sshd
+# demands an unprivileged user, so it must NOT own the spool: a shared,
+# low-trust account holding the integrity of the fingerprint binding is the
+# whole problem #249 fixes. ob-fp-submit hands the values to a root daemon over
+# /run/open-bastion/ssh-fp.sock; the daemon derives the sshd anchor from THIS
+# process's own /proc ancestry, so nothing here can name the session it is
+# depositing for, and the spool is 0700 root.
 case "$FINGERPRINT" in
     SHA256:[A-Za-z0-9+/]*) : ;;
     *) FINGERPRINT="" ;;
 esac
 # Reject anything that is not a plausible OpenSSH algorithm name / base64 blob
-# before it reaches the spool (pam_openbastion re-validates; this is defence in
-# depth and keeps the drop file parseable).
+# before it leaves this process (the daemon re-validates; this is defence in
+# depth and keeps the deposit parseable).
 case "$KEYTYPE" in
     ""|*[!A-Za-z0-9@._-]*) KEYTYPE="" ;;
 esac
 case "$KEYBLOB" in
     ""|*[!A-Za-z0-9+/=]*) KEYBLOB="" ;;
 esac
-if [ -n "$FINGERPRINT" ] && [ -d "$SPOOL_DIR" ]; then
-    pid=$PPID
-    anchor=0   # outermost contiguous sshd-session = the privileged monitor
-    i=0
-    while [ "$pid" -gt 1 ] && [ $i -lt 16 ]; do
-        comm=$(cat /proc/"$pid"/comm 2>/dev/null || echo "")
-        if [ "$comm" = "sshd-session" ]; then
-            anchor=$pid               # record, keep climbing for an outer one
-        elif [ "$anchor" -gt 1 ]; then
-            break                     # left the sshd-session chain → monitor found
-        elif [ "$comm" = "sshd" ]; then
-            anchor=$pid; break        # pre-split OpenSSH (<9.8, e.g. Rocky 9): "sshd" is the anchor
-        fi
-        pid=$(awk '/^PPid:/ {print $2}' /proc/"$pid"/status 2>/dev/null)
-        [ -z "$pid" ] && pid=0
-        i=$((i + 1))
-    done
-    if [ "$anchor" -gt 1 ]; then
-        umask 077
-        tmp=$(mktemp "$SPOOL_DIR/.$anchor.XXXXXX" 2>/dev/null) || tmp=""
-        if [ -n "$tmp" ]; then
-            printf '%s\n' "$FINGERPRINT" > "$tmp"
-            mv -f "$tmp" "$SPOOL_DIR/$anchor.fp"
-        fi
-        # v1 key-metadata drop, consumed by pam_openbastion's ssh_key_policy
-        # enforcement (issue #181). Written as a SEPARATE file so the .fp drop
-        # above keeps its exact legacy content: an older pam_openbastion, which
-        # only ever reads .fp, is unaffected by this helper being newer.
-        # "alg" is sshd's %t; "key" is sshd's %k, the base64 blob of the key or
-        # certificate actually presented -- the only source for the RSA modulus
-        # size, which the module decodes itself.
-        if [ -n "$KEYTYPE" ]; then
-            tmp=$(mktemp "$SPOOL_DIR/.$anchor.XXXXXX" 2>/dev/null) || tmp=""
-            if [ -n "$tmp" ]; then
-                {
-                    printf 'v=1\n'
-                    printf 'fp=%s\n' "$FINGERPRINT"
-                    printf 'alg=%s\n' "$KEYTYPE"
-                    if [ -n "$KEYBLOB" ]; then printf 'key=%s\n' "$KEYBLOB"; fi
-                } > "$tmp"
-                mv -f "$tmp" "$SPOOL_DIR/$anchor.key"
-            fi
-        fi
+if [ -n "$FINGERPRINT" ]; then
+    # OB_FP_SUBMIT is for the test suite; on a real host this is the packaged
+    # path. Failure is never fatal: losing the binding removes an extra check,
+    # it must not refuse a login sshd has already accepted. pam_openbastion
+    # reports the missing drop itself (#192).
+    _ob_submit="${OB_FP_SUBMIT:-/usr/sbin/ob-fp-submit}"
+    if [ -x "$_ob_submit" ]; then
+        printf '%s\n%s\n%s\n' "$FINGERPRINT" "$KEYTYPE" "$KEYBLOB" \
+            | "$_ob_submit" || :
     fi
 fi
 
@@ -429,25 +396,41 @@ PRINCIPALS
     # with a more restrictive mode, so set it authoritatively here.
     mkdir -p /run/open-bastion
     chmod 0711 /run/open-bastion
-    # Spool directory: owned by AuthorizedPrincipalsCommandUser (nobody),
-    # mode 0700 — see ob-bastion-setup for rationale (a world-writable
-    # directory would expose PAM to a spoofed-fingerprint attack via
-    # sticky-bit pre-creation). pam_openbastion also enforces owner/mode
+    # Spool directory: 0700 root since #249 — see ob-bastion-setup for the
+    # rationale. ob-fp-daemon owns the drops; the principals helper only needs
+    # to reach the deposit socket. pam_openbastion also enforces owner/mode
     # checks on each drop file.
     mkdir -p "$spool_dir"
-    chown nobody:nogroup "$spool_dir" 2>/dev/null || chown nobody:nobody "$spool_dir"
+    chown root:root "$spool_dir"
     chmod 0700 "$spool_dir"
 
     cat > "$tmpfiles_conf" << TMPFILES
 # Open Bastion SSH fingerprint spool — recreated at boot so the directory
-# survives /run wipes. See /usr/local/sbin/ob-ssh-principals.
-# 0711 on the parent: traversable by the principals helper (nobody) but not
-# listable; the ssh-fp drop dir itself is 0700 nobody.
-d /run/open-bastion          0711 root   root   -
-d /run/open-bastion/ssh-fp   0700 nobody nogroup -
+# survives /run wipes. See /usr/local/sbin/ob-ssh-principals and ob-fp-daemon.
+# 0711 on the parent: traversable by the principals helper (nobody) so it can
+# reach ssh-fp.sock, but not listable. The drop directory itself is 0700 ROOT
+# since #249: ob-fp-daemon writes it, nothing unprivileged reads it.
+d /run/open-bastion          0711 root root -
+d /run/open-bastion/ssh-fp   0700 root root -
 TMPFILES
     chmod 644 "$tmpfiles_conf"
     track_created "$tmpfiles_conf"
+
+    # Enable the fingerprint sink socket (#249). The principals helper deposits
+    # through it instead of writing the spool as nobody; without it there is no
+    # fingerprint binding at all, so say so loudly rather than let logins
+    # silently lose a security control.
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl enable --now ob-fp.socket >/dev/null 2>&1; then
+            info "Enabled ob-fp.socket (SSH fingerprint sink)"
+        else
+            warn "Could not enable ob-fp.socket — the SSH fingerprint binding"
+            warn "will be unavailable until you run:"
+            warn "  systemctl enable --now ob-fp.socket"
+        fi
+    else
+        warn "systemctl not available — enable ob-fp.socket manually"
+    fi
 
     info "SSH principals helper installed at $script_path"
     info "SSH fingerprint spool prepared at $spool_dir"

@@ -265,7 +265,7 @@ Depuis le plugin PamAccess ≥ 0.1.16, le module PAM `pam_openbastion` transmet 
 **Récupération de l'empreinte côté bastion.** OpenSSH moderne (≥ 9.x) ne propage pas `SSH_USER_AUTH` à l'environnement PAM pendant `pam_acct_mgmt` — `ExposeAuthInfo yes` ne suffit donc pas. Le bastion utilise un canal explicite :
 
 1. `sshd` appelle `AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f` (déployé par `ob-bastion-setup` / `ob-backend-setup`). Le token `%f` est l'empreinte de la clef/du certificat client (pas `%F` qui désigne l'empreinte de la CA).
-2. Le helper écrit l'empreinte dans `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp` de façon atomique (`mktemp` + `mv`). Le répertoire est la propriété de l'utilisateur `AuthorizedPrincipalsCommandUser` (typiquement `nobody`), en mode `0700` : aucun autre utilisateur local ne peut créer ou pré-positionner un fichier factice.
+2. Le helper **dépose** l'empreinte via `ob-fp-submit` sur `/run/open-bastion/ssh-fp.sock` ; c'est `ob-fp-daemon`, activé par socket et tournant sous root, qui écrit `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp` de façon atomique. Depuis [#249](https://github.com/linagora/open-bastion/issues/249) le répertoire est `0700 root` : le helper tourne sous `AuthorizedPrincipalsCommandUser` (typiquement `nobody`), un compte partagé, et ne doit donc plus porter l'intégrité du binding. Le démon dérive l'ancre `sshd-session` de l'ascendance `/proc` du déposant — jamais de la requête — de sorte qu'un client ne peut pas désigner la session pour laquelle il dépose.
 3. `pam_openbastion` remonte `/proc/<pid>/status` depuis son propre PID jusqu'à l'ancêtre `sshd-session` et lit le fichier spool. Il valide strictement : fichier régulier appartenant à l'owner du répertoire, mode `0600`, `nlink == 1`, format `SHA256:<base64>`, taille ≤ 512 octets.
 
 En repli, si un `sshd` patché peuple réellement `SSH_USER_AUTH` avec le contenu, le module extrait l'empreinte depuis cette variable. Exemples de corps de requête envoyés :
@@ -310,7 +310,7 @@ Si l'une des conditions 2-4 n'est pas remplie :
 | **Binding fingerprint `/pam/verify`**     | **LLNG** | **sudo / ré-authentification par token : rejet si le cert de la session SSH est inconnu, révoqué ou expiré côté LLNG**                                |
 | **Présence dans la session persistante**  | **LLNG** | **Token volé à un utilisateur et rejoué depuis une autre clef SSH : l'empreinte ne correspond à aucun cert du `sub` du token**                        |
 
-`ob-bastion-setup` et `ob-backend-setup` déploient automatiquement `ob-ssh-principals` + le répertoire spool (mode `0700`, propriétaire `nobody`) + un drop-in `/etc/tmpfiles.d/` pour recréation au boot. Côté LLNG, le champ `fingerprint` reste optionnel : un bastion à jour contre un portail antérieur à PamAccess 0.1.16 reste compatible (le portail ignore simplement le champ).
+`ob-bastion-setup` et `ob-backend-setup` déploient automatiquement `ob-ssh-principals` + le répertoire spool (mode `0700`, propriétaire `root` depuis #249) + `ob-fp.socket` + un drop-in `/etc/tmpfiles.d/` pour recréation au boot. Côté LLNG, le champ `fingerprint` reste optionnel : un bastion à jour contre un portail antérieur à PamAccess 0.1.16 reste compatible (le portail ignore simplement le champ).
 
 ---
 

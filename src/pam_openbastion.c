@@ -1894,12 +1894,18 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
     }
 
     /*
-     * Reject the spool directory itself if it is world/group-writable or
-     * not owned by the expected principals helper user. We derive the
-     * trusted uid from the directory's st_uid: the deployment scripts
-     * create the directory chown'd to the AuthorizedPrincipalsCommandUser
-     * (root or nobody depending on the setup), so the directory owner
-     * becomes the ground truth for who is allowed to drop files.
+     * The spool directory's owner is the ground truth for who is allowed to
+     * drop files: a drop must be owned by the same uid (checked below).
+     *
+     * Since #249 that owner is root. ob-fp-daemon writes the drops and keeps
+     * the directory 0700 root, so no unprivileged account can create, list or
+     * read anything here. Before #249 the directory belonged to the
+     * AuthorizedPrincipalsCommandUser (nobody) because the principals helper
+     * wrote the drops itself, which put the integrity of the fingerprint
+     * binding on a shared, low-trust account. A host that has upgraded the
+     * package but not yet re-run ob-bastion-setup / ob-backend-setup still has
+     * the old directory; it keeps working, and says so, until the first
+     * deposit through ob-fp-daemon takes the directory back.
      */
     struct stat dir_st;
     if (stat(OB_SSH_FP_SPOOL_DIR, &dir_st) != 0) {
@@ -1914,6 +1920,21 @@ static char *read_spool_drop(pam_handle_t *pamh, const char *suffix,
         OB_LOG_ERR(pamh, "SSH fp spool %s is group/world-writable (mode %o) — refusing",
                    OB_SSH_FP_SPOOL_DIR, dir_st.st_mode & 07777);
         return NULL;
+    }
+    if (dir_st.st_uid != 0) {
+        /*
+         * The pre-#249 layout. Everything below still holds, but the trust
+         * root is an account other daemons also run as, so a fingerprint
+         * binding read from here is worth less than one read from a root-owned
+         * spool. doc/security/99-risk-reduce.md counts on the strong version
+         * for R-S3 and R-S15; an admin needs to know which one is deployed.
+         */
+        OB_LOG_WARN(pamh,
+                    "SSH fp spool %s is owned by uid %u, not root: the "
+                    "fingerprint binding still rests on that account (#249). "
+                    "Re-run ob-bastion-setup (or ob-backend-setup) to move it "
+                    "to the ob-fp-daemon sink",
+                    OB_SSH_FP_SPOOL_DIR, (unsigned)dir_st.st_uid);
     }
 
     char path[128];

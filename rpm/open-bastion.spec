@@ -97,6 +97,8 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_sbindir}/ob-standalone-setup
 %{_sbindir}/ob-backend-setup
 %{_sbindir}/ob-cert-daemon
+%{_sbindir}/ob-fp-daemon
+%{_sbindir}/ob-fp-submit
 %{_sbindir}/ob-sign-request
 %{_sbindir}/ob-record-sink
 %{_sbindir}/ob-cache-admin
@@ -133,6 +135,8 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_unitdir}/ob-heartbeat.service
 %{_unitdir}/ob-heartbeat.timer
 %{_unitdir}/ob-cert.socket
+%{_unitdir}/ob-fp.socket
+%{_unitdir}/ob-fp@.service
 %{_unitdir}/ob-cert@.service
 %{_unitdir}/ob-record.socket
 %{_unitdir}/ob-record@.service
@@ -148,6 +152,8 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_mandir}/man8/ob-session-recorder.8*
 %{_mandir}/man8/ob-session-prune.8*
 %{_mandir}/man8/ob-cert-daemon.8*
+%{_mandir}/man8/ob-fp-daemon.8*
+%{_mandir}/man8/ob-fp-submit.8*
 %{_mandir}/man8/ob-record-sink.8*
 %{_mandir}/man8/ob-sign-request.8*
 %{_mandir}/man1/ob-ssh.1*
@@ -259,6 +265,19 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
         break
     done
 fi
+# SSH fingerprint sink (#249), needed on BOTH roles: a backend runs an
+# AuthorizedPrincipalsCommand too, so this gets its own loop rather than
+# riding along with the bastion-only block above. Without it the principals
+# helper has nowhere to deposit and the fingerprint binding disappears with no
+# error at login time.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    for _ob_role in /etc/ssh/sshd_config.d/*-open-bastion-bastion.conf \
+                    /etc/ssh/sshd_config.d/*-open-bastion-backend.conf; do
+        [ -f "$_ob_role" ] || continue
+        systemctl enable --now ob-fp.socket >/dev/null 2>&1 || :
+        break
+    done
+fi
 
 %preun
 %systemd_preun ob-heartbeat.timer
@@ -267,11 +286,13 @@ fi
 # on removal.
 %systemd_preun ob-cert.socket
 %systemd_preun ob-record.socket
+%systemd_preun ob-fp.socket
 
 %postun
 %systemd_postun_with_restart ob-heartbeat.timer
 %systemd_postun_with_restart ob-session-prune.timer
 %systemd_postun_with_restart ob-cert.socket
+%systemd_postun_with_restart ob-fp.socket
 %systemd_postun_with_restart ob-record.socket
 
 %post desktop

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The SSH fingerprint spool no longer trusts `nobody` (#249).**
+  `pam_openbastion` recovers the fingerprint of the key that authenticated a
+  session from `/run/open-bastion/ssh-fp/<anchor>.fp`, because OpenSSH does not
+  export `SSH_USER_AUTH` to PAM during `pam_acct_mgmt`. `sshd` requires
+  `AuthorizedPrincipalsCommandUser` to be unprivileged, so the helper that
+  wrote those drops ran as `nobody` and the directory had to be `0700 nobody` —
+  which put the integrity of the whole binding on a shared, low-trust account.
+  Code execution as `nobody` could read every deposited fingerprint and write a
+  well-formed drop at any PID; the module's checks (`O_NOFOLLOW`, `nlink == 1`,
+  mode `0600`, drop owner = directory owner) are all aimed at an attacker
+  outside the perimeter, not at one who is `nobody`. This matters most on the
+  service-account path, where a fingerprint match grants `sudo_allowed` after a
+  purely local `strcmp`.
+
+  The helper now deposits through `ob-fp-submit` on
+  `/run/open-bastion/ssh-fp.sock`, and the socket-activated `ob-fp-daemon`
+  writes the drops as root into a `0700 root` spool — the `ob-cert-daemon`
+  (#145) pattern, no new setuid binary. Reading is closed outright. For
+  writing, the load is carried by deriving the sshd anchor from the depositing
+  process's own `/proc` ancestry rather than reading it from the request: a
+  client cannot name the session it deposits for, so forging a binding now
+  needs code execution as the helper user _inside the target connection's own
+  process tree_, not merely as `nobody` somewhere on the host.
+
+  Enabled by `ob-bastion-setup` / `ob-backend-setup` and re-asserted by the
+  postinst on both roles. A host that upgrades without re-running setup keeps
+  the old `nobody`-owned directory, and therefore the old trust root, until the
+  first deposit reaches the daemon; the module now logs that state explicitly
+  instead of leaving it invisible.
+
 - **Every caller of a `/pam/` endpoint now signs its request, so
   `pamAccessRequestSigningMode = required` is deployable (#247).** The portal
   verifies `X-Signature-256` in `_checkCaller`, ahead of any caller identity,

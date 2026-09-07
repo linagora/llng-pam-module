@@ -27,7 +27,8 @@ is the whole install.
 | `/etc/ssh/sshd_config.d/00-open-bastion-bastion.conf` | bastion sshd drop-in — also the **role marker** the postinst looks for                  | `ob-bastion-setup`                        |
 | `/etc/ssh/sshd_config.d/00-open-bastion-backend.conf` | backend sshd drop-in                                                                    | `ob-backend-setup`                        |
 | `/usr/local/sbin/ob-ssh-principals`                   | `AuthorizedPrincipalsCommand` helper — **generated at setup time, not a packaged file** | `ob-bastion-setup`, `ob-backend-setup`    |
-| `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp`      | fingerprint spool the helper drops for `pam_openbastion`                                | `ob-ssh-principals`                       |
+| `/run/open-bastion/ssh-fp.sock`                       | deposit socket the helper reaches through `ob-fp-submit`                                | `ob-fp.socket` (systemd)                  |
+| `/run/open-bastion/ssh-fp/<sshd-session-pid>.fp`      | fingerprint spool read by `pam_openbastion` — **`0700 root` since #249**                | `ob-fp-daemon`                            |
 
 `AuthorizedPrincipalsCommand` takes **two** tokens on a bastion and **three** on
 a backend:

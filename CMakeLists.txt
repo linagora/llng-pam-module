@@ -282,6 +282,47 @@ install(TARGETS ob-cert-request
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# SSH fingerprint spool: socket-activated root sink + unprivileged client (#249).
+# Moves the trust root of the fingerprint binding off the shared `nobody`
+# account. ob-fp-daemon (root) owns a 0700 spool and derives the sshd anchor
+# from the depositing process's own /proc ancestry; ob-fp-submit is what the
+# AuthorizedPrincipalsCommand helper pipes to -- no sudo, no setuid.
+add_executable(ob-fp-daemon src/ob-fp-daemon.c)
+target_compile_options(ob-fp-daemon PRIVATE
+    -Wall -Wextra -Werror
+    -D_GNU_SOURCE
+    -fstack-protector-strong
+    -Wformat -Wformat-security
+    $<$<CONFIG:Release>:-flto>
+)
+target_link_options(ob-fp-daemon PRIVATE
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+    $<$<CONFIG:Release>:-flto>
+)
+install(TARGETS ob-fp-daemon
+    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
+add_executable(ob-fp-submit src/ob-fp-submit.c)
+target_compile_options(ob-fp-submit PRIVATE
+    -Wall -Wextra -Werror
+    -D_GNU_SOURCE
+    -fstack-protector-strong
+    -Wformat -Wformat-security
+    $<$<CONFIG:Release>:-flto>
+)
+target_link_options(ob-fp-submit PRIVATE
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+    $<$<CONFIG:Release>:-flto>
+)
+install(TARGETS ob-fp-submit
+    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
 # Request signing for the shell callers of /pam/* (ob-heartbeat, ob-bastion-id).
 # Root-only: it reads request_signing_secret out of openbastion.conf, which is
 # why the secret never has to appear in an `openssl dgst -hmac` command line
@@ -434,6 +475,8 @@ install(FILES
     ${CMAKE_SOURCE_DIR}/man/ob-session-recorder.8
     ${CMAKE_SOURCE_DIR}/man/ob-session-prune.8
     ${CMAKE_SOURCE_DIR}/man/ob-cert-daemon.8
+    ${CMAKE_SOURCE_DIR}/man/ob-fp-daemon.8
+    ${CMAKE_SOURCE_DIR}/man/ob-fp-submit.8
     ${CMAKE_SOURCE_DIR}/man/ob-record-sink.8
     ${CMAKE_SOURCE_DIR}/man/ob-sign-request.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
@@ -467,6 +510,8 @@ if(INSTALL_SYSTEMD)
         ${CMAKE_SOURCE_DIR}/systemd/ob-cert@.service
         ${CMAKE_SOURCE_DIR}/systemd/ob-record.socket
         ${CMAKE_SOURCE_DIR}/systemd/ob-record@.service
+        ${CMAKE_SOURCE_DIR}/systemd/ob-fp.socket
+        ${CMAKE_SOURCE_DIR}/systemd/ob-fp@.service
         ${CMAKE_SOURCE_DIR}/systemd/ob-session-prune.timer
         ${CMAKE_SOURCE_DIR}/systemd/ob-session-prune.service
         DESTINATION lib/systemd/system
