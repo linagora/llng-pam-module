@@ -523,6 +523,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of children actually started, so a fork failure no longer prints a second,
   false layer of failure on top of the one already reported.
 
+- **The `test_offline_cache` flake is a one-second TTL boundary in the test
+  itself, and it is now out of reach (#244).** `test_expiration` stored an entry
+  with `ttl = 1` and asserted that an immediate `verify()` succeeds. `store()`
+  writes `expires_at = now + ttl` (`src/offline_cache.c:618`, taken after the
+  Argon2id hash) and `verify()` expires on `now >= expires_at`
+  (`src/offline_cache.c:1180`, taken after the read and decrypt), both at
+  one-second granularity — so the assertion fails whenever a wall-clock second
+  boundary falls between those two `time()` calls. The window between them holds
+  the AES-GCM encrypt, the write and an **`fsync()`**, which is why it depends on
+  the filesystem: measured by interposing `time()`, 0.09 ms with the cache on
+  tmpfs and 1.7 ms on ext4 — 0.01% against 0.2% per run, ~19x, and higher again
+  on a CI runner with a contended disk. The RPM job runs the cache on the
+  container's disk-backed `/tmp`, which is where the flake was seen.
+
+  #244 recorded this candidate as ruled out, on 60 local runs with no failure.
+  That test had no power: at the tmpfs rate those 60 runs were expected to
+  produce 0.005 failures, so observing none says nothing. Forcing a boundary
+  into the window makes the outcome deterministic — 5/5 `Entry expired` at
+  `ttl = 1`, 0/5 at `ttl = 2`.
+
+  The test now uses `ttl = 2` with `sleep(3)`: the immediate verify would need a
+  full second to elapse inside the window to lose the race, and expiry is still
+  guaranteed. The assertions are unchanged; only their margin is. `test_cleanup`
+  keeps `ttl = 1` and says why — it asserts nothing before the entry expires, so
+  it sits on the safe side of the same boundary. No production code changes:
+  one-second granularity on an entry whose real TTL is hours is not a defect.
+
+  Two of the issue's other candidates are closed by construction rather than
+  argued about. The test directory was `/tmp/test_offline_cache_<pid>` with
+  `EEXIST` accepted, so a directory left behind by a run that died before
+  cleanup — a killed CI job — was silently reused with its entries in place, and
+  in a container PIDs restart low and repeat; it is now `mkdtemp()`. The two
+  `mkdir()` calls for per-test subdirectories, and the `offline_cache_store()`
+  calls in `test_cleanup`, `test_stats` and `test_invalidate_all`, ignored their
+  return values, so a failure there surfaced several assertions later as
+  something else; each is now checked and named.
+
 - **`ob-builder` artefacts that carry the client secret are no longer
   world-readable, and no longer commit themselves (#203).** With
   `client_secret_mode: embedded` the OIDC client secret is written in clear text

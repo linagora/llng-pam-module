@@ -52,12 +52,20 @@ static int has_machine_id(void)
 
 static char test_dir[256];
 
-/* Create test directory */
+/*
+ * Create test directory.
+ *
+ * mkdtemp, not "/tmp/test_offline_cache_<pid>": that name is reproducible, and
+ * mkdir's EEXIST was accepted, so a directory left behind by an earlier run
+ * that died before cleanup_test_dir() -- a killed CI job, a crash -- would be
+ * silently reused with its entries in place. In a container PIDs restart low
+ * and repeat, which makes the collision likely rather than theoretical (#244).
+ */
 static int setup_test_dir(void)
 {
-    snprintf(test_dir, sizeof(test_dir), "/tmp/test_offline_cache_%d", getpid());
-    if (mkdir(test_dir, 0700) != 0 && errno != EEXIST) {
-        perror("mkdir");
+    snprintf(test_dir, sizeof(test_dir), "/tmp/test_offline_cache_XXXXXX");
+    if (mkdtemp(test_dir) == NULL) {
+        perror("mkdtemp");
         return -1;
     }
     return 0;
@@ -225,8 +233,24 @@ static int test_expiration(void)
     offline_cache_t *cache = offline_cache_init(test_dir, NULL);
     ASSERT(cache != NULL);
 
-    /* Store with 1 second TTL */
-    int ret = offline_cache_store(cache, "expiring_user", "pass", 1,
+    /*
+     * 2 seconds, not 1. store() writes expires_at = now + ttl and verify()
+     * expires on now >= expires_at, both at one-second granularity, so with
+     * ttl = 1 the immediate verify below fails whenever a wall-clock second
+     * boundary happens to fall between store()'s time() (offline_cache.c:618,
+     * taken after the Argon2id hash) and verify()'s (offline_cache.c:1180,
+     * taken after the read and decrypt). That window is short but real: it
+     * contains the AES-GCM encrypt, the write and an fsync(), measured at
+     * 0.09 ms with the cache on tmpfs and 1.7 ms on ext4, i.e. a 0.01% to
+     * 0.2% chance per run -- and higher on a CI runner with a contended
+     * disk, which is where the flake of #244 was seen.
+     *
+     * With ttl = 2 the immediate verify would need a full second to elapse
+     * inside that window, so it cannot lose the race, and sleep(3) still
+     * guarantees expiry. The assertions are unchanged; only their timing
+     * margin is.
+     */
+    int ret = offline_cache_store(cache, "expiring_user", "pass", 2,
                                   NULL, NULL, NULL);
     ASSERT(ret == OFFLINE_CACHE_OK);
 
@@ -235,7 +259,7 @@ static int test_expiration(void)
     ASSERT(ret == OFFLINE_CACHE_OK);
 
     /* Wait for expiration */
-    sleep(2);
+    sleep(3);
 
     /* Verify after expiration should fail */
     ret = offline_cache_verify(cache, "expiring_user", "pass", NULL);
@@ -339,17 +363,25 @@ static int test_cleanup(void)
 {
     if (!has_machine_id()) return 2;
 
-    /* Create fresh test directory for this test to avoid interference */
+    /* Create fresh test directory for this test to avoid interference.
+     * test_dir is already unique (mkdtemp), so a fixed name is enough. */
     char fresh_dir[256];
-    snprintf(fresh_dir, sizeof(fresh_dir), "%s/cleanup_%d", test_dir, getpid());
-    mkdir(fresh_dir, 0700);
+    snprintf(fresh_dir, sizeof(fresh_dir), "%s/cleanup", test_dir);
+    if (mkdir(fresh_dir, 0700) != 0 && errno != EEXIST) {
+        printf("(mkdir %s: %s) ", fresh_dir, strerror(errno));
+        return 0;
+    }
 
     offline_cache_t *cache = offline_cache_init(fresh_dir, NULL);
     ASSERT(cache != NULL);
 
-    /* Store some entries */
-    offline_cache_store(cache, "cleanup_user1", "pass", 1, NULL, NULL, NULL);  /* Expires in 1s */
-    offline_cache_store(cache, "cleanup_user2", "pass", 3600, NULL, NULL, NULL);  /* Active */
+    /* Store some entries. ttl = 1 is safe here, unlike in test_expiration:
+     * nothing is asserted about user1 before it expires, and the assertions
+     * below are all on the expired side of the boundary. */
+    int r1 = offline_cache_store(cache, "cleanup_user1", "pass", 1, NULL, NULL, NULL);
+    ASSERT(r1 == OFFLINE_CACHE_OK);
+    int r2 = offline_cache_store(cache, "cleanup_user2", "pass", 3600, NULL, NULL, NULL);
+    ASSERT(r2 == OFFLINE_CACHE_OK);
 
     /* Wait for first to expire */
     sleep(2);
@@ -374,9 +406,9 @@ static int test_stats(void)
     ASSERT(cache != NULL);
 
     /* Store some entries */
-    offline_cache_store(cache, "stats_user1", "pass", 3600, NULL, NULL, NULL);
-    offline_cache_store(cache, "stats_user2", "pass", 3600, NULL, NULL, NULL);
-    offline_cache_store(cache, "stats_user3", "pass", 3600, NULL, NULL, NULL);
+    ASSERT(offline_cache_store(cache, "stats_user1", "pass", 3600, NULL, NULL, NULL) == OFFLINE_CACHE_OK);
+    ASSERT(offline_cache_store(cache, "stats_user2", "pass", 3600, NULL, NULL, NULL) == OFFLINE_CACHE_OK);
+    ASSERT(offline_cache_store(cache, "stats_user3", "pass", 3600, NULL, NULL, NULL) == OFFLINE_CACHE_OK);
 
     int total = 0, active = 0, locked = 0;
     int ret = offline_cache_stats(cache, &total, &active, &locked);
@@ -396,15 +428,20 @@ static int test_invalidate_all(void)
 
     /* Create fresh test directory for this test */
     char fresh_dir[256];
-    snprintf(fresh_dir, sizeof(fresh_dir), "%s/fresh_%d", test_dir, getpid());
-    mkdir(fresh_dir, 0700);
+    snprintf(fresh_dir, sizeof(fresh_dir), "%s/fresh", test_dir);
+    if (mkdir(fresh_dir, 0700) != 0 && errno != EEXIST) {
+        printf("(mkdir %s: %s) ", fresh_dir, strerror(errno));
+        return 0;
+    }
 
     offline_cache_t *cache = offline_cache_init(fresh_dir, NULL);
     ASSERT(cache != NULL);
 
     /* Store some entries */
-    offline_cache_store(cache, "all_user1", "pass", 3600, NULL, NULL, NULL);
-    offline_cache_store(cache, "all_user2", "pass", 3600, NULL, NULL, NULL);
+    int r1 = offline_cache_store(cache, "all_user1", "pass", 3600, NULL, NULL, NULL);
+    ASSERT(r1 == OFFLINE_CACHE_OK);
+    int r2 = offline_cache_store(cache, "all_user2", "pass", 3600, NULL, NULL, NULL);
+    ASSERT(r2 == OFFLINE_CACHE_OK);
 
     /* Verify entries exist */
     ASSERT(offline_cache_has_entry(cache, "all_user1"));
