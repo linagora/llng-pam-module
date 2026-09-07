@@ -13,18 +13,24 @@ Open Bastion depends on the LemonLDAP::NG plugins published in
 (`pam-access`, `ssh-ca`, the device grant). The two move independently, so each
 entry below says which plugin versions it applies to.
 
-## Unreleased — the plugin 0.6.0 upgrade
+## 0.7.0
 
-**Plugins < 0.6.0: nothing to do.** Open Bastion keeps working unchanged.
+Two independent halves. The host-side one is not optional.
 
-**Plugins >= 0.6.0 required for:** nothing yet. Every feature below still has a
-path on 0.5.x. The requirement runs the other way: **a portal on plugins >=
-0.6.0 needs an Open Bastion recent enough to survive the removals**, which is
-what this release is about.
+**Host-side — steps 6, 7 and 8. Required whatever your portal runs.** 0.7.0
+changes the owner of the fingerprint spool, the `auth` line of
+certificate-mode PAM stacks, and the permissions accepted for `cache.key`. None
+of it depends on the plugin version.
+
+**Portal-side — steps 1 to 5. Only if you are moving the portal to plugins
+0.6.0.** On plugins < 0.6.0 there is nothing to do there — every feature below
+still has a path on 0.5.x. The requirement runs the other way: **a portal on
+plugins >= 0.6.0 needs an Open Bastion recent enough to survive the removals**,
+which is what 0.7.0 provides.
 
 ### 1. Upgrade Open Bastion first, then the portal
 
-Plugin 0.6.0 removes `/pam/bastion-token`. `ob-bastion-id` before this release
+Plugin 0.6.0 removes `/pam/bastion-token`. `ob-bastion-id` before 0.7.0
 POSTs to it and exits 2 when it 404s, and both lab deployment paths fed that
 output straight into `/etc/open-bastion/allowed_bastions` — the older
 `deploy-shell.sh` wrote the literal string `ob-bastion` on failure, which never
@@ -165,7 +171,54 @@ module already emits (#192). On a host with `fingerprint_required = true` or a
 portal with `pamAccessRequireFingerprint`, that is a visible outage rather than
 a silent weakening — check the socket before enabling either.
 
-### 7. Optional, and worth doing
+### 7. Replace `pam_permit` with `pam_deny` in a certificate-mode PAM stack
+
+_Host-side. Applies to any host whose PAM stack was written before
+0.7.0, whatever the portal runs._
+
+The `auth` path of the generated certificate/SSH-key stacks was a single
+`auth required pam_permit.so`, so `pam_authenticate()` succeeded
+unconditionally. The certificate path never calls it, but `sshd` does for
+password and keyboard-interactive logins — and `apt install open-bastion`
+writes the PAM stack without touching `sshd_config`, so on such a host any
+password authenticated any account the `account` phase approved (#180).
+
+The postinst only rewrites `/etc/pam.d/sshd` when the `open-bastion/pam-mode`
+debconf answer is not `none`. The recommended install path leaves it at `none`,
+so **`apt upgrade` will not fix a stack written by the setup scripts**. Either
+re-run `ob-bastion-setup` / `ob-backend-setup` (they back the old files up), or
+edit by hand:
+
+```sh
+grep '^auth' /etc/pam.d/sshd     # expect: auth required pam_deny.so
+```
+
+`/etc/pam.d/sudo` in mode-c is deliberately different and must keep permitting;
+leave it alone.
+
+### 8. Check the permissions of `/etc/open-bastion/cache.key`
+
+_Host-side, whatever the portal runs._
+
+A world- or group-readable `cache.key` is now **rejected** rather than used
+with a warning. `SECURITY.md` used to suggest creating it with `dd`, which
+under root's default umask 022 produces `0644` — so hosts set up from that
+recipe are affected. `ob-desktop-setup` has always created it `0600`.
+
+On upgrade the key is ignored and the cache key falls back to machine-id
+derivation, which makes every existing offline cache entry undecryptable. That
+is a cache miss, not a failure: affected desktop-SSO users need one online
+re-authentication. There is no lockout and no cleanup to do.
+
+To restore the strong derivation:
+
+```sh
+chown root:root /etc/open-bastion/cache.key && chmod 600 /etc/open-bastion/cache.key
+```
+
+The rejection is logged to syslog with that exact command.
+
+### 9. Optional, and worth doing
 
 - **`pamAccessAllowedRps`** binds `/pam/*` to your PAM relying parties and
   stops an ordinary enrolled host from declaring itself a bastion. Empty by
