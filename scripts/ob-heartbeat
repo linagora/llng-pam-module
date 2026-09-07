@@ -276,6 +276,8 @@ else
     # A broken install must not stop a bastion from renewing its token: send
     # the request unsigned, which a portal in `required` refuses visibly.
     SIGN_HEADERS=()
+    # OB_SIGN_NOTE is read by the call sites below, not here.
+    # shellcheck disable=SC2034
     ob_sign_request() { SIGN_HEADERS=(); OB_SIGN_ERROR=""; \
         OB_SIGN_NOTE="ob-sign-lib.sh not found; sending $2 unsigned"; return 0; }
 fi
@@ -347,6 +349,8 @@ send_heartbeat() {
 
     # Sign before sending, or do not send: an unsigned /pam/heartbeat is
     # exactly what made pamAccessRequestSigningMode=required undeployable.
+    # Read by ob-sign-lib.sh, which shellcheck cannot follow across the `.`.
+    # shellcheck disable=SC2034
     OB_SIGN_CONFIG="$CONFIG_FILE"
     if ! ob_sign_request POST /pam/heartbeat "$payload"; then
         log_error "$OB_SIGN_ERROR"

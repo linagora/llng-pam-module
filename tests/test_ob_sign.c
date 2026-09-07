@@ -176,11 +176,18 @@ static void write_conf(const char *dir, char *out, size_t out_size,
 {
     snprintf(out, out_size, "%s/openbastion.conf", dir);
     unlink(out);
-    int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    int fd = open(out, O_WRONLY | O_CREAT | O_EXCL, mode);
     if (fd < 0) { perror("open"); exit(1); }
     if (write(fd, content, strlen(content)) < 0) { perror("write"); exit(1); }
+    /*
+     * fchmod, not chmod: open() honours the umask, so the mode has to be set
+     * again, and doing it by name would re-resolve the path -- a different
+     * file could answer the second time. The whole point of these fixtures is
+     * the mode (0600 accepted, 0644 refused), so a fixture that sets it on
+     * something other than the file it just wrote would test nothing.
+     */
+    if (fchmod(fd, mode) != 0) { perror("fchmod"); exit(1); }
     close(fd);
-    if (chmod(out, mode) != 0) { perror("chmod"); exit(1); }
 }
 
 struct secret_case {

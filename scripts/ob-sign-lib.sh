@@ -34,6 +34,12 @@
 #
 # The caller sets OB_SIGN_CONFIG to the openbastion.conf to read; it defaults
 # to the standard path.
+#
+# SIGN_HEADERS, OB_SIGN_ERROR and OB_SIGN_NOTE are set here and read by the
+# sourcing script. CI runs shellcheck one file at a time, without -x, so it
+# cannot follow the `.` that pulls this file in: every assignment to them
+# looks dead from inside this file alone.
+# shellcheck disable=SC2034
 
 SIGN_HEADERS=()
 OB_SIGN_ERROR=""
