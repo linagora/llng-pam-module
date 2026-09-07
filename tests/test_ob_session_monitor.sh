@@ -216,6 +216,55 @@ test_signing_failure_is_unknown() {
 }
 run_test test_signing_failure_is_unknown
 
+# ── The unknown branch must survive errexit ──────────────────────────────────
+# The shipped script runs under `set -euo pipefail`; this harness does not,
+# because it has to capture a return value. That gap has bitten this project
+# before: a command whose non-zero status is fine in the tests kills the real
+# script.
+#
+# `found=$(... | jq ...)` takes jq's exit status, and jq exits non-zero on
+# exactly the input the "unknown" branch exists to handle. Today's caller is
+# `check_user_valid "$user" || verdict=$?`, which suspends errexit for the whole
+# function, so nothing breaks -- but a future plain call would die at the
+# assignment and never reach the branch, and no test that drops errexit could
+# tell. So this one puts errexit back and calls plainly.
+test_unknown_branch_survives_errexit() {
+    PORT=$((PORT + 1))
+    python3 "$WORK/mock.py" garbage "$PORT" & MOCK_PID=$!
+    for _ in $(seq 1 50); do
+        (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break
+        sleep 0.1
+    done
+
+    {
+        echo 'set -euo pipefail'          # as shipped, not as the harness runs
+        echo "PORTAL_URL='http://127.0.0.1:$PORT'"
+        echo "CONFIG_FILE='$WORK/ob.conf'"
+        echo 'SERVER_TOKEN=""'
+        echo 'SIGN_HEADERS=()'
+        echo 'ob_sign_request() { SIGN_HEADERS=(); return 0; }'
+        echo 'log_warn() { echo "WARN: $*" >&2; }'
+        echo 'log_crit() { echo "CRIT: $*" >&2; }'
+        echo 'log_debug() { :; }'
+        extract_function
+        echo 'check_user_valid alice'     # plain call: errexit is live
+    } > "$WORK/errexit.sh"
+
+    local out
+    out=$(bash "$WORK/errexit.sh" 2>&1)
+    kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=""
+
+    # The branch ran if it logged. Without `|| true` the shell dies at the
+    # assignment with jq's status and nothing is logged at all.
+    if printf '%s' "$out" | grep -q "without a usable 'found' field"; then
+        pass "the unknown branch is reached under errexit, not skipped by jq's status"
+    else
+        fail "the unknown branch is reached under errexit, not skipped by jq's status" \
+             "out=$(printf '%s' "$out" | tr '\n' ' ')"
+    fi
+}
+run_test test_unknown_branch_survives_errexit
+
 # ── The caller must act on the distinction ───────────────────────────────────
 # A three-valued check_user_valid is worthless if the caller still writes
 # `if check_user_valid`, which treats 1 and 2 alike.

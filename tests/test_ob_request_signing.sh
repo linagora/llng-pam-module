@@ -274,7 +274,7 @@ test_helper_contract() {
     fi
 }
 
-# ── 7. The secret must not reach a command line ───────────────────────────────
+# ── 7. No secret must reach a command line, anywhere under scripts/ ──────────
 #
 # This is the reason ob-sign-request exists rather than `openssl dgst -hmac`.
 # argv is world-readable through /proc/<pid>/cmdline, and ob-heartbeat runs
@@ -282,14 +282,45 @@ test_helper_contract() {
 # "simplifies" the helper away would hand the fleet-wide signing secret to
 # anyone who polls, silently and with every test still green -- so the guard is
 # here rather than in a comment.
+#
+# The scan is over every script rather than a named few (#256). It used to list
+# ob-heartbeat and ob-bastion-id, which made it a guard about the /pam/
+# endpoints; meanwhile ob-enroll signed its client_secret_jwt assertion with the
+# OIDC client secret on openssl's command line, once per poll of the device
+# grant loop, and this test had nothing to say about it. The property is not
+# "the /pam/ callers are careful", it is "no script puts an HMAC key in argv" --
+# so nothing has to be remembered when the next script is written.
+#
+# Full-line comments are stripped: this file and ob-enroll both quote the old
+# leaking line in prose to explain why it went, and prose is not a call.
 test_no_secret_in_argv() {
     local hits
-    hits=$(grep -nE 'dgst[^|]*-hmac|-macopt[[:space:]]*(hex)?key:' \
-        "$ROOT_DIR/scripts/ob-heartbeat" "$ROOT_DIR/scripts/ob-bastion-id" 2>/dev/null)
+    hits=$(for f in "$ROOT_DIR"/scripts/*; do
+               [ -f "$f" ] || continue
+               grep -nE 'dgst[^|]*-hmac|-macopt[[:space:]]*(hex)?key:' "$f" \
+                   | grep -vE '^[0-9]+:[[:space:]]*#' \
+                   | sed "s|^|$(basename "$f"):|"
+           done)
     if [ -z "$hits" ]; then
-        pass "the /pam/ callers never put an HMAC key on a command line"
+        pass "no script under scripts/ puts an HMAC key on a command line"
     else
-        fail "the /pam/ callers never put an HMAC key on a command line" "$hits"
+        fail "no script under scripts/ puts an HMAC key on a command line" "$hits"
+    fi
+}
+
+# The replacement must not be reachable around: ob-enroll must have no fallback
+# to openssl for when the helper is missing. A fallback would put the leak back
+# exactly on the hosts where it is hardest to notice, and the suite would still
+# be green because the helper is present here.
+test_enroll_has_no_openssl_fallback() {
+    local leaks
+    leaks=$(grep -nE 'dgst[^|]*-hmac' "$ROOT_DIR/scripts/ob-enroll" \
+            | grep -vE '^[0-9]+:[[:space:]]*#')
+    if grep -q 'ob-client-jwt' "$ROOT_DIR/scripts/ob-enroll" && [ -z "$leaks" ]; then
+        pass "ob-enroll signs its client assertion with ob-client-jwt, with no openssl fallback"
+    else
+        fail "ob-enroll signs its client assertion with ob-client-jwt, with no openssl fallback" \
+             "${leaks:-ob-client-jwt is not called}"
     fi
 }
 
@@ -347,10 +378,18 @@ test_every_caller_signs() {
 }
 
 echo "=== Request signing, end to end (#247) ==="
+# A name in this list that is not a defined function used to be a shell error
+# the loop walked straight past, leaving the suite green with a test that never
+# ran -- found while adding one below. Fail loudly instead.
 for t in test_heartbeat_required test_wrong_secret_is_refused \
          test_unconfigured_is_unsigned test_unconfigured_optional \
          test_whoami_required test_helper_contract \
-         test_no_secret_in_argv test_every_caller_signs; do
+         test_no_secret_in_argv test_enroll_has_no_openssl_fallback \
+         test_every_caller_signs; do
+    if ! declare -F "$t" >/dev/null; then
+        fail "$t is listed as a test but is not defined"
+        continue
+    fi
     "$t"
 done
 

@@ -100,6 +100,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_sbindir}/ob-fp-daemon
 %{_sbindir}/ob-fp-submit
 %{_sbindir}/ob-sign-request
+%{_sbindir}/ob-client-jwt
 %{_sbindir}/ob-record-sink
 %{_sbindir}/ob-cache-admin
 %{_sbindir}/ob-session-prune
@@ -156,6 +157,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_mandir}/man8/ob-fp-submit.8*
 %{_mandir}/man8/ob-record-sink.8*
 %{_mandir}/man8/ob-sign-request.8*
+%{_mandir}/man8/ob-client-jwt.8*
 %{_mandir}/man1/ob-ssh.1*
 %{_mandir}/man1/ob-scp.1*
 %{_mandir}/man1/ob-sftp.1*

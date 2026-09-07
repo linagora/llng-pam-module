@@ -87,6 +87,20 @@ jobs:
           bash "$test"
         done
 
+    # Same reasoning as the fingerprint sink below: this suite is the only thing
+    # proving the OIDC client secret stays out of /proc/<pid>/cmdline (#256),
+    # and it skips when ob-client-jwt is not built. A packaging change that
+    # stopped building the helper would leave CI green while ob-enroll refused
+    # to enrol at all.
+    - name: The client-assertion suite must actually run
+      run: |
+        out=$(bash tests/test_ob_client_jwt.sh 2>&1); echo "$out"
+        case "$out" in
+          *SKIP*)
+            echo "::error::tests/test_ob_client_jwt.sh skipped; it must run in CI"
+            exit 1 ;;
+        esac
+
     # The loop above treats a SKIP as success, which is right for suites that
     # need docker or a portal. It is wrong for the fingerprint sink: that suite
     # is the only thing guarding the trust root moved in #249, and if it skipped

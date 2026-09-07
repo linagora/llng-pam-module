@@ -42,6 +42,24 @@ else
         OB_SIGN_NOTE="ob-sign-lib.sh not found; sending $2 unsigned"; return 0; }
 fi
 
+# client_secret_jwt assertions are signed by ob-client-jwt so the OIDC client
+# secret never reaches a command line (#256). Installed beside ob-sign-request;
+# the source-tree fallbacks are for running this script uninstalled.
+OB_CLIENT_JWT="${OB_CLIENT_JWT:-}"
+if [ -z "$OB_CLIENT_JWT" ]; then
+    for _candidate in /usr/sbin/ob-client-jwt /usr/local/sbin/ob-client-jwt \
+                      "$(dirname "$(readlink -f "$0")")/../build/ob-client-jwt" \
+                      "$(dirname "$(readlink -f "$0")")/ob-client-jwt"; do
+        if [ -x "$_candidate" ]; then
+            OB_CLIENT_JWT="$_candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$OB_CLIENT_JWT" ] && command -v ob-client-jwt >/dev/null 2>&1; then
+    OB_CLIENT_JWT="$(command -v ob-client-jwt)"
+fi
+
 # Colors for output (disabled if not a terminal)
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -163,50 +181,35 @@ generate_client_jwt() {
     local client_secret="$2"
     local token_endpoint="$3"
 
-    local now
-    now=$(date +%s)
-    local exp=$((now + 300))  # 5 minutes validity
-
-    # Generate unique JWT ID (jti) for replay protection
-    local jti
-    if command -v uuidgen &> /dev/null; then
-        jti=$(uuidgen)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then
-        jti=$(cat /proc/sys/kernel/random/uuid)
-    else
-        # Fallback: add entropy from /dev/urandom for uniqueness
-        local rand_suffix
-        if [ -r /dev/urandom ]; then
-            rand_suffix=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-        else
-            rand_suffix="${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        fi
-        jti="$(hostname)-${now}-$$-${rand_suffix}"
+    # The assertion is built by ob-client-jwt, not here (#256).
+    #
+    # This used to be forty lines of shell ending in
+    #     openssl dgst -sha256 -hmac "$client_secret"
+    # and openssl has no form that takes the HMAC key anywhere but argv.
+    # /proc/<pid>/cmdline is world-readable, so every call published this
+    # host's OIDC client secret to any local user -- and the caller is the
+    # device-grant polling loop, so that is of the order of sixty times over
+    # five minutes, while an operator is away in a browser approving the grant.
+    #
+    # The secret goes down a pipe instead. `printf` is a shell builtin: it
+    # forks no process and creates no argv, and a pipe has no name anything
+    # else can open.
+    #
+    # There is deliberately no fallback to the openssl path. A missing helper
+    # must stop enrolment with an error, not silently go back to leaking the
+    # secret -- that is the whole point of the change.
+    if [ -z "$OB_CLIENT_JWT" ]; then
+        log_error "ob-client-jwt not found: cannot authenticate to the token endpoint"
+        log_error "It ships with open-bastion; set OB_CLIENT_JWT to its path if it is elsewhere."
+        return 1
     fi
 
-    # Header: {"alg":"HS256","typ":"JWT"}
-    local header
-    header=$(echo -n '{"alg":"HS256","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-
-    # Payload with standard claims per RFC 7523
-    # Use jq to properly escape JSON strings (handles special chars in client_id, etc.)
-    local payload_json
-    payload_json=$(jq -n -c \
-        --arg iss "$client_id" \
-        --arg sub "$client_id" \
-        --arg aud "$token_endpoint" \
-        --argjson exp "$exp" \
-        --argjson iat "$now" \
-        --arg jti "$jti" \
-        '{iss: $iss, sub: $sub, aud: $aud, exp: $exp, iat: $iat, jti: $jti}')
-    local payload
-    payload=$(echo -n "$payload_json" | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-
-    # Signature: HMAC-SHA256(secret, header.payload)
-    local signature
-    signature=$(echo -n "${header}.${payload}" | openssl dgst -sha256 -hmac "$client_secret" -binary | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-
-    echo "${header}.${payload}.${signature}"
+    local jwt
+    if ! jwt=$(printf '%s' "$client_secret" \
+        | "$OB_CLIENT_JWT" --client-id "$client_id" --audience "$token_endpoint"); then
+        return 1
+    fi
+    printf '%s\n' "$jwt"
 }
 
 # Read value from config file
@@ -491,7 +494,13 @@ poll_for_token() {
             # Generate JWT for client_secret_jwt authentication (RFC 7523)
             # This avoids sending client_secret in plaintext over the network
             local client_jwt
-            client_jwt=$(generate_client_jwt "$CLIENT_ID" "$CLIENT_SECRET" "$token_endpoint")
+            # A failure here is not transient -- a missing helper or a secret
+            # the helper refuses will fail identically on every remaining poll
+            # -- so stop with the reason rather than spin out the device code.
+            if ! client_jwt=$(generate_client_jwt "$CLIENT_ID" "$CLIENT_SECRET" "$token_endpoint"); then
+                log_error "Cannot build the client assertion; aborting enrolment"
+                exit 1
+            fi
 
             response=$(curl "${CURL_OPTS[@]}" \
                 -X POST "$token_endpoint" \

@@ -221,7 +221,13 @@ check_user_valid() {
     # same thing; with three verdicts it would turn every revocation into
     # "unknown" and the user would keep their session forever.
     local found
-    found=$(echo "$body" | jq -r 'if has("found") then (.found|tostring) else "missing" end' 2>/dev/null)
+    # `|| true` because the assignment's status is jq's: today's only caller is
+    # `check_user_valid "$user" || verdict=$?`, which suspends errexit for the
+    # whole function, so a jq failure falls through to the "unknown" branch
+    # below. A future caller that invokes this plainly would instead die here
+    # under `set -e`, at the one input the branch exists for -- and the test
+    # harness, which drops errexit to capture the return value, could not see it.
+    found=$(echo "$body" | jq -r 'if has("found") then (.found|tostring) else "missing" end' 2>/dev/null) || true
     case "$found" in
         true)  return 0 ;;
         false) return 1 ;;

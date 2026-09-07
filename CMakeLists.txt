@@ -356,6 +356,43 @@ install(TARGETS ob-sign-request
     RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
+# client_secret_jwt assertions for ob-enroll (#256). Same reason as
+# ob-sign-request above, for the other secret: `openssl dgst -hmac "$secret"`
+# publishes the OIDC client secret through /proc/<pid>/cmdline, once per poll of
+# the device-grant loop. The secret arrives on stdin instead -- ob-enroll may
+# hold it from the environment, from --client-secret or from a config file that
+# does not exist yet, so it is ob-enroll that decides, not this helper. The
+# signing is the same generate_client_jwt() the PAM module uses.
+add_executable(ob-client-jwt
+    src/ob-client-jwt.c
+    src/jwt_utils.c
+)
+target_include_directories(ob-client-jwt PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${JSON_C_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_compile_options(ob-client-jwt PRIVATE
+    -Wall -Wextra -Werror
+    -D_GNU_SOURCE
+    -fstack-protector-strong
+    -Wformat -Wformat-security
+    $<$<CONFIG:Release>:-flto>
+)
+target_link_libraries(ob-client-jwt
+    ${JSON_C_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+)
+target_link_options(ob-client-jwt PRIVATE
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+    $<$<CONFIG:Release>:-flto>
+)
+install(TARGETS ob-client-jwt
+    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
 # Tamper-evident session recording: socket-activated root sink + unprivileged
 # connector. ob-record-sink (root, socket-activated) writes recordings root-owned
 # under /var/lib/open-bastion/sessions/<user>/ (the recorded user cannot touch
@@ -479,6 +516,7 @@ install(FILES
     ${CMAKE_SOURCE_DIR}/man/ob-fp-submit.8
     ${CMAKE_SOURCE_DIR}/man/ob-record-sink.8
     ${CMAKE_SOURCE_DIR}/man/ob-sign-request.8
+    ${CMAKE_SOURCE_DIR}/man/ob-client-jwt.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
 )
 
