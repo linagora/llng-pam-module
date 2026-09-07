@@ -42,12 +42,14 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <curl/curl.h>
 #include <json-c/json.h>
 
 #include "ob_cert_proto.h"
+#include "ob_sign.h"
 
 #define OB_CONFIG "/etc/open-bastion/openbastion.conf"
 #define PROXY_CONFIG "/etc/open-bastion/ssh-proxy.conf"
@@ -171,11 +173,15 @@ struct ob_cfg {
     char token_file[1024];
     int verify_ssl;
     long timeout;
+    char *signing_secret;   /* request_signing_secret, or NULL: see ob_sign.h */
 };
 
-/* openbastion.conf: ini-style "key = value". We only need portal_url/verify_ssl.
- * Root-only by construction (every installer writes it 0600 root) and read the
- * same way by the PAM module, so require the strict discipline here too. */
+/* openbastion.conf: ini-style "key = value". We need portal_url/verify_ssl, and
+ * the signing secret -- which is read by ob_sign_load_secret rather than here,
+ * because '#' is an ordinary character in a generated secret and the comment
+ * stripping below would silently truncate it (#247). Root-only by construction
+ * (every installer writes it 0600 root) and read the same way by the PAM
+ * module, so require the strict discipline here too. */
 static void load_ini(struct ob_cfg *cfg)
 {
     FILE *f = open_checked(OB_CONFIG, 1);
@@ -402,6 +408,20 @@ int main(void)
     snprintf(cfg.token_file, sizeof(cfg.token_file), "%s", DEFAULT_TOKEN_FILE);
     load_ini(&cfg);
     load_proxy(&cfg);
+    /*
+     * Optional: rc > 0 means this deployment does not sign, which is normal.
+     * rc < 0 means openbastion.conf could not be read at all -- and that is
+     * not necessarily fatal here, because portal_url may have come from
+     * ssh-proxy.conf instead. Say so in the journal rather than send an
+     * unsigned request silently: against a portal in
+     * pamAccessRequestSigningMode=required it would be refused, and the
+     * refusal would point at the portal instead of at this file.
+     */
+    if (ob_sign_load_secret(OB_CONFIG, &cfg.signing_secret) < 0) {
+        cfg.signing_secret = NULL;
+        fail("cannot read " OB_CONFIG " for request_signing_secret; "
+             "sending this request unsigned");
+    }
 
     /* strip a trailing slash from portal_url */
     size_t ul = strlen(cfg.portal_url);
@@ -447,6 +467,39 @@ int main(void)
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, authhdr);
+
+    /* Sign the call when the deployment has a secret (#247). Signing is what
+     * makes pamAccessRequestSigningMode=required deployable; an unsigned
+     * /pam/bastion-cert under `required` means every ob-ssh hop stops working.
+     * Failing here rather than sending unsigned: the portal reads a partially
+     * signed request as malformed, and an operator who set the secret asked
+     * for this call to be signed. */
+    if (cfg.signing_secret) {
+        long sts = (long)time(NULL);
+        char snonce[OB_SIGN_NONCE_SIZE];
+        char ssig[OB_SIGN_SIGNATURE_SIZE];
+        ob_sign_generate_nonce(snonce, sizeof(snonce));
+        ob_sign_compute(cfg.signing_secret, sts, snonce, "POST",
+                        "/pam/bastion-cert", payload, ssig, sizeof(ssig));
+        if (!*snonce || !*ssig) {
+            fail("cannot sign the /pam/bastion-cert request");
+            curl_slist_free_all(hdrs);
+            curl_easy_cleanup(curl);
+            curl_global_cleanup();
+            memset(authhdr, 0, sizeof(authhdr));
+            memset(token, 0, strlen(token));
+            free(token);
+            json_object_put(body);
+            return 1;
+        }
+        char h[160];
+        snprintf(h, sizeof(h), "X-Timestamp: %ld", sts);
+        hdrs = curl_slist_append(hdrs, h);
+        snprintf(h, sizeof(h), "X-Nonce: %s", snonce);
+        hdrs = curl_slist_append(hdrs, h);
+        snprintf(h, sizeof(h), "X-Signature-256: sha256=%s", ssig);
+        hdrs = curl_slist_append(hdrs, h);
+    }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);

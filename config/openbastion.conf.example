@@ -86,6 +86,28 @@ verify_ssl = true
 # ca_cert = /etc/ssl/certs/my-ca.pem
 
 # ==============================================================================
+# Request signing (optional, defence in depth on top of TLS)
+# ==============================================================================
+
+# Shared HMAC-SHA256 secret for the X-Signature-256 header. It must match the
+# portal's pamAccessRequestSigningSecret -- there is one value for the whole
+# fleet: the signature proves fleet membership, it does not identify a caller.
+#
+# Every /pam/ call this host makes is signed when this is set: the PAM module,
+# ob-cert-daemon, ob-heartbeat, ob-bastion-id, ob-enroll and ob-session-monitor.
+# The portal's pamAccessRequestSigningMode decides what it does with them:
+# off (ignore), optional (a signature must verify, but may be absent) or
+# required (mandatory). Roll this secret out to EVERY host and confirm they all
+# sign before switching the portal to `required`: /pam/heartbeat is how a host
+# renews its access token, so an unsigned host does not fail at the moment of
+# the change, it fails hours later when its current token expires. See
+# UPGRADE-NOTES.md.
+#
+# The value is taken literally, '#' included. Generate one with, for example,
+# `openssl rand -hex 32`.
+# request_signing_secret =
+
+# ==============================================================================
 # Authorization Cache Settings (offline mode)
 # ==============================================================================
 

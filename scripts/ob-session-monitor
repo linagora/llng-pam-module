@@ -11,6 +11,22 @@ set -euo pipefail
 
 # Configuration defaults
 CONFIG_FILE="${OB_CONFIG_FILE:-/etc/open-bastion/openbastion.conf}"
+
+# Request signing for the /pam/ call below (#247). The HMAC is computed by
+# ob-sign-request so the signing secret never reaches a command line; the
+# rationale and the interface are in scripts/ob-sign-lib.sh.
+_OB_SIGN_LIB="${OB_SIGN_LIB:-/usr/lib/open-bastion/ob-sign-lib.sh}"
+if [ ! -r "$_OB_SIGN_LIB" ]; then
+    _OB_SIGN_LIB="$(dirname "$(readlink -f "$0")")/ob-sign-lib.sh"
+fi
+if [ -r "$_OB_SIGN_LIB" ]; then
+    # shellcheck source=scripts/ob-sign-lib.sh
+    . "$_OB_SIGN_LIB"
+else
+    SIGN_HEADERS=()
+    ob_sign_request() { SIGN_HEADERS=(); OB_SIGN_ERROR=""; \
+        OB_SIGN_NOTE="ob-sign-lib.sh not found; sending $2 unsigned"; return 0; }
+fi
 MARKER_DIR="/run/open-bastion/offline_sessions"
 FORCE_ONLINE_FILE="/etc/open-bastion/force_online"
 FORCE_ONLINE_LOCK="/run/open-bastion/force_online.lock"
@@ -128,10 +144,24 @@ check_user_valid() {
     local payload
     payload=$(jq -n --arg u "$user" '{user: $u}')
 
+    # Signed like every other /pam/ call (#247). #247 recorded /pam/userinfo as
+    # having no caller; this is the caller. Left unsigned, session monitoring
+    # would start reporting every user as gone the day the portal is switched
+    # to pamAccessRequestSigningMode=required -- and this loop prunes sessions.
+    OB_SIGN_CONFIG="$CONFIG_FILE"
+    if ! ob_sign_request POST /pam/userinfo "$payload"; then
+        # "we could not ask" is not "the user is gone": a non-zero return here
+        # reaches the caller as an invalid user and terminates live sessions.
+        # A local signing misconfiguration must not do that.
+        log_warn "$OB_SIGN_ERROR -- treating $user as still valid"
+        return 0
+    fi
+
     local response
     response=$(curl -sf -m 10 \
         -H "Content-Type: application/json" \
         ${auth_header:+-H "$auth_header"} \
+        "${SIGN_HEADERS[@]}" \
         -d "$payload" \
         "${PORTAL_URL}/pam/userinfo" 2>/dev/null) || return 1
 

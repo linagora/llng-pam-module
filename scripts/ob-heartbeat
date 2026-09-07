@@ -262,6 +262,24 @@ build_curl_opts() {
     fi
 }
 
+# Request signing for the /pam/ call below (#247). The HMAC is computed by
+# ob-sign-request so the signing secret never reaches a command line; the
+# rationale and the interface are in scripts/ob-sign-lib.sh.
+_OB_SIGN_LIB="${OB_SIGN_LIB:-/usr/lib/open-bastion/ob-sign-lib.sh}"
+if [ ! -r "$_OB_SIGN_LIB" ]; then
+    _OB_SIGN_LIB="$(dirname "$(readlink -f "$0")")/ob-sign-lib.sh"
+fi
+if [ -r "$_OB_SIGN_LIB" ]; then
+    # shellcheck source=scripts/ob-sign-lib.sh
+    . "$_OB_SIGN_LIB"
+else
+    # A broken install must not stop a bastion from renewing its token: send
+    # the request unsigned, which a portal in `required` refuses visibly.
+    SIGN_HEADERS=()
+    ob_sign_request() { SIGN_HEADERS=(); OB_SIGN_ERROR=""; \
+        OB_SIGN_NOTE="ob-sign-lib.sh not found; sending $2 unsigned"; return 0; }
+fi
+
 # Persist a freshly minted access token into the JSON token file, keeping the
 # existing refresh_token / enrolled_at. Atomic replace, root-only perms.
 update_access_token() {
@@ -327,10 +345,21 @@ send_heartbeat() {
 
     build_curl_opts
 
+    # Sign before sending, or do not send: an unsigned /pam/heartbeat is
+    # exactly what made pamAccessRequestSigningMode=required undeployable.
+    OB_SIGN_CONFIG="$CONFIG_FILE"
+    if ! ob_sign_request POST /pam/heartbeat "$payload"; then
+        log_error "$OB_SIGN_ERROR"
+        exit 1
+    fi
+    if [ -n "${OB_SIGN_NOTE:-}" ]; then
+        log_debug "$OB_SIGN_NOTE"
+    fi
+
     local response
     local http_code
 
-    response=$(curl "${CURL_OPTS[@]}" -w "\n%{http_code}" \
+    response=$(curl "${CURL_OPTS[@]}" "${SIGN_HEADERS[@]}" -w "\n%{http_code}" \
         -X POST "${PORTAL_URL}/pam/heartbeat" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>&1) || {

@@ -97,6 +97,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_sbindir}/ob-standalone-setup
 %{_sbindir}/ob-backend-setup
 %{_sbindir}/ob-cert-daemon
+%{_sbindir}/ob-sign-request
 %{_sbindir}/ob-record-sink
 %{_sbindir}/ob-cache-admin
 %{_sbindir}/ob-session-prune
@@ -109,6 +110,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_bindir}/ob-bastion-id
 %dir %{_prefix}/lib/open-bastion
 %{_prefix}/lib/open-bastion/ob-cert-lib.sh
+%{_prefix}/lib/open-bastion/ob-sign-lib.sh
 # 0711 = traversable but NOT listable. Entries under these directories are 0644
 # so an unprivileged getpwnam()/getpwuid() can read its own record (an NSS
 # module runs inside the calling process), but no local account can readdir()
@@ -147,6 +149,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_mandir}/man8/ob-session-prune.8*
 %{_mandir}/man8/ob-cert-daemon.8*
 %{_mandir}/man8/ob-record-sink.8*
+%{_mandir}/man8/ob-sign-request.8*
 %{_mandir}/man1/ob-ssh.1*
 %{_mandir}/man1/ob-scp.1*
 %{_mandir}/man1/ob-sftp.1*

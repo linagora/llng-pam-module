@@ -24,6 +24,22 @@ SCOPE="pam:server offline_access"
 POLL_INTERVAL=5
 TIMEOUT=300
 
+# Request signing for the /pam/ call below (#247). The HMAC is computed by
+# ob-sign-request so the signing secret never reaches a command line; the
+# rationale and the interface are in scripts/ob-sign-lib.sh.
+_OB_SIGN_LIB="${OB_SIGN_LIB:-/usr/lib/open-bastion/ob-sign-lib.sh}"
+if [ ! -r "$_OB_SIGN_LIB" ]; then
+    _OB_SIGN_LIB="$(dirname "$(readlink -f "$0")")/ob-sign-lib.sh"
+fi
+if [ -r "$_OB_SIGN_LIB" ]; then
+    # shellcheck source=scripts/ob-sign-lib.sh
+    . "$_OB_SIGN_LIB"
+else
+    SIGN_HEADERS=()
+    ob_sign_request() { SIGN_HEADERS=(); OB_SIGN_ERROR=""; \
+        OB_SIGN_NOTE="ob-sign-lib.sh not found; sending $2 unsigned"; return 0; }
+fi
+
 # Colors for output (disabled if not a terminal)
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -659,12 +675,23 @@ verify_enrollment() {
         --arg server_group "$SERVER_GROUP" \
         '{user: $user, host: $host, server_group: $server_group}')
 
-    # Try to call /pam/authorize to verify the token works
+    # Try to call /pam/authorize to verify the token works.
+    #
+    # Signed like every other /pam/ call (#247). This one is easy to forget --
+    # it is a post-enrolment sanity check, not part of the running system --
+    # and forgetting it would make every enrolment report "could not verify"
+    # the day the portal is switched to pamAccessRequestSigningMode=required.
     build_curl_opts
+    OB_SIGN_CONFIG="$CONFIG_FILE"
+    if ! ob_sign_request POST /pam/authorize "$json_payload"; then
+        log_warn "$OB_SIGN_ERROR"
+        return 0
+    fi
     response=$(curl "${CURL_OPTS[@]}" \
         -X POST "${PORTAL_URL}/pam/authorize" \
         -H "Authorization: Bearer ${ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
+        "${SIGN_HEADERS[@]}" \
         -d "$json_payload" 2>&1) || {
         log_warn "Could not verify enrollment (this may be normal)"
         return 0

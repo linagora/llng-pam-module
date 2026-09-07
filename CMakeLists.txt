@@ -31,6 +31,7 @@ endif()
 set(PAM_MODULE_SOURCES
     src/pam_openbastion.c
     src/ob_client.c
+    src/ob_sign.c
     src/config.c
     src/audit_log.c
     src/rate_limiter.c
@@ -196,6 +197,13 @@ install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-cert-lib.sh
     DESTINATION lib/open-bastion
 )
 
+# Shared request-signing library, sourced by every shell caller of a /pam/
+# endpoint (ob-heartbeat, ob-bastion-id, ob-enroll, ob-session-monitor). Same
+# fixed path as ob-cert-lib.sh, which the scripts look up.
+install(FILES ${CMAKE_SOURCE_DIR}/scripts/ob-sign-lib.sh
+    DESTINATION lib/open-bastion
+)
+
 # Bastion-to-backend SSH / SCP / SFTP connectors (cert vouching).
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-ssh
     DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -222,11 +230,17 @@ install(FILES ${CMAKE_SOURCE_DIR}/scripts/ssh-proxy.conf.example
 # socket-activated) holds the server token and derives the certificate's user
 # from the connection's SO_PEERCRED; ob-cert-request is the unprivileged client
 # that ob-ssh / ob-scp / ob-sftp invoke — no sudo, no setuid.
-add_executable(ob-cert-daemon src/ob-cert-daemon.c src/ob_cert_proto.c)
+add_executable(ob-cert-daemon
+    src/ob-cert-daemon.c
+    src/ob_cert_proto.c
+    src/ob_sign.c
+    src/str_utils.c
+)
 target_include_directories(ob-cert-daemon PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
     ${JSON_C_INCLUDE_DIRS}
+    ${OPENSSL_INCLUDE_DIRS}
 )
 target_compile_options(ob-cert-daemon PRIVATE
     -Wall -Wextra -Werror
@@ -238,6 +252,7 @@ target_compile_options(ob-cert-daemon PRIVATE
 target_link_libraries(ob-cert-daemon
     ${CURL_LIBRARIES}
     ${JSON_C_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
 )
 target_link_options(ob-cert-daemon PRIVATE
     -Wl,-z,relro
@@ -265,6 +280,39 @@ target_link_options(ob-cert-request PRIVATE
 )
 install(TARGETS ob-cert-request
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Request signing for the shell callers of /pam/* (ob-heartbeat, ob-bastion-id).
+# Root-only: it reads request_signing_secret out of openbastion.conf, which is
+# why the secret never has to appear in an `openssl dgst -hmac` command line
+# where /proc/<pid>/cmdline would publish it. See src/ob-sign-request.c.
+add_executable(ob-sign-request
+    src/ob-sign-request.c
+    src/ob_sign.c
+    src/str_utils.c
+)
+target_include_directories(ob-sign-request PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_compile_options(ob-sign-request PRIVATE
+    -Wall -Wextra -Werror
+    -D_GNU_SOURCE
+    -fstack-protector-strong
+    -Wformat -Wformat-security
+    $<$<CONFIG:Release>:-flto>
+)
+target_link_libraries(ob-sign-request
+    ${OPENSSL_LIBRARIES}
+)
+target_link_options(ob-sign-request PRIVATE
+    -Wl,-z,relro
+    -Wl,-z,now
+    -Wl,-z,noexecstack
+    $<$<CONFIG:Release>:-flto>
+)
+install(TARGETS ob-sign-request
+    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 # Tamper-evident session recording: socket-activated root sink + unprivileged
@@ -387,6 +435,7 @@ install(FILES
     ${CMAKE_SOURCE_DIR}/man/ob-session-prune.8
     ${CMAKE_SOURCE_DIR}/man/ob-cert-daemon.8
     ${CMAKE_SOURCE_DIR}/man/ob-record-sink.8
+    ${CMAKE_SOURCE_DIR}/man/ob-sign-request.8
     DESTINATION ${CMAKE_INSTALL_MANDIR}/man8
 )
 

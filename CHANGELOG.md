@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Every caller of a `/pam/` endpoint now signs its request, so
+  `pamAccessRequestSigningMode = required` is deployable (#247).** The portal
+  verifies `X-Signature-256` in `_checkCaller`, ahead of any caller identity,
+  which covers all six endpoints. Two were signed: `/pam/verify` and
+  `/pam/authorize`. The other four now are — `/pam/heartbeat` in the PAM module
+  and in `ob-heartbeat`, `/pam/bastion-cert` in `ob-cert-daemon`, `/pam/whoami`
+  in `ob-bastion-id`, `/pam/userinfo` in `ob-session-monitor`, plus the
+  post-enrolment `/pam/authorize` check in `ob-enroll`. `/pam/heartbeat` was the
+  dangerous one: it is how every enrolled host renews its access token, so
+  turning `required` on used to break nothing at the moment of the change and
+  take the whole fleet down hours later, together, as the tokens still in hand
+  expired.
+
+  Two call sites were missing from the issue's own inventory and are signed
+  here as well: `ob-enroll` verifies the enrolment through `/pam/authorize`, and
+  `/pam/userinfo` — recorded as having no caller — is called by
+  `ob-session-monitor`, whose loop terminates sessions for users the portal no
+  longer knows. `tests/test_ob_request_signing.sh` now walks the tree for
+  anything that builds a `/pam/` URL and fails if it is not in the signed
+  inventory, so a new caller cannot creep back in unsigned.
+
+- **The shell callers sign through `ob-sign-request`, not through
+  `openssl dgst -hmac` (#247).** OpenSSL takes the HMAC key as a command-line
+  argument and offers no form that reads it from a file or the environment.
+  `/proc/<pid>/cmdline` is world-readable, and `ob-heartbeat` runs from a timer
+  every few minutes, forever, on a host whose purpose is to give other people a
+  shell: signing that way would have published the fleet-wide signing secret to
+  anyone who polls, and a secret an attacker can read is a signature an attacker
+  can forge. The new helper reads the secret from the root-only configuration
+  file, takes the body on stdin — `ob-heartbeat`'s body carries the host's
+  `refresh_token`, which would otherwise have been an argument too — and prints
+  only the MAC and its inputs. `scripts/ob-sign-lib.sh` is the shared shell
+  interface; `man ob-sign-request` carries the rationale.
+
+- **`request_signing_secret` is no longer truncated at a `#` (#247).**
+  `config.c` exempts opaque secrets from inline-comment stripping, on the
+  grounds that `#` is an ordinary character in a generated secret. The other
+  three readers in the tree did not: `ob-cert-daemon`'s `load_ini` cut the line
+  at the first `#` anywhere, and the `awk`/`sed` readers in `ob-heartbeat` and
+  `ob-bastion-id` cut at any `#` in the value. A secret containing one would
+  have produced a valid-looking signature over the wrong key — reported by the
+  portal as `bad_signature`, which looks like a portal problem and is not. There
+  is now one reader for this key outside `config.c` (`ob_sign_load_secret`), and
+  `tests/test_ob_sign.c` pins its rule.
+
 ### Changed
+
+- **Request signing has one implementation and a test that pins it to the
+  portal's (#247).** The nonce and HMAC generators move out of `ob_client.c`
+  into `src/ob_sign.c`, shared by the PAM module, `ob-cert-daemon` and
+  `ob-sign-request`. `tests/test_ob_sign.c` checks the wire format against
+  digests produced by `Digest::SHA`'s `hmac_sha256_hex` — the function
+  `PamAccess.pm` itself calls — rather than recomputing them with OpenSSL, which
+  would only have proved the file agrees with itself. It covers the trailing
+  separator a bodyless request signs (`/pam/whoami` is one), and that the
+  timestamp, nonce, method and path are each inside the MAC. Signing had no
+  coverage at all before.
+
+  A signing failure now fails the request instead of falling back to an unsigned
+  one: the portal reads a partially signed request as malformed in every mode,
+  and an operator who configured a secret asked for the call to be signed. The
+  exception is `ob-session-monitor`, where "we could not ask" must not become
+  "the user is gone" — its loop terminates sessions.
 
 - **`ob-bastion-id` now asks `POST /pam/whoami`, not the removed
   `/pam/bastion-token` (#246).** Upstream `lemonldap-ng-plugins` 0.6.0 removes
