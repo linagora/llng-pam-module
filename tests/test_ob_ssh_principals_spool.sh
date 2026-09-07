@@ -6,14 +6,15 @@
 #
 # sshd does not export SSH_USER_AUTH to the PAM environment during
 # pam_acct_mgmt, so pam_openbastion cannot see which key was presented. The
-# ob-ssh-principals helper — installed by ob-bastion-setup / ob-backend-setup
+# ob-ssh-principals helper — shipped in share/, installed by ob-bastion-setup,
+# ob-backend-setup and ob-post-upgrade
 # as AuthorizedPrincipalsCommand — therefore gets it to
 # /run/open-bastion/ssh-fp/<anchor>.{fp,key}. Since #249 it does not write
 # those files itself (it runs as the unprivileged AuthorizedPrincipalsCommand
 # user, and the spool is 0700 root): it deposits through ob-fp-submit and
 # ob-fp-daemon writes them. The stub below plays that pair, so what these tests
 # assert on is what the HELPER produced — which is what they were always about.
-# This test extracts the helper from BOTH setup scripts (single source of
+# This test reads BOTH shipped helpers (single source of
 # truth) and checks:
 #
 #   - the legacy "<anchor>.fp" drop keeps its exact previous content;
@@ -36,8 +37,8 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BASTION_SETUP="$ROOT_DIR/scripts/ob-bastion-setup"
-BACKEND_SETUP="$ROOT_DIR/scripts/ob-backend-setup"
+BASTION_SETUP="$ROOT_DIR/share/ob-ssh-principals.bastion"
+BACKEND_SETUP="$ROOT_DIR/share/ob-ssh-principals.backend"
 
 pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); echo "  PASS: $1"; }
 fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); echo "  FAIL: $1${2:+ - $2}"; }
@@ -56,11 +57,16 @@ FAKE_SSHD="$TMP/sshd-session"
 cp "$(command -v sh)" "$FAKE_SSHD" 2>/dev/null || cp /bin/sh "$FAKE_SSHD"
 chmod 755 "$FAKE_SSHD"
 
-# Extract a helper from a setup script and point it at the throwaway paths.
+# Copy a shipped helper and point it at the throwaway paths.
+#
+# The helpers used to be heredocs inside the setup scripts and were extracted
+# from them here. Since ob-post-upgrade they are shipped data in share/ --
+# a third inline copy in that command is how the systemd units of #254 drifted
+# apart -- so this reads the same file the package installs.
 extract_helper() {
     local src="$1" dst="$2"
-    awk "/cat > \"\\\$script_path\" << 'PRINCIPALS'/{f=1;next} /^PRINCIPALS\$/{f=0} f" \
-        "$src" > "$dst"
+    [ -r "$src" ] || return 1
+    cp "$src" "$dst"
     [ -s "$dst" ] || return 1
     sed -i \
         -e "s|^ALLOWED_FILE=.*|ALLOWED_FILE=\"$CONF_DIR/allowed_bastions\"|" \
@@ -127,7 +133,7 @@ test_extract_and_syntax() {
     extract_helper "$BASTION_SETUP" "$BASTION_HELPER" || { ok=0; }
     extract_helper "$BACKEND_SETUP" "$BACKEND_HELPER" || { ok=0; }
     if [ "$ok" != 1 ]; then
-        fail "Helpers extracted from setup scripts"
+        fail "Helpers read from share/"
         return
     fi
     if sh -n "$BASTION_HELPER" && sh -n "$BACKEND_HELPER"; then
@@ -347,9 +353,10 @@ test_backend_legacy_mode_warns() {
 
 # ── Test 10: both sshd_config templates pass %t and %k ──
 test_sshd_config_tokens() {
+    # The sshd_config template lives in the setup script, not in the helper.
     local bastion_line backend_line
-    bastion_line=$(grep -m1 '^AuthorizedPrincipalsCommand ' "$BASTION_SETUP")
-    backend_line=$(grep -m1 '^AuthorizedPrincipalsCommand ' "$BACKEND_SETUP")
+    bastion_line=$(grep -m1 '^AuthorizedPrincipalsCommand ' "$ROOT_DIR/scripts/ob-bastion-setup")
+    backend_line=$(grep -m1 '^AuthorizedPrincipalsCommand ' "$ROOT_DIR/scripts/ob-backend-setup")
     if [ "$bastion_line" = "AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %t %k" ] \
        && [ "$backend_line" = "AuthorizedPrincipalsCommand /usr/local/sbin/ob-ssh-principals %u %f %i %t %k" ]; then
         pass "sshd_config templates pass %t and %k to the helper"

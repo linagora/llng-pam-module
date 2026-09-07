@@ -243,114 +243,51 @@ download_ca_key() {
 # /run/open-bastion/ssh-fp/<sshd-session-pid>.fp so pam_openbastion can
 # forward it to LLNG for the /pam/authorize + /pam/verify fingerprint
 # binding (see PamAccess >= 0.1.16).
+# Locate the shipped helper text and tmpfiles rule. They live in one place
+# (share/ in the tree, /usr/lib/open-bastion once installed) because they used
+# to be inline heredocs here AND in the other setup script AND would have been
+# a third time in ob-post-upgrade -- which is how debian/ and systemd/ ended up
+# with units that drifted apart (#254).
+_ob_data_dir() {
+    local d="${OB_DATA_DIR:-/usr/lib/open-bastion}"
+    if [ ! -r "$d/ob-fp-spool.tmpfiles" ]; then
+        local here
+        here="$(dirname "$(readlink -f "$0")")"
+        [ -r "$here/../share/ob-fp-spool.tmpfiles" ] && d="$here/../share"
+    fi
+    printf '%s' "$d"
+}
+
 install_principals_helper() {
     step "Installing SSH principals helper..."
 
     local script_path="/usr/local/sbin/ob-ssh-principals"
     local spool_dir="/run/open-bastion/ssh-fp"
     local tmpfiles_conf="/etc/tmpfiles.d/open-bastion-ssh-fp.conf"
+    local data_dir helper_src
+    data_dir="$(_ob_data_dir)"
+    helper_src="$data_dir/ob-ssh-principals.bastion"
 
     if [ "$DRY_RUN" = "true" ]; then
         info "[DRY-RUN] Would install $script_path and create $spool_dir"
         return 0
     fi
 
-    cat > "$script_path" << 'PRINCIPALS'
-#!/bin/sh
-# ob-ssh-principals — sshd AuthorizedPrincipalsCommand helper.
-# spool-format: v1 (fingerprint drop + key-metadata drop)
-# Args: <username> <fingerprint> <key-type> <key-blob-base64>
-# Outputs the username if known (to NSS/local passwd), and deposits the key
-# with ob-fp-daemon, which writes /run/open-bastion/ssh-fp/<anchor>.{fp,key}:
-#   .fp  - the SHA256 fingerprint, forwarded to LLNG during pam_acct_mgmt
-#   .key - the key type and the base64 key/certificate blob, used by
-#          pam_openbastion to enforce ssh_key_policy_* (issue #181). sshd does
-#          not expose SSH_USER_AUTH to PAM during pam_acct_mgmt, so this is the
-#          only way the module can see which key was actually presented.
-# Since #249 this helper does not write the spool itself: it runs as the
-# unprivileged AuthorizedPrincipalsCommandUser, and the spool is 0700 root.
-
-USERNAME="$1"
-FINGERPRINT="$2"
-KEYTYPE="$3"
-KEYBLOB="$4"
-
-# Hand the fingerprint to ob-fp-daemon, which writes the spool (#249).
-# This helper runs as AuthorizedPrincipalsCommandUser (nobody) because sshd
-# demands an unprivileged user, so it must NOT own the spool: a shared,
-# low-trust account holding the integrity of the fingerprint binding is the
-# whole problem #249 fixes. ob-fp-submit hands the values to a root daemon over
-# /run/open-bastion/ssh-fp.sock; the daemon derives the sshd anchor from THIS
-# process's own /proc ancestry, so nothing here can name the session it is
-# depositing for, and the spool is 0700 root.
-case "$FINGERPRINT" in
-    SHA256:[A-Za-z0-9+/]*) : ;;
-    *) FINGERPRINT="" ;;
-esac
-# Reject anything that is not a plausible OpenSSH algorithm name / base64 blob
-# before it leaves this process (the daemon re-validates; this is defence in
-# depth and keeps the deposit parseable).
-case "$KEYTYPE" in
-    ""|*[!A-Za-z0-9@._-]*) KEYTYPE="" ;;
-esac
-case "$KEYBLOB" in
-    ""|*[!A-Za-z0-9+/=]*) KEYBLOB="" ;;
-esac
-if [ -n "$FINGERPRINT" ]; then
-    # OB_FP_SUBMIT is for the test suite; on a real host this is the packaged
-    # path. Failure is never fatal: losing the binding removes an extra check,
-    # it must not refuse a login sshd has already accepted. pam_openbastion
-    # reports the missing drop itself (#192).
-    _ob_submit="${OB_FP_SUBMIT:-/usr/sbin/ob-fp-submit}"
-    if [ -x "$_ob_submit" ]; then
-        printf '%s\n%s\n%s\n' "$FINGERPRINT" "$KEYTYPE" "$KEYBLOB" \
-            | "$_ob_submit" || :
+    if [ ! -r "$helper_src" ]; then
+        error "Missing $helper_src — reinstall the open-bastion package"
+        return 1
     fi
-fi
 
-# Emit the username as allowed principal if it can be resolved
-if getent passwd "$USERNAME" >/dev/null 2>&1; then
-    echo "$USERNAME"
-fi
-PRINCIPALS
-    chmod 755 "$script_path"
+    install -D -m 0755 -o root -g root "$helper_src" "$script_path"
     track_created "$script_path"
 
-    # Spool directory: 0700 ROOT since #249. It used to be owned by the
-    # AuthorizedPrincipalsCommandUser (nobody), because that is the account
-    # sshd runs the principals helper as and the helper wrote the drops
-    # directly -- which put the integrity of the fingerprint binding on a
-    # shared, low-trust identity. ob-fp-daemon writes the drops now, so nothing
-    # unprivileged needs to create, list or read anything here.
-    # pam_openbastion still refuses to read the spool if this directory is
-    # group/world-writable or if a drop file isn't owned by the directory owner
-    # with mode 0600 / nlink 1.
-    # The parent /run/open-bastion must stay traversable by the principals
-    # helper user (nobody) so it can reach the deposit socket. Other steps
-    # (ob-enroll, the device-state file) create it 0750 root:root, which blocks
-    # nobody and silently breaks the fingerprint binding (no voucher → onward
-    # hop fails). 0711 = traverse-only: nobody can cd through it but not list
-    # it, and the device-state file is protected by its own mode.
-    mkdir -p /run/open-bastion
-    chmod 0711 /run/open-bastion
-    mkdir -p "$spool_dir"
-    # An upgraded host still has the pre-#249 nobody-owned directory; take it
-    # back explicitly rather than leaving the old trust root in place under a
-    # new daemon.
-    chown root:root "$spool_dir"
-    chmod 0700 "$spool_dir"
+    # 0711 on /run/open-bastion, 0700 root on the drop directory: see the
+    # tmpfiles rule for the rationale. ob-fp-daemon owns the drops; the
+    # principals helper only needs to reach the deposit socket.
+    install -d -m 0711 -o root -g root /run/open-bastion
+    install -d -m 0700 -o root -g root "$spool_dir"
 
-    # Re-create the spool directory at boot via systemd-tmpfiles.
-    cat > "$tmpfiles_conf" << TMPFILES
-# Open Bastion SSH fingerprint spool — recreated at boot so the directory
-# survives /run wipes. See /usr/local/sbin/ob-ssh-principals and ob-fp-daemon.
-# 0711 on the parent: traversable by the principals helper (nobody) so it can
-# reach ssh-fp.sock, but not listable. The drop directory itself is 0700 ROOT
-# since #249: ob-fp-daemon writes it, nothing unprivileged reads it.
-d /run/open-bastion          0711 root root -
-d /run/open-bastion/ssh-fp   0700 root root -
-TMPFILES
-    chmod 644 "$tmpfiles_conf"
+    install -D -m 0644 -o root -g root "$data_dir/ob-fp-spool.tmpfiles" "$tmpfiles_conf"
     track_created "$tmpfiles_conf"
 
     # Enable the fingerprint sink socket (#249). The principals helper deposits

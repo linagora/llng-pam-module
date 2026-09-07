@@ -21,26 +21,33 @@ If you are doing both: Part A first, on every host, then Part B.
 
 ## Part A — on every host
 
-### A1. Re-run the setup script
+### A1. Finish the upgrade
 
 ```sh
-ob-bastion-setup     # or ob-backend-setup, with the arguments you used before
-systemctl status ob-fp.socket
+sudo ob-post-upgrade
 ```
 
-**Installing the package is not enough.** The helper the setup script generates
-is not shipped by the package, so an upgraded host keeps running the old one.
-Logins keep working, but the SSH fingerprint binding stays on the old
-`nobody`-owned spool. You will see this in the log until you re-run it:
+**Installing the package is not enough.** The sshd principals helper is
+generated on the host, not shipped, so an upgrade replaces the daemon it talks
+to and leaves the helper as it was. Until you run this, the SSH fingerprint
+binding stays on the old `nobody`-owned spool, and you will see:
 
 ```
 SSH fp spool /run/open-bastion/ssh-fp is owned by uid 65534, not root
 ```
 
-If `ob-fp.socket` is not enabled, logins still succeed but with **no
-fingerprint binding**. On a host with `fingerprint_required = true`, or against
-a portal with `pamAccessRequireFingerprint`, that is a refused login — check
-the socket before enabling either.
+`ob-post-upgrade` takes no arguments and asks nothing. It does **not** enrol,
+and does not touch `openbastion.conf`, your server token, `sshd_config` or any
+PAM stack — so you do not need to remember how this host was set up, and it is
+safe to run again at any time. Add `--dry-run` to see what it would change.
+
+You can still use `ob-bastion-setup` / `ob-backend-setup` instead if you have
+your original arguments; you need them only to _change_ a decision.
+
+If it cannot enable `ob-fp.socket` it stops and says so. Logins would still
+succeed, but with **no fingerprint binding** — and on a host with
+`fingerprint_required = true`, or against a portal with
+`pamAccessRequireFingerprint`, they would be refused instead.
 
 ### A2. Check the sshd PAM stack refuses passwords
 
@@ -107,7 +114,7 @@ sudo find /run/open-bastion/ssh-fp -name '*.fp' -newermt '-2 min'
 
 It has to be a _fresh_ drop: old ones are never cleaned up, so a listing that
 is merely non-empty proves nothing. No output means the spool is broken — fix
-it with [A1](#a1-re-run-the-setup-script) before the portal moves.
+it with [A1](#a1-finish-the-upgrade) before the portal moves.
 
 ### B3. Turn on request signing, in this order
 

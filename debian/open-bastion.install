@@ -25,6 +25,7 @@ usr/sbin/ob-fp-daemon
 usr/sbin/ob-fp-submit
 usr/sbin/ob-sign-request
 usr/sbin/ob-client-jwt
+usr/sbin/ob-post-upgrade
 usr/sbin/ob-record-sink
 usr/sbin/ob-cache-admin
 usr/sbin/ob-session-prune
@@ -32,6 +33,9 @@ usr/sbin/ob-session-prune
 # Shared cert-vouching library (sourced by ob-ssh / ob-scp / ob-sftp)
 usr/lib/open-bastion/ob-cert-lib.sh
 usr/lib/open-bastion/ob-sign-lib.sh
+usr/lib/open-bastion/ob-ssh-principals.bastion
+usr/lib/open-bastion/ob-ssh-principals.backend
+usr/lib/open-bastion/ob-fp-spool.tmpfiles
 
 # User scripts
 usr/bin/ob-ssh-cert
@@ -63,6 +67,7 @@ usr/share/man/man8/ob-fp-submit.8
 usr/share/man/man8/ob-record-sink.8
 usr/share/man/man8/ob-sign-request.8
 usr/share/man/man8/ob-client-jwt.8
+usr/share/man/man8/ob-post-upgrade.8
 
 # Audit trace templates (deployed by `ob-bastion-setup --enable-audit-trace`)
 usr/share/open-bastion/audit/rules.d/open-bastion.rules

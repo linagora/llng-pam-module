@@ -21,6 +21,21 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
 ### Added
 
+- **`ob-post-upgrade`(8)** finishes a package upgrade on a host without asking
+  for anything. The sshd principals helper is generated on the host, not
+  shipped, so an upgrade replaces the daemon it talks to and leaves the helper
+  as it was — and the only cure was "re-run the setup script with the arguments
+  you used before", which an operator who deployed through `ob-builder` months
+  ago does not have. This command needs none of them: the helper text, the
+  tmpfiles rule, the socket and the spool ownership are all derivable from the
+  host. It reads `openbastion.conf` for `node_role` alone, to pick the bastion
+  or backend helper, and writes nothing back. It deliberately does **not**
+  enrol — re-enrolling mints a new device id that no backend allowlist
+  contains, so it is the one repair that breaks more than it fixes — and does
+  not touch the server token, `sshd_config` or any PAM stack, which carry
+  decisions it cannot know. The helper text moved to `share/`, installed as
+  data, because a third inline copy alongside the two setup scripts is how the
+  systemd units of #254 drifted apart.
 - **`ob-client-jwt`(8)** builds `ob-enroll`'s `client_secret_jwt` assertion with
   the secret on stdin (#256). See Security below.
 - **`--enable-sudo-fresh-otp`** on `ob-bastion-setup` and `ob-backend-setup`
