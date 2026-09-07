@@ -87,6 +87,19 @@ jobs:
           bash "$test"
         done
 
+    # This suite reads the tree and nothing else -- no docker, no portal, no
+    # build -- so it has no legitimate reason to skip, and its whole subject is
+    # a helper that went missing from the packaging (#263). It refuses to skip
+    # on its own now; this is the belt to that braces.
+    - name: The service-account suite must actually run
+      run: |
+        out=$(bash tests/test_ob_service_account_keys.sh 2>&1); echo "$out"
+        case "$out" in
+          *SKIP*)
+            echo "::error::tests/test_ob_service_account_keys.sh skipped; it must run in CI"
+            exit 1 ;;
+        esac
+
     # Same reasoning as the fingerprint sink below: this suite is the only thing
     # proving the OIDC client secret stays out of /proc/<pid>/cmdline (#256),
     # and it skips when ob-client-jwt is not built. A packaging change that

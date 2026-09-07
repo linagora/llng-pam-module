@@ -235,6 +235,28 @@ install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-bastion-id
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# sshd AuthorizedKeysCommand helper for service accounts: serves the account's
+# public key from /etc/open-bastion/service-accounts.d/<name>.pub without the
+# Unix account having to exist yet. Not packaged until #263.
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-service-account-keys
+    DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+
+# ...and the directory it reads: 0755 root:root, traversable and readable by the
+# AuthorizedKeysCommandUser (nobody). Without it the helper is inert.
+#
+# Absolute, not ${CMAKE_INSTALL_SYSCONFDIR}: under CMAKE_INSTALL_PREFIX=/usr
+# GNUInstallDirs leaves SYSCONFDIR relative, so that form lands in /usr/etc/.
+# The cost of an absolute DESTINATION is that `cmake --install --prefix <dir>`
+# ignores it and would touch the real /etc; DESTDIR staging (what the .deb and
+# .rpm use) is unaffected.
+install(DIRECTORY
+    DESTINATION /etc/open-bastion/service-accounts.d
+    DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                          GROUP_READ GROUP_EXECUTE
+                          WORLD_READ WORLD_EXECUTE
+)
+
 # Post-upgrade repair. Takes no configuration and never enrols, so an operator
 # who no longer remembers the setup arguments can still finish an upgrade.
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ob-post-upgrade

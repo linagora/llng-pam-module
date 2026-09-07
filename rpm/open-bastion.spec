@@ -90,6 +90,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %config(noreplace) %{_sysconfdir}/open-bastion/openbastion.conf.example
 %config(noreplace) %{_sysconfdir}/open-bastion/nss_openbastion.conf.example
 %config(noreplace) %{_sysconfdir}/open-bastion/service-accounts.conf.example
+%dir %attr(0755,root,root) %{_sysconfdir}/open-bastion/service-accounts.d
 %{_sbindir}/ob-enroll
 %{_sbindir}/ob-heartbeat
 %{_sbindir}/ob-session-recorder
@@ -102,6 +103,7 @@ mkdir -p %{buildroot}/var/cache/nss_llng/byname
 %{_sbindir}/ob-sign-request
 %{_sbindir}/ob-client-jwt
 %{_sbindir}/ob-post-upgrade
+%{_sbindir}/ob-service-account-keys
 %{_sbindir}/ob-record-sink
 %{_sbindir}/ob-cache-admin
 %{_sbindir}/ob-session-prune

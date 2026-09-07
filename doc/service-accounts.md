@@ -77,11 +77,16 @@ ExposeAuthInfo yes
 ```
 
 **Mode E compatibility:**
-In Mode E deployments (`AuthorizedKeysFile none`), service accounts still work correctly.
-Although there is no `authorized_keys` file lookup, authentication succeeds via a different
-path: the SSH client presents its key, sshd exposes the key fingerprint through
-`SSH_USER_AUTH` (enabled by `ExposeAuthInfo yes`), and the PAM module validates that
-fingerprint against `service-accounts.conf`. No `authorized_keys` file is required.
+In Mode E deployments (`AuthorizedKeysFile none`) an `authorized_keys` file is never
+consulted, so the key has to reach sshd some other way — through the
+`AuthorizedKeysCommand` helper described below. Set that up first; the rest of this
+section assumes it.
+
+Once sshd has accepted the key, the PAM module **re-validates** its SHA256 fingerprint
+against `service-accounts.conf`, using `SSH_USER_AUTH` (which needs `ExposeAuthInfo yes`).
+That check is a second gate, not the first one: it can refuse a key sshd accepted, but it
+cannot make sshd accept a key it has no record of. Without the helper, sshd rejects at the
+protocol layer and `pam_openbastion` is never reached (#263).
 
 Get the SSH key fingerprint:
 
@@ -97,7 +102,7 @@ ssh-keygen -lf /path/to/key.pub
 | ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `key_fingerprint` | Yes      | SSH key fingerprint (SHA256:... or MD5:...)                                                                                                                                      |
 | `sudo_allowed`    | No       | Allow sudo access (default: false)                                                                                                                                               |
-| `sudo_nopasswd`   | No       | Sudo without re-proving the key (default: false) — see [Sudo and the key check](#sudo-and-the-key-check)                                                                          |
+| `sudo_nopasswd`   | No       | Sudo without re-proving the key (default: false) — see [Sudo and the key check](#sudo-and-the-key-check)                                                                         |
 | `gecos`           | No       | User description                                                                                                                                                                 |
 | `shell`           | No       | Login shell — must be in `approved_shells` (default: common shells) or the account is dropped                                                                                    |
 | `home`            | No       | Home directory — must be under `approved_home_prefixes` (default `/home:/var/home`) or the account is dropped                                                                    |
@@ -195,25 +200,50 @@ the public key. So `sshd` must be told the key is acceptable, by one of:
 
 - **`AuthorizedKeysCommand` (required for Mode E, works in all modes).** Mode E
   sets `AuthorizedKeysFile none`, so `authorized_keys` is ignored. Use the
-  `ob-service-account-keys` helper, which serves a public key from
+  `ob-service-account-keys` helper — shipped at `/usr/sbin/ob-service-account-keys`
+  since #263 — which serves a public key from
   `/etc/open-bastion/service-accounts.d/<name>.pub` (`root:root 0644`) and does
   **not** depend on the account already existing:
 
   ```
   # /etc/ssh/sshd_config.d/09-open-bastion-service-keys.conf
-  AuthorizedKeysCommand /usr/local/sbin/ob-service-account-keys %u
+  AuthorizedKeysCommand /usr/sbin/ob-service-account-keys %u
   AuthorizedKeysCommandUser nobody
   ```
 
   Drop each account's public key at `/etc/open-bastion/service-accounts.d/<name>.pub`
-  and reload `sshd`. The mere presence of the `.pub` lets `sshd` present the key;
-  `pam_openbastion` still re-validates the SHA256 fingerprint against
-  `service-accounts.conf` (which is `0600` and unreadable by the
-  `AuthorizedKeysCommandUser`), so an orphan `.pub` is accepted by `sshd` but
-  still rejected by PAM.
+  and reload `sshd`.
 
-`ExposeAuthInfo yes` must be set (the setups do this) so the fingerprint reaches
-the PAM module.
+### What actually enforces the fingerprint, and when it does not
+
+Read this before relying on `key_fingerprint`.
+
+The `.pub` file is what lets `sshd` accept the key. `pam_openbastion` is meant to
+re-validate its SHA256 fingerprint against `service-accounts.conf` (`0600`, and so
+unreadable by the `AuthorizedKeysCommandUser`) — but for a **plain public key** on a
+current OpenSSH, that second check often does not run at all:
+
+- `sshd` does not call `pam_authenticate()` for a public-key login, so the
+  authentication-phase check never fires there (`pam_openbastion.c:3766`);
+- the account-phase check resolves the fingerprint from `SSH_USER_AUTH` **or** the
+  principals spool. Without `ExposeAuthInfo yes` there is no `SSH_USER_AUTH`, and the
+  spool is empty too — `sshd` runs `AuthorizedPrincipalsCommand` only for
+  certificate sessions (`pam_openbastion.c:2458`);
+- with no fingerprint from either source, the check is skipped rather than failed:
+  absence is not fatal by default (`pam_openbastion.c:3774`).
+
+So on such a host an orphan `.pub` is accepted by `sshd` and **not** rejected by PAM,
+and `key_fingerprint` is decorative. Two settings turn it back into a control, and you
+want both:
+
+| setting                       | where                  | effect                                                    |
+| ----------------------------- | ---------------------- | --------------------------------------------------------- |
+| `ExposeAuthInfo yes`          | the sshd drop-in above | gives PAM a fingerprint to check                          |
+| `fingerprint_required = true` | `openbastion.conf`     | refuses the login when there is none, instead of skipping |
+
+The setup scripts write `ExposeAuthInfo yes` **only in Mode E** — it lives in
+`configure_max_security_sshd()`, which returns immediately without `--max-security`. On
+any other host, add it yourself in the drop-in above (#263).
 
 ### The account must be resolvable (fixed `uid`/`gid`)
 
