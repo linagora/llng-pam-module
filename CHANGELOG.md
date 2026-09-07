@@ -624,7 +624,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nss_openbastion.conf`, by the NSS module.
 
 - **`doc/offline-mode.md` now states what actually works during a portal outage
-  (#165).** A ten-row matrix derived from the code and the generated `sshd`
+  (#165).** An eleven-row matrix derived from the code and the generated `sshd`
   configurations: what keeps working (user resolution, certificate logins,
   service-account `sudo`), what does not (`ob-ssh`/`ob-scp`/`ob-sftp`, enrolment,
   revocation), and the two cache TTLs that must be sized together.
