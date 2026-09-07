@@ -252,6 +252,22 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
   corrected, and `tests/test_ob_service_account_keys.sh` fails if either claim
   comes back or if the helper leaves the packaging again.
 
+  The directory the helper reads, `/etc/open-bastion/service-accounts.d`, is
+  shipped with it — nothing created it before, and a helper without its
+  directory is inert.
+
+  What `key_fingerprint` is actually worth is now written down instead of
+  assumed. For a **plain public key** on a current OpenSSH the PAM
+  re-validation usually does not run at all: `sshd` does not call
+  `pam_authenticate()` on that path, `SSH_USER_AUTH` is absent without
+  `ExposeAuthInfo yes`, and the principals spool is empty because `sshd` runs
+  `AuthorizedPrincipalsCommand` only for certificate sessions — so the check is
+  skipped rather than failed. On such a host an orphan `.pub` is accepted by
+  `sshd` and **not** rejected by PAM. `ExposeAuthInfo yes` plus
+  `fingerprint_required = true` turn it back into a control, and
+  `doc/service-accounts.md` now says so in a table rather than implying the
+  check always happens.
+
   Reported from the field with a complete reproduction; the deployment still
   requires the sshd drop-in to be written by hand, which is tracked separately.
 
