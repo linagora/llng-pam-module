@@ -13,20 +13,14 @@
 #include <pthread.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-
 #include "ob_client.h"
+#include "ob_sign.h"
 #include "jwt_utils.h"
 #include "str_utils.h"
 
 /* TLS version constants for min_tls_version configuration */
 #define TLS_VERSION_1_2 12
 #define TLS_VERSION_1_3 13
-
-/* Stack buffer size for HMAC signature message building */
-#define SIGNATURE_STACK_BUFFER_SIZE 512
 
 /* Security: Maximum user groups to prevent DoS via memory exhaustion */
 #define MAX_USER_GROUPS 256
@@ -157,171 +151,86 @@ static char *strdup_or_null(const char *s)
 }
 
 /*
- * Generate HMAC-SHA256 signature for request signing.
- * Message format: timestamp.nonce.method.path.body
- * Output: hex-encoded signature string (65 bytes including null terminator)
- *
- * Security (#188): the nonce MUST be part of the signed message. It is sent
- * in its own X-Nonce header for the server's replay window; if it were left
- * out of the HMAC an attacker could replay a captured request with a fresh
- * nonce and the signature would still verify, defeating replay protection.
- */
-static void generate_request_signature(const char *secret,
-                                        long timestamp,
-                                        const char *nonce,
-                                        const char *method,
-                                        const char *path,
-                                        const char *body,
-                                        char *signature,
-                                        size_t sig_size)
-{
-    if (!secret || !nonce || !signature || sig_size < 65) {
-        if (signature && sig_size > 0) signature[0] = '\0';
-        return;
-    }
-
-    /* Build message: timestamp.nonce.method.path.body
-     * Use stack allocation for typical message sizes to avoid malloc overhead.
-     * Typical: timestamp(~10) + nonce(~55) + method(~4) + path(~50) + body(~200)
-     * < SIGNATURE_STACK_BUFFER_SIZE
-     */
-    char ts_str[32];
-    snprintf(ts_str, sizeof(ts_str), "%ld", timestamp);
-
-    size_t msg_len = strlen(ts_str) + 1 + strlen(nonce) + 1 + strlen(method) + 1 +
-                     strlen(path) + 1 + (body ? strlen(body) : 0);
-
-    /* Use stack buffer for small messages, heap for large ones */
-    char stack_message[SIGNATURE_STACK_BUFFER_SIZE];
-    char *message;
-    bool heap_allocated = false;
-
-    if (msg_len < sizeof(stack_message)) {
-        message = stack_message;
-    } else {
-        message = malloc(msg_len + 1);
-        if (!message) {
-            signature[0] = '\0';
-            return;
-        }
-        heap_allocated = true;
-    }
-
-    snprintf(message, msg_len + 1, "%s.%s.%s.%s.%s",
-             ts_str, nonce, method, path, body ? body : "");
-
-    /* Generate HMAC-SHA256 */
-    unsigned char hmac[EVP_MAX_MD_SIZE];
-    unsigned int hmac_len = 0;
-
-    unsigned char *result = HMAC(EVP_sha256(), secret, strlen(secret),
-                                  (unsigned char *)message, strlen(message),
-                                  hmac, &hmac_len);
-
-    /* Clear message buffer */
-    explicit_bzero(message, msg_len + 1);
-    if (heap_allocated) {
-        free(message);
-    }
-
-    /* Check HMAC result */
-    if (!result) {
-        signature[0] = '\0';
-        return;
-    }
-
-    /* Convert to hex string */
-    if (hmac_len * 2 + 1 <= sig_size) {
-        str_bytes_to_hex(hmac, hmac_len, signature);
-    }
-
-    /* Clear HMAC buffer */
-    explicit_bzero(hmac, sizeof(hmac));
-}
-
-/*
- * Generate a unique nonce for replay protection.
- * Format: timestamp_ms-uuid
- * Uses OpenSSL RAND_bytes for cryptographically secure random generation.
- */
-static void generate_nonce(char *nonce, size_t nonce_size)
-{
-    if (!nonce || nonce_size < 64) {
-        if (nonce && nonce_size > 0) nonce[0] = '\0';
-        return;
-    }
-
-    /* Get timestamp in milliseconds */
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    long long timestamp_ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-
-    /* Generate UUID v4 using OpenSSL RAND_bytes (CSPRNG) */
-    unsigned char uuid[16];
-    if (RAND_bytes(uuid, sizeof(uuid)) != 1) {
-        /* RAND_bytes failed - this is a critical error, but use timestamp as fallback */
-        snprintf(nonce, nonce_size, "%lld", timestamp_ms);
-        return;
-    }
-
-    /* Set version (4) and variant bits */
-    uuid[6] = (uuid[6] & 0x0F) | 0x40;
-    uuid[8] = (uuid[8] & 0x3F) | 0x80;
-
-    snprintf(nonce, nonce_size,
-             "%lld-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-             timestamp_ms,
-             uuid[0], uuid[1], uuid[2], uuid[3],
-             uuid[4], uuid[5],
-             uuid[6], uuid[7],
-             uuid[8], uuid[9],
-             uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
-}
-
-/*
  * Add request signing headers if signing_secret is configured.
  * Adds X-Timestamp, X-Nonce, and X-Signature-256 headers.
  *
  * The nonce provides replay protection - server should reject
  * requests with previously seen nonces within a time window. It is covered
- * by the signature (see generate_request_signature) so it cannot be swapped
+ * by the signature (see ob_sign_compute) so it cannot be swapped
  * for a fresh value on a replayed request.
+ *
+ * A secret that is configured but yields no signature is a hard failure, not
+ * a reason to fall back to an unsigned request: the portal reads a partially
+ * signed request as malformed and refuses it in every mode, and an operator
+ * who set the secret asked for the call to be signed.
  */
-static struct curl_slist *add_signing_headers(struct curl_slist *headers,
-                                               const char *signing_secret,
-                                               const char *method,
-                                               const char *path,
-                                               const char *body)
+static int add_signing_headers(struct curl_slist **headers,
+                               const char *signing_secret,
+                               const char *method,
+                               const char *path,
+                               const char *body)
 {
-    if (!signing_secret) {
-        return headers;
+    /*
+     * Empty counts as absent, exactly as ob_sign_load_secret() treats it.
+     * config_load() strdup's whatever follows the '=', so a degenerate
+     * `request_signing_secret =` reaches here as "" rather than NULL. HMAC
+     * with a zero-length key is well defined and worthless -- anyone can
+     * compute it -- so signing with it would ship a request that merely looks
+     * signed, and would disagree with the shell and daemon callers on the same
+     * host, which send that config unsigned. Unsigned is the honest answer: a
+     * portal in `required` refuses it visibly.
+     */
+    if (!signing_secret || !*signing_secret) {
+        return 0;
     }
 
     long timestamp = (long)time(NULL);
 
     /* Generate unique nonce */
-    char nonce[80];
-    generate_nonce(nonce, sizeof(nonce));
+    char nonce[OB_SIGN_NONCE_SIZE];
+    ob_sign_generate_nonce(nonce, sizeof(nonce));
 
     /* Generate signature over timestamp.nonce.method.path.body (#188) */
-    char signature[65];
-    generate_request_signature(signing_secret, timestamp, nonce, method, path, body,
-                               signature, sizeof(signature));
+    char signature[OB_SIGN_SIGNATURE_SIZE];
+    ob_sign_compute(signing_secret, timestamp, nonce, method, path, body,
+                    signature, sizeof(signature));
 
-    /* Add headers */
+    if (!*nonce || !*signature) {
+        syslog(LOG_ERR, "open-bastion: cannot sign %s %s "
+                        "(request_signing_secret is set but signing failed)",
+               method, path);
+        return -1;
+    }
+
     char ts_header[64];
     snprintf(ts_header, sizeof(ts_header), "X-Timestamp: %ld", timestamp);
-    headers = curl_slist_append(headers, ts_header);
 
     char nonce_header[128];
     snprintf(nonce_header, sizeof(nonce_header), "X-Nonce: %s", nonce);
-    headers = curl_slist_append(headers, nonce_header);
 
     char sig_header[128];
     snprintf(sig_header, sizeof(sig_header), "X-Signature-256: sha256=%s", signature);
-    headers = curl_slist_append(headers, sig_header);
 
-    return headers;
+    /*
+     * Append all three or none. curl_slist_append returns NULL on allocation
+     * failure and does NOT free the list it was given, so each step keeps the
+     * caller's list intact and reachable; a half-applied header set would go
+     * out as a partially signed request, which the portal refuses as
+     * malformed in every mode -- including 'off'.
+     */
+    struct curl_slist *tmp = curl_slist_append(*headers, ts_header);
+    if (!tmp) return -1;
+    *headers = tmp;
+
+    tmp = curl_slist_append(*headers, nonce_header);
+    if (!tmp) return -1;
+    *headers = tmp;
+
+    tmp = curl_slist_append(*headers, sig_header);
+    if (!tmp) return -1;
+    *headers = tmp;
+
+    return 0;
 }
 
 /*
@@ -541,10 +450,30 @@ int ob_client_refresh_via_heartbeat(ob_client_t *client,
     }
     const char *req_body = json_object_to_json_string(req_json);
 
-    /* /pam/heartbeat authenticates via the refresh_token in the body, like the
-     * shell ob-heartbeat — no Authorization header, no request signing. */
+    /*
+     * /pam/heartbeat authenticates via the refresh_token in the body, like the
+     * shell ob-heartbeat -- no Authorization header. It is signed all the same
+     * (#247): the portal checks the signature in _checkCaller, before it looks
+     * at any caller identity, so `required` covers this endpoint exactly like
+     * the five that do carry a Bearer token. There is one portal-wide
+     * pamAccessRequestSigningSecret, so the secret here is the same
+     * request_signing_secret as everywhere else -- the signature proves fleet
+     * membership, it does not name a caller.
+     *
+     * Leaving it unsigned is what makes `required` undeployable: every host
+     * renews its access token here, so flipping the switch breaks nothing
+     * visible and takes the whole fleet down hours later, at once.
+     */
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
+    if (add_signing_headers(&headers, client->signing_secret,
+                            "POST", "/pam/heartbeat", req_body) != 0) {
+        snprintf(client->error, sizeof(client->error),
+                 "Failed to sign the /pam/heartbeat request");
+        json_object_put(req_json);
+        curl_slist_free_all(headers);
+        return -1;
+    }
 
     response_buffer_t buf;
     init_buffer(&buf);
@@ -723,8 +652,15 @@ int ob_verify_token(ob_client_t *client,
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
     /* Add request signing headers if configured */
-    headers = add_signing_headers(headers, client->signing_secret,
-                                   "POST", "/pam/verify", req_body);
+    if (add_signing_headers(&headers, client->signing_secret,
+                            "POST", "/pam/verify", req_body) != 0) {
+        snprintf(client->error, sizeof(client->error),
+                 "Failed to sign the /pam/verify request");
+        json_object_put(req_json);
+        curl_slist_free_all(headers);
+        explicit_bzero(auth_header, sizeof(auth_header));
+        return -1;
+    }
 
     response_buffer_t buf;
     init_buffer(&buf);
@@ -1134,8 +1070,15 @@ static int ob_authorize_user_internal(ob_client_t *client,
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
     /* Add request signing headers if configured */
-    headers = add_signing_headers(headers, client->signing_secret,
-                                   "POST", "/pam/authorize", req_body);
+    if (add_signing_headers(&headers, client->signing_secret,
+                            "POST", "/pam/authorize", req_body) != 0) {
+        snprintf(client->error, sizeof(client->error),
+                 "Failed to sign the /pam/authorize request");
+        json_object_put(req_json);
+        curl_slist_free_all(headers);
+        explicit_bzero(auth_header, sizeof(auth_header));
+        return -1;
+    }
 
     response_buffer_t buf;
     init_buffer(&buf);

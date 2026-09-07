@@ -45,6 +45,9 @@ run_against() {
     local mode="$1" port="$2" pid
     printf 'portal_url = http://127.0.0.1:%s\nserver_group = bastion\nverify_ssl = false\n' \
         "$port" > "$WORK/ob.conf"
+    # 0600 like the real /etc/open-bastion/openbastion.conf: config_load()
+    # refuses anything looser, and so does the signing helper (#247).
+    chmod 600 "$WORK/ob.conf"
     python3 "$MOCK" "$mode" "$port" & pid=$!
     for _ in $(seq 1 50); do
         (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
@@ -103,6 +106,7 @@ TESTS_RUN=$((TESTS_RUN + 1))
 port=$((port + 1))
 printf 'portal_url = http://127.0.0.1:%s\nserver_group = bastion\nverify_ssl = false\n' \
     "$port" > "$WORK/ob.conf"
+chmod 600 "$WORK/ob.conf"
 python3 "$MOCK" whoami "$port" & mpid=$!
 for _ in $(seq 1 50); do (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null && break; sleep 0.1; done
 json=$(bash "$SCRIPT" --quiet --json -c "$WORK/ob.conf" -t "$WORK/token" 2>&1)

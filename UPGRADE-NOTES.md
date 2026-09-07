@@ -65,19 +65,40 @@ the mechanism and the file layout are in
 security rationale in
 [doc/security/02-ssh-connection.md](doc/security/02-ssh-connection.md).
 
-### 3. Do not set `pamAccessRequestSigningMode = required`
+### 3. `pamAccessRequestSigningMode = required` — deployable, in this order
 
-Plugin 0.6.0 verifies `X-Signature-256` / `X-Timestamp` / `X-Nonce`. The wire
-format matches what this client already produces, so **`optional` is safe to
-deploy today** — it refuses a _bad_ signature on the two endpoints that consume
-credentials.
+Plugin 0.6.0 verifies `X-Signature-256` / `X-Timestamp` / `X-Nonce` on all six
+`/pam/*` endpoints, in `_checkCaller`, before it looks at any caller identity.
+Every caller on this side now signs — the PAM module
+(`/pam/verify`, `/pam/authorize`, `/pam/heartbeat`), `ob-cert-daemon`
+(`/pam/bastion-cert`), `ob-heartbeat`, `ob-bastion-id` (`/pam/whoami`),
+`ob-enroll` and `ob-session-monitor` (`/pam/userinfo`). Before
+[#247](https://github.com/linagora/open-bastion/issues/247) only the first two
+were signed, and `required` would have taken the fleet down.
 
-`required` is not deployable: the gate covers all six `/pam/*` endpoints and
-the client signs two of them (`/pam/verify`, `/pam/authorize`).
-`/pam/heartbeat` is unsigned and is how every enrolled host renews its access
-token, so `required` breaks nothing at the moment you flip it and takes the
-whole fleet down hours later, together, when the tokens still in hand expire.
-Tracked in [#247](https://github.com/linagora/open-bastion/issues/247).
+There is one portal-wide `pamAccessRequestSigningSecret`, and it is the
+`request_signing_secret` every host already has in `openbastion.conf`: the
+signature proves fleet membership, it does not identify a caller. So the
+rollout is about **which hosts hold the secret**, and the order is not
+negotiable:
+
+1. Upgrade the hosts to a release carrying #247. A host that has not been
+   upgraded still signs nothing on four of the six endpoints.
+2. Set `pamAccessRequestSigningMode = optional` on the portal. This already
+   refuses a _bad_ signature; it only waives the requirement to sign.
+3. Roll `request_signing_secret` out to every host.
+4. Confirm every host signs — a host that is silently unsigned is invisible
+   until step 5, and then it is not.
+5. Only then set `required`.
+
+Doing it in any other order is how this breaks badly rather than visibly.
+`/pam/heartbeat` is how every enrolled host renews its access token: switching
+to `required` while one host is unsigned breaks nothing at the moment you flip
+it, and takes that host down hours later, when the access token it still holds
+expires. On a whole fleet, together.
+
+The signature is defence in depth on top of TLS, not a substitute for it. Do
+not relax `verify_ssl` because of it.
 
 ### 4. Check your PAM scope spelling
 

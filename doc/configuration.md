@@ -95,7 +95,33 @@ rate_limit_max_lockout = 3600
 # notify_enabled = true
 # notify_url = https://alerts.example.com/webhook
 # notify_secret = your-hmac-secret
+
+# Request signing (optional); must match the portal's
+# pamAccessRequestSigningSecret. One value for the whole fleet.
+# request_signing_secret = 0123456789abcdef...
 ```
+
+### Request signing
+
+`request_signing_secret` turns on the `X-Signature-256` / `X-Timestamp` /
+`X-Nonce` headers on every `/pam/` call this host makes — the PAM module,
+`ob-cert-daemon`, `ob-heartbeat`, `ob-bastion-id`, `ob-enroll` and
+`ob-session-monitor`. It is defence in depth on top of TLS, not a substitute
+for it.
+
+The secret is fleet-wide and must equal the portal's
+`pamAccessRequestSigningSecret`: the signature proves that the caller is part of
+the fleet, it does not identify which host is calling. The portal's
+`pamAccessRequestSigningMode` decides what happens to an unsigned call — `off`,
+`optional` (a signature that is present must verify) or `required`.
+
+Do not switch the portal to `required` before every host holds the secret and
+has been seen signing. `/pam/heartbeat` is how a host renews its access token,
+so an unsigned host does not fail when you flip the switch: it fails hours
+later, when the token it is still holding expires. The full order is in
+[UPGRADE-NOTES.md](../UPGRADE-NOTES.md).
+
+The value is taken literally, `#` included (see the comment rules above).
 
 For detailed documentation on specific features:
 

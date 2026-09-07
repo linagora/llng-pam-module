@@ -89,7 +89,7 @@ target_include_directories(test_ob_cert_proto PRIVATE ${CMAKE_SOURCE_DIR}/includ
 add_test(NAME test_ob_cert_proto COMMAND test_ob_cert_proto)
 
 # Test ob_client structures and functions
-add_executable(test_ob_client test_ob_client.c ../src/ob_client.c ../src/jwt_utils.c)
+add_executable(test_ob_client test_ob_client.c ../src/ob_client.c ../src/jwt_utils.c ../src/ob_sign.c)
 target_include_directories(test_ob_client PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
@@ -103,6 +103,16 @@ target_link_libraries(test_ob_client
     pthread
 )
 add_test(NAME test_ob_client COMMAND test_ob_client)
+
+# Request signing: the wire format the portal verifies (#247)
+add_executable(test_ob_sign test_ob_sign.c ../src/ob_sign.c ../src/str_utils.c)
+target_include_directories(test_ob_sign PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${OPENSSL_INCLUDE_DIRS}
+)
+target_compile_definitions(test_ob_sign PRIVATE _GNU_SOURCE)
+target_link_libraries(test_ob_sign ${OPENSSL_LIBRARIES})
+add_test(NAME test_ob_sign COMMAND test_ob_sign)
 
 # Test authorization cache
 add_executable(test_auth_cache test_auth_cache.c ../src/auth_cache.c ../src/cache_key.c)
