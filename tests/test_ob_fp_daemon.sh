@@ -25,6 +25,8 @@
 #   - a malformed fingerprint is refused
 #   - a malformed algorithm/blob degrades to .fp only, it does not fail
 #   - the daemon re-asserts 0700 on the spool directory it is handed
+#   - a deposit from a uid that does not own the socket is refused
+#   - an anchor that is not root-owned is refused (strict-uid build)
 #   - neither shipped helper writes the spool directly any more
 #
 # The daemon is normally socket-activated by systemd with Accept=yes, which
@@ -42,10 +44,10 @@ pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); echo "  PASS: $1"; }
 fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); echo "  FAIL: $1${2:+ - $2}"; }
 run_test() { TESTS_RUN=$((TESTS_RUN + 1)); "$@"; }
 
-DAEMON=""
-for c in "$ROOT_DIR/build/ob-fp-daemon" "$(command -v ob-fp-daemon 2>/dev/null)"; do
-    [ -n "$c" ] && [ -x "$c" ] && { DAEMON="$c"; break; }
-done
+# The relaxed test build (see tests/CMakeLists.txt), not the shipped binary:
+# its spool and socket paths live in the build tree.
+DAEMON="$ROOT_DIR/build/tests/ob-fp-daemon-testbuild"
+[ -x "$DAEMON" ] || DAEMON=""
 SUBMIT=""
 for c in "$ROOT_DIR/build/ob-fp-submit" "$(command -v ob-fp-submit 2>/dev/null)"; do
     [ -n "$c" ] && [ -x "$c" ] && { SUBMIT="$c"; break; }
@@ -61,58 +63,45 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 is required"; exit 0
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"; [ -n "${SOCAT_PID:-}" ] && kill "$SOCAT_PID" 2>/dev/null' EXIT
 
-SPOOL="$WORK/ssh-fp"
-# Inside the namespace this is the daemon's real, compiled-in path: the test
-# exercises the shipped default rather than an override.
-SOCK="/run/open-bastion/ssh-fp.sock"
 FP="SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHI"
 ALG="ssh-ed25519"
 BLOB="AAAAC3NzaC1lZDI1NTE5AAAAIExampleBlobForTesting0123456789abcd"
 
-# The daemon hard-codes its spool path at compile time, so the test runs it
-# inside a user+mount namespace with a tmpfs on /run: the compiled-in path then
-# lands in throwaway storage, and `unshare -r` makes us uid 0 there, which is
-# what lets the daemon chown the spool exactly as root does on a real host.
-if ! unshare -rm true 2>/dev/null; then
-    echo "SKIP: unprivileged mount namespaces unavailable (need unshare -rm)"
-    exit 0
-fi
+# The shipped ob-fp-daemon hard-codes /run/open-bastion/{ssh-fp,ssh-fp.sock}.
+# A test can only reach those through a mount namespace, and unprivileged user
+# namespaces are restricted on Ubuntu 24.04 -- a test that needed one would SKIP
+# in CI, and a skip reads as a pass. So the suite drives ob-fp-daemon-testbuild:
+# the same source with the two paths redefined into the build tree. Nothing
+# about the logic under test differs; only two string constants do.
+DAEMON_SPOOL="$(dirname "$DAEMON")/fp-spool"
+SOCK="$(dirname "$DAEMON")/fp.sock"
 
 # Run one deposit end to end.
 #   $1 = name the submitting process runs under ("sshd-session" to look like a
 #        real anchor, anything else to look like a stray process)
 #   $2 = request body sent to the daemon
 #   $3 = mode to pre-create the spool directory with (default 700)
-# Sets DEPOSIT_RC, DEPOSIT_ERR, ANCHOR, SPOOL_MODE, and copies the resulting
-# drops (with their modes) out of the namespace into $SPOOL.
+# Sets DEPOSIT_RC, DEPOSIT_ERR, ANCHOR and SPOOL_MODE.
 deposit() {
     local comm="$1" body="$2" premode="${3:-700}"
-    local script="$WORK/run.sh"
     printf '%s' "$body" > "$WORK/body"
-    rm -rf "$SPOOL"; mkdir -p "$SPOOL"
-    : > "$WORK/submit.err"; : > "$WORK/anchor.pid"; : > "$WORK/spoolmode"
+    rm -rf "$DAEMON_SPOOL"; mkdir -p "$DAEMON_SPOOL"; chmod "$premode" "$DAEMON_SPOOL"
+    rm -f "$SOCK"
+    : > "$WORK/submit.err"; : > "$WORK/anchor.pid"
 
-    cat > "$script" <<EOF
-set -u
-# tmpfs on /run: writable in the namespace, and the daemon's compiled-in
-# /run/open-bastion/ssh-fp therefore resolves here rather than on the host.
-mount -t tmpfs tmpfs /run || exit 90
-mkdir -p /run/open-bastion/ssh-fp || exit 91
-chmod $premode /run/open-bastion/ssh-fp || exit 92
+    # systemd's Accept=yes hands the daemon one connection on fd 0 and fd 1.
+    # ",nofork" is essential: plain EXEC: makes socat RELAY through a pipe, so
+    # SO_PEERCRED would report socat instead of the depositing process and every
+    # ancestry check below would be measuring the wrong tree.
+    socat UNIX-LISTEN:"$SOCK",fork EXEC:"$DAEMON",nofork 2>"$WORK/daemon.err" &
+    SOCAT_PID=$!
+    for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.05; done
 
-# systemd's Accept=yes hands the daemon one connection on fd 0 and fd 1.
-# ",nofork" is essential: plain EXEC: makes socat RELAY through a pipe, so
-# SO_PEERCRED would report socat instead of the depositing process and every
-# ancestry check would be measuring the wrong tree. With nofork the child execs
-# the daemon directly on the accepted socket, which is what systemd does.
-socat UNIX-LISTEN:"$SOCK",fork EXEC:"$DAEMON",nofork 2>"$WORK/daemon.err" &
-sp=\$!
-for _ in \$(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.05; done
-
-# Rename the submitting process so the daemon's /proc walk sees the anchor we
-# want, then submit from a child of it -- exactly the shape sshd produces
-# (ob-fp-submit <- ob-ssh-principals <- sshd-session).
-python3 - "$comm" "$SUBMIT" "$WORK/body" "$WORK/anchor.pid" "$WORK/submit.err" <<'PY_EOF'
+    # Rename the submitting process so the daemon's /proc walk sees the anchor
+    # we want, then submit from a child of it -- exactly the shape sshd produces
+    # (ob-fp-submit <- ob-ssh-principals <- sshd-session).
+    OB_FP_SOCKET="$SOCK" python3 - "$comm" "$SUBMIT" "$WORK/body" \
+        "$WORK/anchor.pid" "$WORK/submit.err" <<'PY_EOF'
 import ctypes, os, subprocess, sys
 comm, submit, body_path, anchor_path, err_path = sys.argv[1:6]
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -123,17 +112,9 @@ with open(body_path, "rb") as b, open(err_path, "wb") as e:
     r = subprocess.run([submit], stdin=b, stderr=e, stdout=subprocess.DEVNULL)
 sys.exit(r.returncode)
 PY_EOF
-rc=\$?
-kill \$sp 2>/dev/null
-
-# Carry the results out: /run is a tmpfs that dies with the namespace.
-stat -c '%a' /run/open-bastion/ssh-fp > "$WORK/spoolmode" 2>/dev/null || :
-cp -a /run/open-bastion/ssh-fp/. "$SPOOL/" 2>/dev/null || :
-exit \$rc
-EOF
-
-    unshare -rm sh "$script" >/dev/null 2>&1
     DEPOSIT_RC=$?
+    kill "$SOCAT_PID" 2>/dev/null; wait "$SOCAT_PID" 2>/dev/null; SOCAT_PID=""
+
     DEPOSIT_ERR=$(cat "$WORK/submit.err" 2>/dev/null)
     # A connect failure is a broken harness, not a refusal. Without this, every
     # "is it refused?" test below would pass by never reaching the daemon.
@@ -143,7 +124,7 @@ EOF
             DEPOSIT_RC=99 ;;
     esac
     ANCHOR=$(cat "$WORK/anchor.pid" 2>/dev/null)
-    SPOOL_MODE=$(cat "$WORK/spoolmode" 2>/dev/null)
+    SPOOL_MODE=$(stat -c '%a' "$DAEMON_SPOOL" 2>/dev/null)
 }
 
 # ── 1. The nominal deposit ────────────────────────────────────────────────────
@@ -157,34 +138,34 @@ $BLOB
              "rc=$DEPOSIT_RC err=$DEPOSIT_ERR"
         return
     fi
-    if [ ! -f "$SPOOL/$ANCHOR.fp" ]; then
+    if [ ! -f "$DAEMON_SPOOL/$ANCHOR.fp" ]; then
         fail "the drop lands on the derived anchor" \
-             "no $ANCHOR.fp; spool holds: $(ls "$SPOOL" 2>/dev/null | tr '\n' ' ')"
+             "no $ANCHOR.fp; spool holds: $(ls "$DAEMON_SPOOL" 2>/dev/null | tr '\n' ' ')"
         return
     fi
     pass "a deposit under an sshd-session anchor lands on that anchor"
 
     # Byte-for-byte the pre-#249 content: an older pam_openbastion reads this
     # file and must not be able to tell that a daemon wrote it.
-    if [ "$(cat "$SPOOL/$ANCHOR.fp")" = "$FP" ]; then
+    if [ "$(cat "$DAEMON_SPOOL/$ANCHOR.fp")" = "$FP" ]; then
         pass "the .fp drop keeps its exact pre-#249 content"
     else
         fail "the .fp drop keeps its exact pre-#249 content" \
-             "got '$(cat "$SPOOL/$ANCHOR.fp")'"
+             "got '$(cat "$DAEMON_SPOOL/$ANCHOR.fp")'"
     fi
 
-    if [ -f "$SPOOL/$ANCHOR.key" ] \
-       && grep -q '^v=1$' "$SPOOL/$ANCHOR.key" \
-       && grep -q "^alg=$ALG$" "$SPOOL/$ANCHOR.key" \
-       && grep -q "^key=$BLOB$" "$SPOOL/$ANCHOR.key"; then
+    if [ -f "$DAEMON_SPOOL/$ANCHOR.key" ] \
+       && grep -q '^v=1$' "$DAEMON_SPOOL/$ANCHOR.key" \
+       && grep -q "^alg=$ALG$" "$DAEMON_SPOOL/$ANCHOR.key" \
+       && grep -q "^key=$BLOB$" "$DAEMON_SPOOL/$ANCHOR.key"; then
         pass "the v1 .key drop carries v=1 / alg= / key="
     else
         fail "the v1 .key drop carries v=1 / alg= / key=" \
-             "got '$(cat "$SPOOL/$ANCHOR.key" 2>/dev/null | tr '\n' ' ')'"
+             "got '$(cat "$DAEMON_SPOOL/$ANCHOR.key" 2>/dev/null | tr '\n' ' ')'"
     fi
 
     local modes
-    modes=$(find "$SPOOL" -type f -printf '%m ' 2>/dev/null)
+    modes=$(find "$DAEMON_SPOOL" -type f -printf '%m ' 2>/dev/null)
     if [ "$modes" = "600 600 " ] || [ "$modes" = "600 600" ]; then
         pass "drops are mode 0600"
     else
@@ -203,12 +184,12 @@ $BLOB
 99999
 anchor=99999
 "
-    if [ -f "$SPOOL/99999.fp" ]; then
+    if [ -f "$DAEMON_SPOOL/99999.fp" ]; then
         fail "a client cannot name the anchor it deposits for" \
              "the request steered the drop to PID 99999"
         return
     fi
-    if [ "$DEPOSIT_RC" = "0" ] && [ -f "$SPOOL/$ANCHOR.fp" ]; then
+    if [ "$DEPOSIT_RC" = "0" ] && [ -f "$DAEMON_SPOOL/$ANCHOR.fp" ]; then
         pass "extra request lines cannot redirect the drop to another PID"
     else
         # Refusing outright is also an acceptable answer here; what must never
@@ -228,11 +209,11 @@ $ALG
 $BLOB
 "
     if [ "$DEPOSIT_RC" != "0" ] && [ "$DEPOSIT_RC" != "99" ] \
-       && [ -z "$(ls -A "$SPOOL" 2>/dev/null)" ]; then
+       && [ -z "$(ls -A "$DAEMON_SPOOL" 2>/dev/null)" ]; then
         pass "a deposit outside any SSH connection is refused and writes nothing"
     else
         fail "a deposit outside any SSH connection is refused" \
-             "rc=$DEPOSIT_RC spool: $(ls -A "$SPOOL" 2>/dev/null | tr '\n' ' ')"
+             "rc=$DEPOSIT_RC spool: $(ls -A "$DAEMON_SPOOL" 2>/dev/null | tr '\n' ' ')"
     fi
 }
 
@@ -243,11 +224,11 @@ $ALG
 $BLOB
 "
     if [ "$DEPOSIT_RC" != "0" ] && [ "$DEPOSIT_RC" != "99" ] \
-       && [ -z "$(ls -A "$SPOOL" 2>/dev/null)" ]; then
+       && [ -z "$(ls -A "$DAEMON_SPOOL" 2>/dev/null)" ]; then
         pass "a malformed fingerprint is refused and writes nothing"
     else
         fail "a malformed fingerprint is refused" \
-             "rc=$DEPOSIT_RC spool: $(ls -A "$SPOOL" 2>/dev/null | tr '\n' ' ')"
+             "rc=$DEPOSIT_RC spool: $(ls -A "$DAEMON_SPOOL" 2>/dev/null | tr '\n' ' ')"
     fi
 }
 
@@ -259,11 +240,11 @@ $BLOB
     # The fingerprint is what the LLNG binding needs; losing the key metadata
     # must not cost us the binding as well.
     if [ "$DEPOSIT_RC" = "0" ] \
-       && [ -f "$SPOOL/$ANCHOR.fp" ] && [ ! -f "$SPOOL/$ANCHOR.key" ]; then
+       && [ -f "$DAEMON_SPOOL/$ANCHOR.fp" ] && [ ! -f "$DAEMON_SPOOL/$ANCHOR.key" ]; then
         pass "a malformed algorithm drops .key but keeps the fingerprint"
     else
         fail "a malformed algorithm drops .key but keeps the fingerprint" \
-             "rc=$DEPOSIT_RC spool: $(ls -A "$SPOOL" 2>/dev/null | tr '\n' ' ')"
+             "rc=$DEPOSIT_RC spool: $(ls -A "$DAEMON_SPOOL" 2>/dev/null | tr '\n' ' ')"
     fi
 }
 
@@ -282,6 +263,115 @@ $BLOB
     else
         fail "the daemon re-asserts 0700 on a loosened spool directory" \
              "mode is $mode"
+    fi
+}
+
+# ── 5b. The uid gate ─────────────────────────────────────────────────────────
+# The daemon takes the uid allowed to deposit from the owner of its listening
+# socket (SocketUser=nobody in the shipped unit). Every other test here connects
+# to that socket, so the depositor and the owner are the same user and the gate
+# is satisfied for the right reason but never exercised in the negative.
+#
+# Here socat listens somewhere else, so the daemon stats a socket that does not
+# exist, falls back to the shipped default (nobody), and must refuse an ordinary
+# user. Without this, deleting the SO_PEERCRED check entirely would still pass
+# the whole suite.
+test_uid_gate_refuses_a_stranger() {
+    if [ "$(id -u)" = "0" ]; then
+        # root is accepted by design (it can write the spool anyway).
+        pass "uid gate: skipped, running as root"
+        return
+    fi
+    local other
+    other="$(dirname "$DAEMON")/other.sock"
+    rm -rf "$DAEMON_SPOOL"; mkdir -p "$DAEMON_SPOOL"; chmod 700 "$DAEMON_SPOOL"
+    rm -f "$other" "$SOCK"
+    printf '%s\n%s\n%s\n' "$FP" "$ALG" "$BLOB" > "$WORK/body"
+
+    socat UNIX-LISTEN:"$other",fork EXEC:"$DAEMON",nofork 2>/dev/null &
+    local sp=$!
+    for _ in $(seq 1 50); do [ -S "$other" ] && break; sleep 0.05; done
+
+    local err rc
+    err=$(OB_FP_SOCKET="$other" python3 - "$SUBMIT" "$WORK/body" <<'PY_EOF' 2>&1
+import ctypes, subprocess, sys
+submit, body_path = sys.argv[1:3]
+ctypes.CDLL("libc.so.6").prctl(15, b"sshd-session", 0, 0, 0)
+with open(body_path, "rb") as b:
+    r = subprocess.run([submit], stdin=b, stderr=subprocess.PIPE,
+                       stdout=subprocess.DEVNULL)
+# The daemon's reason is on the submitter's stderr; hand it to the shell.
+sys.stdout.write(r.stderr.decode("utf-8", "replace"))
+sys.exit(r.returncode)
+PY_EOF
+    ); rc=$?
+    kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+    rm -f "$other"
+
+    if [ "$rc" != "0" ] \
+       && [ -z "$(ls -A "$DAEMON_SPOOL" 2>/dev/null)" ] \
+       && printf '%s' "$err" | grep -q "expected the principals helper uid"; then
+        pass "a deposit from a uid that does not own the socket is refused"
+    else
+        fail "a deposit from a uid that does not own the socket is refused" \
+             "rc=$rc err=$(printf '%s' "$err" | tr '\n' ' ')"
+    fi
+}
+
+# ── 5c. The anchor must be root-owned ────────────────────────────────────────
+# The anchor is chosen by process NAME, and prctl(PR_SET_NAME) takes fifteen
+# characters while "sshd-session" is twelve -- so a local user can put a process
+# called sshd-session in their own ancestry. Requiring the anchor to be
+# root-owned is what excludes it.
+#
+# Every other test here drives the relaxed build, whose fake anchor is owned by
+# the user running the suite and therefore satisfies that check either way:
+# deleting it outright would leave the suite green (confirmed by mutation). This
+# one drives ob-fp-daemon-strictuid, which compiles the literal "must be root"
+# the shipped binary has, and must refuse the very same anchor.
+test_anchor_must_be_root_owned() {
+    local strict
+    strict="$(dirname "$DAEMON")/ob-fp-daemon-strictuid"
+    if [ ! -x "$strict" ]; then
+        fail "the anchor-owner check is live" "ob-fp-daemon-strictuid not built"
+        return
+    fi
+    if [ "$(id -u)" = "0" ]; then
+        pass "anchor-owner check: skipped, running as root"
+        return
+    fi
+    # Exactly the strict build's compiled-in OB_FP_SOCKET, so helper_uid()
+    # resolves to us and the uid gate passes -- otherwise that gate fires first
+    # and we would be asserting on the wrong refusal.
+    local sock
+    sock="$(dirname "$DAEMON")/fp-strict.sock"
+    rm -f "$sock"
+    printf '%s\n%s\n%s\n' "$FP" "$ALG" "$BLOB" > "$WORK/body"
+
+    socat UNIX-LISTEN:"$sock",fork EXEC:"$strict",nofork 2>/dev/null &
+    local sp=$!
+    for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.05; done
+
+    local err rc
+    err=$(OB_FP_SOCKET="$sock" python3 - "$SUBMIT" "$WORK/body" <<'PY_EOF' 2>&1
+import ctypes, subprocess, sys
+submit, body_path = sys.argv[1:3]
+ctypes.CDLL("libc.so.6").prctl(15, b"sshd-session", 0, 0, 0)
+with open(body_path, "rb") as b:
+    r = subprocess.run([submit], stdin=b, stderr=subprocess.PIPE,
+                       stdout=subprocess.DEVNULL)
+sys.stdout.write(r.stderr.decode("utf-8", "replace"))
+sys.exit(r.returncode)
+PY_EOF
+    ); rc=$?
+    kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+    rm -f "$sock"
+
+    if [ "$rc" != "0" ] && printf '%s' "$err" | grep -q "not root: refusing"; then
+        pass "an anchor that is not root-owned is refused"
+    else
+        fail "an anchor that is not root-owned is refused" \
+             "rc=$rc err=$(printf '%s' "$err" | tr '\n' ' ')"
     fi
 }
 
@@ -344,6 +434,8 @@ run_test test_requires_sshd_ancestor
 run_test test_bad_fingerprint_refused
 run_test test_bad_algorithm_degrades
 run_test test_daemon_reasserts_spool_mode
+run_test test_uid_gate_refuses_a_stranger
+run_test test_anchor_must_be_root_owned
 run_test test_helpers_do_not_write_the_spool
 run_test test_helpers_deposit_via_submit
 run_test test_setup_scripts_own_the_spool_as_root

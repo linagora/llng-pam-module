@@ -2943,11 +2943,15 @@ PAM_VISIBLE PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh,
             /*
              * Say where the proof came from. SSH_USER_AUTH is asserted by sshd
              * itself; a spool drop is asserted by whatever owns
-             * /run/open-bastion/ssh-fp, which sshd forces to be a non-root user
-             * (AuthorizedPrincipalsCommandUser, nobody in every shipped setup).
-             * A service account elevating on the strength of the second is a
-             * root grant whose integrity rests on that account, and the audit
-             * trail should be able to say so after the fact.
+             * /run/open-bastion/ssh-fp. Since #249 that is root: ob-fp-daemon
+             * writes the drops and the principals helper, which sshd forces to
+             * run unprivileged, only deposits through it. The gap this warning
+             * was written for is therefore closed on a migrated host -- but a
+             * host that upgraded the package without re-running
+             * ob-bastion-setup still has the old nobody-owned directory (the
+             * separate warning in read_spool_drop() names that case), and in
+             * either world the audit trail should be able to say after the fact
+             * that the fingerprint came from the spool rather than from sshd.
              */
             if (fp_from_spool) {
                 OB_LOG_WARN(pamh,

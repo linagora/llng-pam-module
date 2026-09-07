@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs code execution as the helper user _inside the target connection's own
   process tree_, not merely as `nobody` somewhere on the host.
 
+  There is deliberately no configuration key for the depositing user: the
+  allowed uid is the owner of the listening socket, so `SocketUser=` in
+  `ob-fp.socket` is the single place it is written.
+
   Enabled by `ob-bastion-setup` / `ob-backend-setup` and re-asserted by the
   postinst on both roles. A host that upgrades without re-running setup keeps
   the old `nobody`-owned directory, and therefore the old trust root, until the

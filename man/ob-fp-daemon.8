@@ -45,10 +45,25 @@ anything there.
 .BR SO_PEERCRED ,
 which the kernel fills in at
 .BR connect (2)
-time and no client can forge, must be the
+time and no client can forge, must be the owner of the listening socket \(em or
+root.
+.PP
+That owner comes from
+.B SocketUser
+in
+.IR ob-fp.socket ,
+which ships as \fBnobody\fR to match the
 .B AuthorizedPrincipalsCommandUser
-(\fBnobody\fR unless \fBprincipals_helper_user\fR says otherwise in
-\fI/etc/open\-bastion/openbastion.conf\fR), or root.
+both setup scripts configure. There is no configuration key for it: the socket
+unit is the single place the answer is written, so an administrator who changes
+the principals user and overrides
+.B SocketUser
+in a drop-in gets a daemon that follows rather than one that locks them out.
+.PP
+With
+.B SocketMode=0600
+the kernel already refuses anyone else, so this check is defence in depth \(em
+it keeps holding if a drop-in loosens the mode.
 .SS The session, which is derived and not received
 This is the check that carries the weight. The anchor pid is derived from the
 .B depositing process's own
@@ -100,9 +115,6 @@ The spool. \fB0700 root:root\fR; the daemon re-asserts owner and mode on every
 deposit, so a host upgraded from the pre-#249 \fBnobody\fR-owned directory is
 migrated on first use rather than left on the old trust root while appearing
 fixed.
-.TP
-.I /etc/open-bastion/openbastion.conf
-Read for \fBprincipals_helper_user\fR only.
 .SH DIAGNOSTICS
 Every refusal is logged to
 .B LOG_AUTHPRIV

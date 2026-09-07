@@ -71,12 +71,27 @@
 #define OB_FP_SPOOL_DIR "/run/open-bastion/ssh-fp"
 #endif
 
-#ifndef OB_CONFIG
-#define OB_CONFIG "/etc/open-bastion/openbastion.conf"
+#ifndef OB_FP_SOCKET
+#define OB_FP_SOCKET "/run/open-bastion/ssh-fp.sock"
 #endif
 
 /* Default AuthorizedPrincipalsCommandUser in every shipped setup. */
 #define OB_FP_DEFAULT_HELPER_USER "nobody"
+
+/*
+ * The uid this daemon considers privileged: the owner an sshd anchor must have,
+ * and the owner it gives the spool. In the shipped binary this is literally 0,
+ * so the production code carries no test affordance at all. The test build
+ * sets OB_FP_PRIV_UID_IS_EUID (tests/CMakeLists.txt), which is what lets the
+ * suite exercise these paths without root -- unprivileged user namespaces are
+ * restricted on Ubuntu 24.04, so a test that needed one would skip in CI, and a
+ * skip reads as a pass.
+ */
+#ifdef OB_FP_PRIV_UID_IS_EUID
+#define OB_FP_PRIV_UID (geteuid())
+#else
+#define OB_FP_PRIV_UID ((uid_t)0)
+#endif
 
 /*
  * Request cap. The largest legitimate payload is an RSA-4096 certificate blob
@@ -148,49 +163,47 @@ static int valid_blob(const char *s)
 /* ------------------------------------------------------------ helper identity */
 
 /*
- * Which uid is allowed to deposit. Defaults to nobody, which is what both
- * shipped setups put in AuthorizedPrincipalsCommandUser; an admin who changed
- * it can say so rather than discover the binding has silently stopped working.
- * Parsed here rather than through config.c because this binary deliberately
- * does not link the PAM module's configuration reader -- it needs one key.
+ * Which uid is allowed to deposit: the owner of the listening socket.
+ *
+ * That is the one place the answer is already written down. ob-fp.socket sets
+ * `SocketUser=nobody`, matching the AuthorizedPrincipalsCommandUser both setup
+ * scripts configure, and an admin who changes one and overrides the other in a
+ * drop-in gets a daemon that follows rather than one that locks them out.
+ *
+ * There is deliberately no config key for this. An earlier version read
+ * `principals_helper_user` from openbastion.conf, which was a false
+ * affordance in three separate ways: config.c does not know the key, so
+ * setting it logged "unknown configuration key" at every login; both setups
+ * hard-code `AuthorizedPrincipalsCommandUser nobody`; and the socket is
+ * `SocketUser=nobody 0600`, so a helper running as anyone else could not have
+ * connected in the first place.
+ *
+ * With SocketMode=0600 the kernel already enforces this, so the check is
+ * defence in depth -- it keeps holding if a drop-in loosens the mode.
  */
 static uid_t helper_uid(void)
 {
-    char user[64];
-    snprintf(user, sizeof(user), "%s", OB_FP_DEFAULT_HELPER_USER);
-
-    FILE *f = fopen(OB_CONFIG, "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
-            if (strncmp(p, "principals_helper_user", 22) != 0) continue;
-            char *eq = strchr(p, '=');
-            if (!eq) continue;
-            char *v = eq + 1;
-            while (*v == ' ' || *v == '\t') v++;
-            char *end = v + strlen(v);
-            while (end > v && (end[-1] == '\n' || end[-1] == '\r'
-                               || end[-1] == ' ' || end[-1] == '\t')) end--;
-            *end = '\0';
-            if (*v) snprintf(user, sizeof(user), "%s", v);
-        }
-        fclose(f);
+    struct stat st;
+    if (stat(OB_FP_SOCKET, &st) == 0) {
+        return st.st_uid;
     }
 
+    /*
+     * The socket we are serving should exist; if it cannot be stat'd, fall
+     * back to the shipped default rather than refusing every deposit over a
+     * transient error.
+     */
     struct passwd pw, *pwp = NULL;
     char buf[4096];
-    if (getpwnam_r(user, &pw, buf, sizeof(buf), &pwp) != 0 || !pwp) {
-        /*
-         * No such user. Returning an impossible uid fails closed: every
-         * deposit is refused and says why, rather than defaulting to a uid
-         * that happens to exist.
-         */
-        syslog(LOG_ERR, "ob-fp-daemon: principals helper user '%s' does not "
-                        "exist; refusing every deposit", user);
+    if (getpwnam_r(OB_FP_DEFAULT_HELPER_USER, &pw, buf, sizeof(buf), &pwp) != 0
+        || !pwp) {
+        syslog(LOG_ERR, "ob-fp-daemon: cannot stat %s and no '%s' user: "
+                        "refusing every deposit",
+               OB_FP_SOCKET, OB_FP_DEFAULT_HELPER_USER);
         return (uid_t)-1;
     }
+    syslog(LOG_WARNING, "ob-fp-daemon: cannot stat %s, falling back to '%s'",
+           OB_FP_SOCKET, OB_FP_DEFAULT_HELPER_USER);
     return pw.pw_uid;
 }
 
@@ -277,7 +290,12 @@ static int ensure_spool_dir(void)
     if (fstat(dfd, &st) != 0) { close(dfd); return -1; }
     if (!S_ISDIR(st.st_mode)) { close(dfd); errno = ENOTDIR; return -1; }
 
-    if (st.st_uid != 0 && fchown(dfd, 0, 0) != 0) { close(dfd); return -1; }
+    /* Own the directory: the 0700 root spool #249 is about. */
+    uid_t want = OB_FP_PRIV_UID;
+    if (st.st_uid != want && fchown(dfd, want, (gid_t)-1) != 0) {
+        close(dfd);
+        return -1;
+    }
     if ((st.st_mode & 07777) != 0700 && fchmod(dfd, 0700) != 0) {
         close(dfd);
         return -1;
@@ -367,7 +385,7 @@ int main(void)
 
     uid_t allowed = helper_uid();
     if (allowed == (uid_t)-1) {
-        reply(0, "no principals helper user configured");
+        reply(0, "cannot determine which uid may deposit");
         return 1;
     }
     if (cred.uid != allowed && cred.uid != 0) {
@@ -380,14 +398,19 @@ int main(void)
     }
 
     /*
-     * Pin the peer's /proc entry before walking it. If the peer exits and its
-     * pid is recycled, reads through this fd fail rather than silently
-     * describing a different process.
+     * The peer must still exist for its ancestry to mean anything. This is a
+     * liveness check and nothing more: find_anchor() below reopens /proc by
+     * path, so holding a descriptor here would not pin the walk against pid
+     * recycling. Closing that window properly would mean comparing the peer's
+     * start time before and after, and it is not worth it -- to exploit the
+     * race an attacker would have to get the depositing pid recycled into a
+     * process of their own, under a root-owned sshd-session, in the microseconds
+     * between connect() and this read, and the drop they would win is the one
+     * for the session they would already have to be inside.
      */
     char peer_proc[64];
     snprintf(peer_proc, sizeof(peer_proc), "/proc/%d", (int)cred.pid);
-    int peer_fd = open(peer_proc, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (peer_fd < 0) {
+    if (access(peer_proc, F_OK) != 0) {
         reply(0, "the depositing process is already gone");
         return 1;
     }
@@ -397,7 +420,6 @@ int main(void)
      *    process from depositing on a session it is not part of.
      */
     pid_t anchor = find_anchor(cred.pid);
-    close(peer_fd);
     if (anchor <= 1) {
         reply(0, "no sshd-session ancestor: refusing a deposit that is not "
                  "part of an SSH connection");
@@ -413,7 +435,17 @@ int main(void)
         reply(0, "the sshd anchor vanished mid-deposit");
         return 1;
     }
-    if (ast.st_uid != 0) {
+    /*
+     * The anchor is chosen by process NAME, and prctl(PR_SET_NAME) takes
+     * fifteen characters while "sshd-session" is twelve -- so without this a
+     * local user could put a process called sshd-session in their own ancestry
+     * and pick which drop gets written. Requiring the anchor to be root-owned
+     * excludes every process a user controls, because sshd's per-connection
+     * monitor is root and theirs is not.
+     *
+     * OB_FP_PRIV_UID is a literal 0 in the shipped binary; see its definition.
+     */
+    if (ast.st_uid != OB_FP_PRIV_UID) {
         char m[160];
         snprintf(m, sizeof(m),
                  "sshd anchor %d is owned by uid %u, not root: refusing",

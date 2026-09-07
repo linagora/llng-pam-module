@@ -36,7 +36,6 @@ SystemCallErrorNumber=EPERM
 # The spool is the only thing it writes. ProtectSystem=strict makes everything
 # else read-only, so this line is what grants the one path it needs.
 ReadWritePaths=/run/open-bastion
-ReadOnlyPaths=/etc/open-bastion
 # It must see the real process tree to derive the sshd anchor from the peer's
 # ancestry, so /proc cannot be hidden or subset'd here.
 ProcSubset=all
