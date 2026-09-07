@@ -55,20 +55,31 @@ read from a different endpoint — so **`allowed_bastions` files do not need to
 be rewritten**, and no bastion needs re-enrolling (re-enrolling would in fact
 change the id and break the backends' allowlists).
 
-### 2. Unbound vouchers drop from 12 h to 15 min
+### 2. Check the fingerprint spool, or hops fail after 15 minutes
 
-A bastion voucher minted without an SSH fingerprint now lives
-`pamAccessBastionVoucherUnboundTtl` (900 s) instead of the full 12 h. The
-fingerprint spool is written by `ob-ssh-principals` to
-`/run/open-bastion/ssh-fp/<anchor>.fp`; where it is missing, `ob-ssh` hops
-start failing about fifteen minutes into a session with `reason:
-voucher_expired`, instead of silently running unbound for half a day.
+Vouchers minted without an SSH fingerprint now expire after 15 minutes
+instead of 12 hours: on a host where the spool is not being written,
+`ob-ssh` hops start failing about fifteen minutes into a session with
+`reason: voucher_expired` — a visible outage where there used to be a
+silent weakening.
 
-This is a **visible outage where there used to be a silent weakening**, and it
-is the intended behaviour. Check the spool is being written before upgrading:
-the mechanism and the file layout are in
-[doc/pam-modes.md](doc/pam-modes.md) (§ the fingerprint spool), and the
-security rationale in
+Check on every bastion and backend before upgrading the portal: log in
+with a public key (password logins write no drop), then look **as root**
+for a drop written by that login. The spool is mode `0700`, so an
+unprivileged `ls` gets `Permission denied`, not an empty listing:
+
+```sh
+sudo find /run/open-bastion/ssh-fp -name '*.fp' -newermt '-2 min'
+```
+
+Nothing removes a drop when a session ends, so the directory keeps old
+ones and a non-empty listing proves nothing — it has to be a _fresh_
+drop. No output means the spool is broken: fix it on the host before the
+portal moves to plugins 0.6.0 (after the host upgrade, that is step 6:
+`ob-fp.socket` enabled and the setup script re-run).
+
+Mechanism: [doc/pam-modes.md](doc/pam-modes.md) § How the fingerprint is
+captured; rationale:
 [doc/security/02-ssh-connection.md](doc/security/02-ssh-connection.md).
 
 ### 3. `pamAccessRequestSigningMode = required` — deployable, in this order
