@@ -265,3 +265,31 @@ if(BASH_EXECUTABLE)
 else()
     message(STATUS "bash not found — skipping test_ob_pam_runtime")
 endif()
+
+# A build of ob-fp-daemon whose compiled-in paths point into the build tree.
+# The shipped binary hard-codes /run/open-bastion/{ssh-fp,ssh-fp.sock}, which a
+# test can only reach through a mount namespace -- and unprivileged namespaces
+# are restricted on Ubuntu 24.04, so a test that needed one would SKIP in CI and
+# a skip reads as a pass. Same source, same logic, different constants.
+add_executable(ob-fp-daemon-testbuild ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c)
+# OB_FP_PRIV_UID is 0 in the shipped binary, so the production code carries no
+# test affordance; here it becomes the uid running the suite, which is what lets
+# these paths be exercised without root.
+target_compile_definitions(ob-fp-daemon-testbuild PRIVATE
+    OB_FP_SPOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}/fp-spool"
+    OB_FP_SOCKET="${CMAKE_CURRENT_BINARY_DIR}/fp.sock"
+    OB_FP_PRIV_UID_IS_EUID
+)
+target_compile_options(ob-fp-daemon-testbuild PRIVATE -Wall -Wextra -Werror -D_GNU_SOURCE)
+
+# Same build-tree paths, but WITHOUT OB_FP_PRIV_UID_IS_EUID: the anchor-owner
+# check is the literal "must be root" the shipped binary enforces. The suite
+# uses this to prove that control is live -- with the relaxed build the suite's
+# own fake anchor satisfies it either way, so deleting the check outright would
+# otherwise go unnoticed (verified by mutation).
+add_executable(ob-fp-daemon-strictuid ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c)
+target_compile_definitions(ob-fp-daemon-strictuid PRIVATE
+    OB_FP_SPOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}/fp-spool-strict"
+    OB_FP_SOCKET="${CMAKE_CURRENT_BINARY_DIR}/fp-strict.sock"
+)
+target_compile_options(ob-fp-daemon-strictuid PRIVATE -Wall -Wextra -Werror -D_GNU_SOURCE)

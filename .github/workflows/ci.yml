@@ -41,7 +41,8 @@ jobs:
           libpam0g-dev \
           libsodium-dev \
           curl \
-          jq
+          jq \
+          socat
 
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_LIBSODIUM=ON -DINSTALL_DESKTOP=ON
@@ -85,6 +86,19 @@ jobs:
           echo "Running: $test"
           bash "$test"
         done
+
+    # The loop above treats a SKIP as success, which is right for suites that
+    # need docker or a portal. It is wrong for the fingerprint sink: that suite
+    # is the only thing guarding the trust root moved in #249, and if it skipped
+    # -- no socat, no build -- CI would stay green while testing nothing.
+    - name: The fingerprint sink suite must actually run
+      run: |
+        out=$(bash tests/test_ob_fp_daemon.sh 2>&1); echo "$out"
+        case "$out" in
+          *SKIP*)
+            echo "::error::tests/test_ob_fp_daemon.sh skipped; it must run in CI"
+            exit 1 ;;
+        esac
 
   build-debug:
     name: Build Debug with Sanitizers

@@ -7,9 +7,14 @@
 # sshd does not export SSH_USER_AUTH to the PAM environment during
 # pam_acct_mgmt, so pam_openbastion cannot see which key was presented. The
 # ob-ssh-principals helper — installed by ob-bastion-setup / ob-backend-setup
-# as AuthorizedPrincipalsCommand — therefore drops it in
-# /run/open-bastion/ssh-fp/<anchor>.{fp,key}. This test extracts the helper
-# from BOTH setup scripts (single source of truth) and checks:
+# as AuthorizedPrincipalsCommand — therefore gets it to
+# /run/open-bastion/ssh-fp/<anchor>.{fp,key}. Since #249 it does not write
+# those files itself (it runs as the unprivileged AuthorizedPrincipalsCommand
+# user, and the spool is 0700 root): it deposits through ob-fp-submit and
+# ob-fp-daemon writes them. The stub below plays that pair, so what these tests
+# assert on is what the HELPER produced — which is what they were always about.
+# This test extracts the helper from BOTH setup scripts (single source of
+# truth) and checks:
 #
 #   - the legacy "<anchor>.fp" drop keeps its exact previous content;
 #   - the new "<anchor>.key" drop carries v=1 / fp= / alg= / key=;
@@ -20,8 +25,9 @@
 #   - the backend helper still enforces bastion vouching;
 #   - both sshd_config templates pass %t and %k to the helper.
 #
-# The helper walks /proc to find its per-connection sshd anchor, so the test
-# runs it under a process renamed "sshd-session".
+# The anchor walk now happens in the daemon rather than the helper, but the
+# test still runs the helper under a process named "sshd-session" so the shape
+# matches a real sshd invocation.
 
 set -uo pipefail
 
@@ -57,12 +63,40 @@ extract_helper() {
         "$src" > "$dst"
     [ -s "$dst" ] || return 1
     sed -i \
-        -e "s|^SPOOL_DIR=.*|SPOOL_DIR=\"$SPOOL\"|" \
         -e "s|^ALLOWED_FILE=.*|ALLOWED_FILE=\"$CONF_DIR/allowed_bastions\"|" \
         -e "s|^OB_DIR=.*|OB_DIR=\"$CONF_DIR\"|" \
         "$dst"
     chmod 755 "$dst"
 }
+
+# Since #249 the helper does not write the spool: it deposits through
+# ob-fp-submit and ob-fp-daemon writes the drops as root. This stub stands in
+# for that pair so the assertions below still observe what the helper produced.
+# It reproduces the one daemon-side rule these tests depend on -- an empty
+# algorithm means no .key drop -- and nothing else; the daemon's own behaviour
+# is covered by tests/test_ob_fp_daemon.sh.
+FAKE_SUBMIT="$TMP/fake-submit"
+cat > "$FAKE_SUBMIT" <<'SUBMIT'
+#!/bin/sh
+IFS= read -r fp   || fp=""
+IFS= read -r alg  || alg=""
+IFS= read -r blob || blob=""
+[ -n "$fp" ] || exit 1
+umask 077
+printf '%s\n' "$fp" > "$SPOOL_OUT/deposit.fp"
+if [ -n "$alg" ]; then
+    {
+        printf 'v=1\n'
+        printf 'fp=%s\n' "$fp"
+        printf 'alg=%s\n' "$alg"
+        [ -n "$blob" ] && printf 'key=%s\n' "$blob"
+    } > "$SPOOL_OUT/deposit.key"
+fi
+exit 0
+SUBMIT
+chmod 755 "$FAKE_SUBMIT"
+export OB_FP_SUBMIT="$FAKE_SUBMIT"
+export SPOOL_OUT="$SPOOL"
 
 # Run a helper as a child of the fake sshd-session process. The trailing ":"
 # stops the shell from exec'ing the helper in its own place, which would make

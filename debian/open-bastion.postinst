@@ -391,6 +391,24 @@ if [ "$1" = configure ] \
     done
 fi
 
+# ── Upgrade safety: the SSH fingerprint sink (#249) ──────────────────────────
+# ob-fp.socket ships --no-enable/--no-start like the other sockets, but unlike
+# ob-cert.socket it is needed on BOTH roles: a backend runs an
+# AuthorizedPrincipalsCommand too. Enable it wherever either sshd drop-in
+# exists. Without it the principals helper has nowhere to deposit and the
+# fingerprint binding disappears with no error at login time -- the module logs
+# the missing drop, but the login still succeeds, so nobody notices.
+if [ "$1" = configure ] \
+    && [ -d /run/systemd/system ] \
+    && command -v systemctl >/dev/null 2>&1; then
+    for _ob_role in /etc/ssh/sshd_config.d/*-open-bastion-bastion.conf \
+                    /etc/ssh/sshd_config.d/*-open-bastion-backend.conf; do
+        [ -f "$_ob_role" ] || continue
+        systemctl enable --now ob-fp.socket >/dev/null 2>&1 || true
+        break
+    done
+fi
+
 # ── Upgrade safety: SSH key policy needs the v1 principals helper ────────────
 # pam_openbastion enforces ssh_key_policy_* FAIL-CLOSED (issue #181): with the
 # policy enabled, a key whose type/size cannot be determined is DENIED. The key
