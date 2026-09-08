@@ -531,12 +531,13 @@ this information could be used to:
 
 ### Machine-ID Stability Requirement
 
-The encryption key for cached tokens and secrets is derived from `/etc/machine-id`.
+The encryption key for the authorization cache and the desktop offline
+credential cache is derived from `/etc/machine-id` — combined with
+`/etc/open-bastion/cache.key`, for the offline cache, when one is present.
 
 **Impact of machine-id change**:
 
 - All cached tokens become unreadable (automatic re-authentication required)
-- Encrypted secrets in the secret store become permanently unrecoverable
 - Server enrollment tokens must be re-issued
 
 **Scenarios causing machine-id change**:
