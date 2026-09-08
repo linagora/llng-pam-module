@@ -335,6 +335,15 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
 ### Fixed
 
+- **Three records that contradicted the tree** (#268). `SECURITY.md` still
+  listed "encrypted secrets in the secret store become permanently
+  unrecoverable" among the consequences of a machine-id change, although the
+  `secret_store` module and the `secrets_encrypted` setting were both removed —
+  the main passage was corrected then, this bullet was not. In
+  `doc/security/07-plan-de-traitement.md`, MT51 and MT52 were still "en revue"
+  and "ouvert" with #248 and #252 merged; both now read as delivered and
+  unpublished, and `doc/security/08-dossier-homologation.md` no longer counts
+  MT52 among what keeps R-P7 orange — only the upstream session-store work does.
 - **`ob-service-account-keys` is now shipped** (#263). The
   `AuthorizedKeysCommand` helper that makes a service account usable existed in
   the tree and was installed by **none** of the three packaging paths — not

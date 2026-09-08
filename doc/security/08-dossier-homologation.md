@@ -143,9 +143,10 @@ risques**, et le dossier ne doit pas les confondre :
   par champ avec comparaison-et-échange — n'est livrée par aucune d'elles, et la
   fiche R-P7 le dit explicitement : « les correctifs suppriment des courses
   identifiées, ils ne rendent pas le magasin atomique ». Le statut orange de
-  R-P7 **survit donc à la publication de `0.6.0`**. Ce qui reste après elle est
-  un travail de conception, en amont pour le magasin et côté produit pour MT52
-  (`open-bastion#247`).
+  R-P7 **survit donc à la publication de `0.6.0`**. MT52, la part produit, est
+  livrée depuis (`open-bastion#247`, fermé par la PR `#252`, à publier avec
+  `0.7.0`) ; ce qui reste est un travail de conception **amont** sur le magasin
+  de sessions, et c'est lui qui maintient le statut orange.
 
 L'autorité d'homologation signe donc, pour R-P7, l'acceptation d'un motif connu
 et non refermé — pas celle d'une simple attente de version.
