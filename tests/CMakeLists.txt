@@ -238,6 +238,14 @@ target_link_libraries(test_notify
 )
 add_test(NAME test_notify COMMAND test_notify)
 
+# The sshd anchor walk (#268). ob-fp-daemon and pam_openbastion must derive the
+# SAME pid from the same process tree, from different depths of it; they used to
+# do so from two copies of the walk that agreed only by inspection. There is one
+# implementation now, and this drives it over a synthetic /proc.
+add_executable(test_sshd_anchor test_sshd_anchor.c ../src/sshd_anchor.c)
+target_include_directories(test_sshd_anchor PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME test_sshd_anchor COMMAND test_sshd_anchor)
+
 # Test SSH key policy
 add_executable(test_ssh_key_policy test_ssh_key_policy.c ../src/ssh_key_policy.c)
 target_include_directories(test_ssh_key_policy PRIVATE ${CMAKE_SOURCE_DIR}/include)
@@ -271,7 +279,9 @@ endif()
 # test can only reach through a mount namespace -- and unprivileged namespaces
 # are restricted on Ubuntu 24.04, so a test that needed one would SKIP in CI and
 # a skip reads as a pass. Same source, same logic, different constants.
-add_executable(ob-fp-daemon-testbuild ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c)
+add_executable(ob-fp-daemon-testbuild ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c
+                                    ${CMAKE_SOURCE_DIR}/src/sshd_anchor.c)
+target_include_directories(ob-fp-daemon-testbuild PRIVATE ${CMAKE_SOURCE_DIR}/include)
 # OB_FP_PRIV_UID is 0 in the shipped binary, so the production code carries no
 # test affordance; here it becomes the uid running the suite, which is what lets
 # these paths be exercised without root.
@@ -287,7 +297,9 @@ target_compile_options(ob-fp-daemon-testbuild PRIVATE -Wall -Wextra -Werror -D_G
 # uses this to prove that control is live -- with the relaxed build the suite's
 # own fake anchor satisfies it either way, so deleting the check outright would
 # otherwise go unnoticed (verified by mutation).
-add_executable(ob-fp-daemon-strictuid ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c)
+add_executable(ob-fp-daemon-strictuid ${CMAKE_SOURCE_DIR}/src/ob-fp-daemon.c
+                                    ${CMAKE_SOURCE_DIR}/src/sshd_anchor.c)
+target_include_directories(ob-fp-daemon-strictuid PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(ob-fp-daemon-strictuid PRIVATE
     OB_FP_SPOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}/fp-spool-strict"
     OB_FP_SOCKET="${CMAKE_CURRENT_BINARY_DIR}/fp-strict.sock"

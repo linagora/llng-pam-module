@@ -127,3 +127,22 @@ suite   || tests/test_ob_systemd_units.sh
 why     || #254: unit content must live only in systemd/. Mutating the check
 why     || itself would prove nothing -- this puts the duplicate back, which is
 why     || the situation the check exists to refuse.
+
+id      || sshd-anchor-outermost
+file    || src/sshd_anchor.c
+search  || outermost = pid;         /* keep climbing: a parent one outranks it */
+replace || return pid;
+suite   || tests/test_ob_sshd_anchor.sh
+why     || #268: the writer (ob-fp-daemon) and the reader (pam_openbastion) run
+why     || at different depths of the same tree and must converge on the
+why     || OUTERMOST contiguous sshd-session. Stopping at the first keys them on
+why     || different pids, and the fingerprint binding then finds no drop --
+why     || silently, with no error at login.
+
+id      || sshd-anchor-contiguity
+file    || src/sshd_anchor.c
+search  || } else if (outermost) {
+replace || } else if (0) {
+suite   || tests/test_ob_sshd_anchor.sh
+why     || #268: only the outermost of the CONTIGUOUS run is the anchor. Climbing
+why     || past a break picks up an sshd-session belonging to another connection.

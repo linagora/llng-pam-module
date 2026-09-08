@@ -187,6 +187,20 @@ the `auth` line of certificate-mode PAM stacks, and the accepted permissions of
 
 ### Changed
 
+- **The sshd anchor walk lives in one place** (#268). `ob-fp-daemon` and
+  `pam_openbastion` each carried their own copy of the walk that derives the
+  per-connection sshd pid the fingerprint spool is keyed on, kept in step by a
+  comment saying they must agree exactly. Nothing checked that they did, and a
+  divergence would break the SSH fingerprint binding *silently*: no error at
+  login, the module simply finds no drop, and the reduction
+  `doc/security/99-risk-reduce.md` credits to R-S3 and R-S15 is gone. Both now
+  call `ob_find_sshd_anchor()` (`src/sshd_anchor.c`), and
+  `tests/test_sshd_anchor.c` drives it from the writer's and the reader's
+  depths over the same synthetic `/proc` ancestry, plus the depth limit, a
+  non-contiguous `sshd-session` chain, pid 1, a vanished parent and a
+  self-parenting one. Two entries in `tests/mutation/catalogue` fail if the
+  outermost-ancestor rule or the contiguity break is removed. No behaviour
+  change: the shared walk is what both copies already did.
 - **systemd units live in one place** (#254). The Debian packaging kept a second
   copy of the socket units for `dh_installsystemd`'s `package.NAME.socket` form,
   and the copies drifted — `a9a28d8` added `UMask=0077` and the syscall filter to

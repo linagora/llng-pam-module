@@ -67,6 +67,8 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "sshd_anchor.h"
+
 #ifndef OB_FP_SPOOL_DIR
 #define OB_FP_SPOOL_DIR "/run/open-bastion/ssh-fp"
 #endif
@@ -101,8 +103,6 @@
 #define OB_FP_REQ_MAX   20480
 #define OB_FP_FP_MAX      512
 #define OB_FP_ALG_MAX      64
-
-#define OB_FP_PROC_MAX_DEPTH 16
 
 static void reply(int ok, const char *msg)
 {
@@ -209,66 +209,13 @@ static uid_t helper_uid(void)
 
 /* ---------------------------------------------------------------- proc walking */
 
-static int read_proc_line(const char *path, char *out, size_t out_sz)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    if (!fgets(out, (int)out_sz, f)) { fclose(f); return -1; }
-    fclose(f);
-    char *nl = strchr(out, '\n');
-    if (nl) *nl = '\0';
-    return 0;
-}
-
-static pid_t proc_ppid(pid_t pid)
-{
-    char path[64], line[256];
-    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
-    pid_t ppid = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "PPid:", 5) == 0) {
-            ppid = (pid_t)strtol(line + 5, NULL, 10);
-            break;
-        }
-    }
-    fclose(f);
-    return ppid;
-}
-
 /*
- * The anchor for `pid`: the OUTERMOST contiguous "sshd-session" ancestor (the
- * per-connection privileged monitor), or the first "sshd" ancestor on
- * pre-split OpenSSH (< 9.8, e.g. Rocky 9's 8.7).
- *
- * This MUST agree exactly with pam_openbastion's find_sshd_session_ancestor(),
- * or the module looks for a drop under a key this daemon never wrote. The two
- * differ only in their starting point: the module starts at its own pid, this
- * starts at the peer's.
+ * The anchor is derived by ob_find_sshd_anchor() (src/sshd_anchor.c), the same
+ * function pam_openbastion calls. It used to be a second copy of that walk
+ * here, kept in step by a comment; the two differ only in their starting point,
+ * and that is now the only thing this file says about it -- the module starts
+ * at its own pid, this starts at the peer's.
  */
-static pid_t find_anchor(pid_t pid)
-{
-    pid_t outermost = 0;
-    for (int i = 0; i < OB_FP_PROC_MAX_DEPTH && pid > 1; i++) {
-        char path[64], comm[256];
-        snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
-        if (read_proc_line(path, comm, sizeof(comm)) != 0) return outermost;
-
-        if (strcmp(comm, "sshd-session") == 0) {
-            outermost = pid;             /* keep climbing for an outer one */
-        } else if (outermost) {
-            return outermost;            /* left the chain: monitor found */
-        } else if (strcmp(comm, "sshd") == 0) {
-            return pid;                  /* pre-split OpenSSH */
-        }
-
-        pid_t ppid = proc_ppid(pid);
-        if (ppid <= 0) return outermost;
-        pid = ppid;
-    }
-    return outermost;
-}
 
 /* ------------------------------------------------------------------- the spool */
 
@@ -399,7 +346,7 @@ int main(void)
 
     /*
      * The peer must still exist for its ancestry to mean anything. This is a
-     * liveness check and nothing more: find_anchor() below reopens /proc by
+     * liveness check and nothing more: the anchor walk below reopens /proc by
      * path, so holding a descriptor here would not pin the walk against pid
      * recycling. Closing that window properly would mean comparing the peer's
      * start time before and after, and it is not worth it -- to exploit the
@@ -419,7 +366,7 @@ int main(void)
      * 2. The anchor is derived, never received. This is what stops a nobody
      *    process from depositing on a session it is not part of.
      */
-    pid_t anchor = find_anchor(cred.pid);
+    pid_t anchor = ob_find_sshd_anchor(cred.pid);
     if (anchor <= 1) {
         reply(0, "no sshd-session ancestor: refusing a deposit that is not "
                  "part of an SSH connection");

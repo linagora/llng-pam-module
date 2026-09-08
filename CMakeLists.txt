@@ -43,6 +43,7 @@ set(PAM_MODULE_SOURCES
     src/crowdsec.c
     src/service_account.c
     src/ssh_key_policy.c
+    src/sshd_anchor.c
     src/str_utils.c
 )
 
@@ -330,7 +331,8 @@ install(TARGETS ob-cert-request
 # account. ob-fp-daemon (root) owns a 0700 spool and derives the sshd anchor
 # from the depositing process's own /proc ancestry; ob-fp-submit is what the
 # AuthorizedPrincipalsCommand helper pipes to -- no sudo, no setuid.
-add_executable(ob-fp-daemon src/ob-fp-daemon.c)
+add_executable(ob-fp-daemon src/ob-fp-daemon.c src/sshd_anchor.c)
+target_include_directories(ob-fp-daemon PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_options(ob-fp-daemon PRIVATE
     -Wall -Wextra -Werror
     -D_GNU_SOURCE
